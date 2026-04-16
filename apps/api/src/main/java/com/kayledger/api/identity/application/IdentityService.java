@@ -5,6 +5,7 @@ import java.util.Set;
 import java.util.UUID;
 
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import com.kayledger.api.access.application.AccessContext;
 import com.kayledger.api.access.application.AccessPolicy;
@@ -53,12 +54,16 @@ public class IdentityService {
         this.accessPolicy = accessPolicy;
     }
 
-    public Actor createActor(String actorKey, String displayName, List<String> platformRoles) {
-        Actor actor = actorStore.create(requireText(actorKey, "actorKey"), requireText(displayName, "displayName"));
-        for (String role : platformRoles == null ? List.<String>of() : platformRoles) {
-            platformRoleStore.create(actor.id(), accessPolicy.validatePlatformRole(role));
-        }
-        return actor;
+    @Transactional
+    public Actor createActor(String actorKey, String displayName) {
+        return actorStore.create(requireText(actorKey, "actorKey"), requireText(displayName, "displayName"));
+    }
+
+    @Transactional
+    public void grantOperatorRole(String actorKey) {
+        Actor actor = actorStore.findActiveByActorKey(requireText(actorKey, "actorKey"))
+                .orElseThrow(() -> new BadRequestException("actorKey does not identify an active actor."));
+        platformRoleStore.create(actor.id(), PlatformRole.OPERATOR);
     }
 
     public List<Actor> listActors(AccessContext context) {
@@ -67,6 +72,7 @@ public class IdentityService {
         return actorStore.listForWorkspace(context.workspaceId());
     }
 
+    @Transactional
     public WorkspaceMembership createMembership(
             AccessContext context,
             String workspaceSlug,
@@ -76,6 +82,9 @@ public class IdentityService {
         Workspace workspace = workspaceStore.findBySlug(requireText(workspaceSlug, "workspaceSlug"))
                 .orElseThrow(() -> new BadRequestException("workspaceSlug does not exist."));
         String workspaceRole = accessPolicy.validateWorkspaceRole(role);
+        List<String> durableScopes = scopes == null || scopes.isEmpty()
+                ? accessPolicy.defaultScopesForRole(workspaceRole)
+                : scopes.stream().map(accessPolicy::validateScope).toList();
         int existingMemberships = membershipStore.countForWorkspace(workspace.id());
         if (existingMemberships == 0) {
             if (!WorkspaceRole.OWNER.equals(workspaceRole)) {
@@ -93,9 +102,6 @@ public class IdentityService {
         }
 
         WorkspaceMembership membership = membershipStore.create(workspace.id(), actorId, workspaceRole);
-        List<String> durableScopes = scopes == null || scopes.isEmpty()
-                ? accessPolicy.defaultScopesForRole(workspaceRole)
-                : scopes.stream().map(accessPolicy::validateScope).toList();
         durableScopes.forEach(scope -> scopeStore.create(membership.id(), scope));
         return membership;
     }

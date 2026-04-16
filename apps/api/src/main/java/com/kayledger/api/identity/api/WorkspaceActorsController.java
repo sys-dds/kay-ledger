@@ -34,7 +34,7 @@ public class WorkspaceActorsController {
 
     @PostMapping("/actors")
     Actor createActor(@RequestBody CreateActorRequest request) {
-        return identityService.createActor(request.actorKey(), request.displayName(), request.platformRoles());
+        return identityService.createActor(request.actorKey(), request.displayName());
     }
 
     @GetMapping("/actors")
@@ -100,7 +100,7 @@ public class WorkspaceActorsController {
         return accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
     }
 
-    record CreateActorRequest(String actorKey, String displayName, List<String> platformRoles) {
+    record CreateActorRequest(String actorKey, String displayName) {
     }
 
     record CreateMembershipRequest(String workspaceSlug, UUID actorId, String role, List<String> scopes) {

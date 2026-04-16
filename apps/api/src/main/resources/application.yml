@@ -25,3 +25,7 @@ integrations:
     url: ${KAY_LEDGER_REDIS_URL:redis://localhost:6379}
   kafka:
     bootstrap-servers: ${KAY_LEDGER_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+
+kay-ledger:
+  bootstrap:
+    operator-admin-key: ${KAY_LEDGER_BOOTSTRAP_OPERATOR_ADMIN_KEY:}
