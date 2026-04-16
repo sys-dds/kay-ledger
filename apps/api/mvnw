@@ -1,0 +1,26 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+MAVEN_VERSION=3.9.14
+MAVEN_DISTS_DIR="${MAVEN_WRAPPER_DISTS_DIR:-${CODEX_SCRATCH:-/tmp/codex-scratch}/maven}"
+MAVEN_HOME="${MAVEN_DISTS_DIR}/apache-maven-${MAVEN_VERSION}"
+MAVEN_BIN="${MAVEN_HOME}/bin/mvn"
+
+if [ ! -x "$MAVEN_BIN" ]; then
+  ARCHIVE="${MAVEN_DISTS_DIR}/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+  mkdir -p "${MAVEN_DISTS_DIR}"
+  if [ ! -f "$ARCHIVE" ]; then
+    if command -v curl >/dev/null 2>&1; then
+      curl -fsSL "https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "$ARCHIVE"
+    elif command -v wget >/dev/null 2>&1; then
+      wget -q "https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -O "$ARCHIVE"
+    else
+      echo "curl or wget is required to install Maven ${MAVEN_VERSION}" >&2
+      exit 1
+    fi
+  fi
+  tar -xzf "$ARCHIVE" -C "${MAVEN_DISTS_DIR}"
+fi
+
+exec "$MAVEN_BIN" -f "${SCRIPT_DIR}/pom.xml" "$@"
