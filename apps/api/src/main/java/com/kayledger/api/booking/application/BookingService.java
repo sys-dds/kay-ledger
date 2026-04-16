@@ -149,6 +149,7 @@ public class BookingService {
         requireNotice(offering, scheduledStartAt, now);
         requireSlotAlignment(offering, scheduledStartAt);
         requireAvailability(context.workspaceId(), offering, scheduledStartAt, scheduledEndAt);
+        bookingStore.expireHeldForOffering(context.workspaceId(), offering.id(), now);
         return bookingStore.createHeld(
                 context.workspaceId(),
                 offering.id(),

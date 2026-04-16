@@ -140,19 +140,30 @@ class Kay002Kay003BookingContentionIntegrationTest {
         Map<String, Object> expired = post("/api/bookings/" + expiringId + "/expire", customerHeaders, Map.of());
         assertThat(((Map<?, ?>) expired.get("booking")).get("status")).isEqualTo("EXPIRED");
 
+        Map<String, Object> staleScheduled = post("/api/bookings", customerHeaders, scheduledBooking(scheduledId, customerProfile.get("id"), "2030-01-07T13:00:00Z", "2030-01-07T14:00:00Z", 0));
+        assertThat(((Map<?, ?>) staleScheduled.get("booking")).get("status")).isEqualTo("HELD");
+        Map<String, Object> afterStaleRelease = post("/api/bookings", customerHeaders, scheduledBooking(scheduledId, customerProfile.get("id"), "2030-01-07T13:00:00Z", "2030-01-07T14:00:00Z", 900));
+        assertThat(((Map<?, ?>) afterStaleRelease.get("booking")).get("status")).isEqualTo("HELD");
+
         List<HttpStatus> contentionStatuses = runConcurrentSlotRequests(customerHeaders, scheduledId, customerProfile.get("id"));
         assertThat(contentionStatuses).contains(HttpStatus.OK, HttpStatus.BAD_REQUEST);
+
+        Map<String, Object> raceQuantity = post("/api/offerings", ownerHeaders, quantityOffering(providerProfile.get("id"), "Race Quantity", 1, false, false));
+        String raceQuantityId = offeringId(raceQuantity);
+        post("/api/offerings/" + raceQuantityId + "/publish", ownerHeaders, Map.of());
+        List<HttpStatus> quantityContentionStatuses = runConcurrentQuantityRequests(customerHeaders, raceQuantityId, customerProfile.get("id"));
+        assertThat(quantityContentionStatuses).containsExactlyInAnyOrder(HttpStatus.OK, HttpStatus.BAD_REQUEST);
     }
 
     private List<HttpStatus> runConcurrentSlotRequests(HttpHeaders headers, String offeringId, Object customerProfileId) throws Exception {
         ExecutorService executor = Executors.newFixedThreadPool(2);
         try {
-            Callable<HttpStatus> task = () -> exchange(
+            Callable<HttpStatus> task = () -> statusOf(exchange(
                     "/api/bookings",
                     HttpMethod.POST,
                     headers,
                     scheduledBooking(offeringId, customerProfileId, "2030-01-07T12:00:00Z", "2030-01-07T13:00:00Z", 900),
-                    String.class).getStatusCode().isSameCodeAs(HttpStatus.OK) ? HttpStatus.OK : HttpStatus.BAD_REQUEST;
+                    String.class));
             List<Future<HttpStatus>> futures = executor.invokeAll(List.of(task, task));
             List<HttpStatus> statuses = new ArrayList<>();
             for (Future<HttpStatus> future : futures) {
@@ -162,6 +173,30 @@ class Kay002Kay003BookingContentionIntegrationTest {
         } finally {
             executor.shutdownNow();
         }
+    }
+
+    private List<HttpStatus> runConcurrentQuantityRequests(HttpHeaders headers, String offeringId, Object customerProfileId) throws Exception {
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Callable<HttpStatus> task = () -> statusOf(exchange(
+                    "/api/bookings",
+                    HttpMethod.POST,
+                    headers,
+                    quantityBooking(offeringId, customerProfileId, 1, 900),
+                    String.class));
+            List<Future<HttpStatus>> futures = executor.invokeAll(List.of(task, task));
+            List<HttpStatus> statuses = new ArrayList<>();
+            for (Future<HttpStatus> future : futures) {
+                statuses.add(future.get());
+            }
+            return statuses;
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    private HttpStatus statusOf(ResponseEntity<?> response) {
+        return HttpStatus.valueOf(response.getStatusCode().value());
     }
 
     private Map<String, Object> scheduledOffering(Object providerProfileId, String title, boolean includeAvailability, boolean badQuantityField, Object ignored) {

@@ -3,6 +3,7 @@ package com.kayledger.api.identity.api;
 import java.util.List;
 import java.util.UUID;
 
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -19,6 +20,7 @@ import com.kayledger.api.identity.ProviderProfile;
 import com.kayledger.api.identity.WorkspaceMembership;
 import com.kayledger.api.identity.application.IdentityService;
 import com.kayledger.api.shared.api.BadRequestException;
+import com.kayledger.api.shared.idempotency.IdempotencyService;
 
 @RestController
 @RequestMapping("/api")
@@ -26,16 +28,21 @@ public class WorkspaceActorsController {
 
     private final IdentityService identityService;
     private final AccessContextResolver accessContextResolver;
+    private final IdempotencyService idempotencyService;
 
     public WorkspaceActorsController(
             IdentityService identityService,
-            AccessContextResolver accessContextResolver) {
+            AccessContextResolver accessContextResolver,
+            IdempotencyService idempotencyService) {
         this.identityService = identityService;
         this.accessContextResolver = accessContextResolver;
+        this.idempotencyService = idempotencyService;
     }
 
     @PostMapping("/actors")
-    Actor createActor(@RequestBody CreateActorRequest request) {
+    ResponseEntity<Object> createActor(
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @RequestBody CreateActorRequest request) {
         if (request.platformRoles() != null
                 || request.platformRole() != null
                 || request.operatorRole() != null
@@ -44,7 +51,14 @@ public class WorkspaceActorsController {
                 || request.operatorRoleSnake() != null) {
             throw new BadRequestException("Platform/operator role assignment is not allowed on public actor creation.");
         }
-        return identityService.createActor(request.actorKey(), request.displayName());
+        return idempotencyService.run(
+                idempotencyKey,
+                "GLOBAL",
+                null,
+                null,
+                "POST /api/actors",
+                IdempotencyService.fingerprint(request),
+                () -> identityService.createActor(request.actorKey(), request.displayName()));
     }
 
     @GetMapping("/actors")
@@ -56,12 +70,20 @@ public class WorkspaceActorsController {
     }
 
     @PostMapping("/memberships")
-    WorkspaceMembership createMembership(
+    ResponseEntity<Object> createMembership(
             @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
             @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
             @RequestBody CreateMembershipRequest request) {
         AccessContext context = workspaceSlug == null || actorKey == null ? null : resolve(workspaceSlug, actorKey);
-        return identityService.createMembership(context, request.workspaceSlug(), request.actorId(), request.role(), request.scopes());
+        return idempotencyService.run(
+                idempotencyKey,
+                context == null ? "GLOBAL" : "WORKSPACE",
+                context == null ? null : context.workspaceId(),
+                context == null ? null : context.actorId(),
+                "POST /api/memberships",
+                IdempotencyService.fingerprint(workspaceSlug, actorKey, request),
+                () -> identityService.createMembership(context, request.workspaceSlug(), request.actorId(), request.role(), request.scopes()));
     }
 
     @GetMapping("/memberships")
@@ -73,12 +95,20 @@ public class WorkspaceActorsController {
     }
 
     @PostMapping("/provider-profiles")
-    ProviderProfile createProviderProfile(
+    ResponseEntity<Object> createProviderProfile(
             @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
             @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
             @RequestBody CreateProfileRequest request) {
         AccessContext context = resolve(workspaceSlug, actorKey);
-        return identityService.createProviderProfile(context, request.actorId(), request.displayName());
+        return idempotencyService.run(
+                idempotencyKey,
+                "WORKSPACE",
+                context.workspaceId(),
+                context.actorId(),
+                "POST /api/provider-profiles",
+                IdempotencyService.fingerprint(workspaceSlug, actorKey, request),
+                () -> identityService.createProviderProfile(context, request.actorId(), request.displayName()));
     }
 
     @GetMapping("/provider-profiles")
@@ -90,12 +120,20 @@ public class WorkspaceActorsController {
     }
 
     @PostMapping("/customer-profiles")
-    CustomerProfile createCustomerProfile(
+    ResponseEntity<Object> createCustomerProfile(
             @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
             @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
             @RequestBody CreateProfileRequest request) {
         AccessContext context = resolve(workspaceSlug, actorKey);
-        return identityService.createCustomerProfile(context, request.actorId(), request.displayName());
+        return idempotencyService.run(
+                idempotencyKey,
+                "WORKSPACE",
+                context.workspaceId(),
+                context.actorId(),
+                "POST /api/customer-profiles",
+                IdempotencyService.fingerprint(workspaceSlug, actorKey, request),
+                () -> identityService.createCustomerProfile(context, request.actorId(), request.displayName()));
     }
 
     @GetMapping("/customer-profiles")
