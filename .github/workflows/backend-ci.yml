@@ -1,14 +1,8 @@
 name: Backend CI
 
 on:
-  push:
-    paths:
-      - "apps/api/**"
-      - ".github/workflows/backend-ci.yml"
+  workflow_dispatch:
   pull_request:
-    paths:
-      - "apps/api/**"
-      - ".github/workflows/backend-ci.yml"
 
 jobs:
   api:
@@ -21,11 +15,16 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-      - name: Prepare Maven wrapper
-        run: chmod +x apps/api/mvnw
+          cache: maven
       - name: Run foundation integration test
         working-directory: apps/api
-        run: ./mvnw "-Dtest=FoundationBootstrapIntegrationTest" test
+        run: |
+          chmod +x ./mvnw
+          ./mvnw "-Dtest=FoundationBootstrapIntegrationTest" test
       - name: Compile backend
         working-directory: apps/api
-        run: ./mvnw -DskipTests compile
+        run: |
+          chmod +x ./mvnw
+          ./mvnw -DskipTests compile
+      - name: Validate foundation compose
+        run: docker compose -f infra/docker-compose/docker-compose.yml config
