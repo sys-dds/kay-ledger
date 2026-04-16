@@ -21,7 +21,7 @@ jobs:
         working-directory: apps/api
         run: |
           chmod +x ./mvnw
-          ./mvnw "-Dtest=Kay001DomainBackboneIntegrationTest" test
+          ./mvnw "-Dtest=Kay001Kay002RecoveryIntegrationTest" test
 
       - name: Compile backend
         working-directory: apps/api

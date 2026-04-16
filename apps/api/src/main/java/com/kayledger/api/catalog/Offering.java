@@ -9,8 +9,13 @@ public record Offering(
         UUID providerProfileId,
         String title,
         String status,
+        String offerType,
         String pricingMetadata,
         Integer durationMinutes,
+        Integer minNoticeMinutes,
+        Integer maxNoticeDays,
+        Integer slotIntervalMinutes,
+        Integer quantityAvailable,
         String schedulingMetadata,
         Instant createdAt,
         Instant updatedAt) {

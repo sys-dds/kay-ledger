@@ -41,7 +41,7 @@ public class AccessContextResolver {
     public AccessContext resolveWorkspace(String workspaceSlug, String actorKey) {
         Workspace workspace = workspaceStore.findBySlug(requireHeader(workspaceSlug, "X-Workspace-Slug"))
                 .orElseThrow(() -> new NotFoundException("Workspace was not found."));
-        Actor actor = actorStore.findByActorKey(requireHeader(actorKey, "X-Actor-Key"))
+        Actor actor = actorStore.findActiveByActorKey(requireHeader(actorKey, "X-Actor-Key"))
                 .orElseThrow(() -> new NotFoundException("Actor was not found."));
         WorkspaceMembership membership = membershipStore.findActive(workspace.id(), actor.id())
                 .orElseThrow(() -> new ForbiddenException("Actor is not an active member of this workspace."));
@@ -58,7 +58,7 @@ public class AccessContextResolver {
     }
 
     public OperatorContext resolveOperator(String actorKey) {
-        Actor actor = actorStore.findByActorKey(requireHeader(actorKey, "X-Actor-Key"))
+        Actor actor = actorStore.findActiveByActorKey(requireHeader(actorKey, "X-Actor-Key"))
                 .orElseThrow(() -> new NotFoundException("Actor was not found."));
         return new OperatorContext(
                 actor.id(),

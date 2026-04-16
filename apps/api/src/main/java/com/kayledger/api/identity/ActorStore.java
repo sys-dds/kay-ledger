@@ -60,6 +60,15 @@ public class ActorStore {
                 """, ACTOR_ROW_MAPPER, actorKey).stream().findFirst();
     }
 
+    public Optional<Actor> findActiveByActorKey(String actorKey) {
+        return jdbcTemplate.query("""
+                SELECT *
+                FROM actors
+                WHERE actor_key = ?
+                  AND status = 'ACTIVE'
+                """, ACTOR_ROW_MAPPER, actorKey).stream().findFirst();
+    }
+
     private static Instant instant(ResultSet rs, String column) throws SQLException {
         return rs.getTimestamp(column).toInstant();
     }

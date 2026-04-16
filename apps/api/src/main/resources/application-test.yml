@@ -10,3 +10,7 @@ management:
     web:
       exposure:
         include: health,metrics
+
+kay-ledger:
+  bootstrap:
+    operator-admin-key: test-bootstrap-operator-key
