@@ -3,7 +3,7 @@ setlocal
 
 set "SCRIPT_DIR=%~dp0"
 set "MAVEN_VERSION=3.9.14"
-if not defined MAVEN_WRAPPER_DISTS_DIR set "MAVEN_WRAPPER_DISTS_DIR=C:\Users\Ryzen-pc\Desktop\sys-dds\codex-scratch\maven"
+if not defined MAVEN_WRAPPER_DISTS_DIR set "MAVEN_WRAPPER_DISTS_DIR=%USERPROFILE%\.m2\wrapper\dists"
 set "MAVEN_HOME=%MAVEN_WRAPPER_DISTS_DIR%\apache-maven-%MAVEN_VERSION%"
 set "MAVEN_BIN=%MAVEN_HOME%\bin\mvn.cmd"
 

@@ -70,6 +70,10 @@ public class WorkspaceMembershipStore {
                 """, MEMBERSHIP_ROW_MAPPER, workspaceId, actorId).stream().findFirst();
     }
 
+    public Optional<WorkspaceMembership> findActiveByActor(UUID workspaceId, UUID actorId) {
+        return findActive(workspaceId, actorId);
+    }
+
     private static Instant instant(ResultSet rs, String column) throws SQLException {
         return rs.getTimestamp(column).toInstant();
     }

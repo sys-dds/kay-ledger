@@ -13,11 +13,13 @@ import org.springframework.web.bind.annotation.RestController;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.kayledger.api.access.application.AccessContext;
+import com.kayledger.api.access.application.AccessContextResolver;
+import com.kayledger.api.access.application.AccessPolicy;
+import com.kayledger.api.access.model.WorkspaceRole;
 import com.kayledger.api.catalog.Offering;
 import com.kayledger.api.catalog.OfferingStore;
 import com.kayledger.api.identity.ProfileStore;
-import com.kayledger.api.identity.application.AccessContext;
-import com.kayledger.api.identity.application.AccessContextResolver;
 import com.kayledger.api.shared.api.BadRequestException;
 
 @RestController
@@ -27,26 +29,29 @@ public class OfferingsController {
     private final OfferingStore offeringStore;
     private final ProfileStore profileStore;
     private final AccessContextResolver accessContextResolver;
+    private final AccessPolicy accessPolicy;
     private final ObjectMapper objectMapper;
 
     public OfferingsController(
             OfferingStore offeringStore,
             ProfileStore profileStore,
             AccessContextResolver accessContextResolver,
+            AccessPolicy accessPolicy,
             ObjectMapper objectMapper) {
         this.offeringStore = offeringStore;
         this.profileStore = profileStore;
         this.accessContextResolver = accessContextResolver;
+        this.accessPolicy = accessPolicy;
         this.objectMapper = objectMapper;
     }
 
     @PostMapping
     Offering create(
-            @RequestHeader("X-Workspace-Slug") String workspaceSlug,
-            @RequestHeader("X-Actor-Key") String actorKey,
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
             @RequestBody CreateOfferingRequest request) {
-        AccessContext context = accessContextResolver.resolve(workspaceSlug, actorKey);
-        context.requireAnyRole("OWNER", "ADMIN", "PROVIDER");
+        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
+        accessPolicy.requireWorkspaceRole(context, WorkspaceRole.OWNER, WorkspaceRole.ADMIN, WorkspaceRole.PROVIDER);
         profileStore.findProvider(context.workspaceId(), request.providerProfileId())
                 .orElseThrow(() -> new BadRequestException("providerProfileId is not valid for this workspace."));
         return offeringStore.create(
@@ -60,10 +65,9 @@ public class OfferingsController {
 
     @GetMapping
     List<Offering> list(
-            @RequestHeader("X-Workspace-Slug") String workspaceSlug,
-            @RequestHeader("X-Actor-Key") String actorKey) {
-        AccessContext context = accessContextResolver.resolve(workspaceSlug, actorKey);
-        context.requireAnyRole("OWNER", "ADMIN", "PROVIDER", "CUSTOMER");
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey) {
+        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
         return offeringStore.listForWorkspace(context.workspaceId());
     }
 
