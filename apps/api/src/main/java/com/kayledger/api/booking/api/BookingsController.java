@@ -3,6 +3,7 @@ package com.kayledger.api.booking.api;
 import java.util.List;
 import java.util.UUID;
 
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -16,7 +17,7 @@ import com.kayledger.api.access.application.AccessContextResolver;
 import com.kayledger.api.booking.application.BookingService;
 import com.kayledger.api.booking.application.BookingService.CreateBookingCommand;
 import com.kayledger.api.booking.model.Booking;
-import com.kayledger.api.booking.model.BookingDetails;
+import com.kayledger.api.shared.idempotency.IdempotencyService;
 
 @RestController
 @RequestMapping("/api/bookings")
@@ -24,21 +25,32 @@ public class BookingsController {
 
     private final BookingService bookingService;
     private final AccessContextResolver accessContextResolver;
+    private final IdempotencyService idempotencyService;
 
     public BookingsController(
             BookingService bookingService,
-            AccessContextResolver accessContextResolver) {
+            AccessContextResolver accessContextResolver,
+            IdempotencyService idempotencyService) {
         this.bookingService = bookingService;
         this.accessContextResolver = accessContextResolver;
+        this.idempotencyService = idempotencyService;
     }
 
     @PostMapping
-    BookingDetails createHeld(
+    ResponseEntity<Object> createHeld(
             @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
             @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
             @RequestBody CreateBookingCommand request) {
         AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
-        return bookingService.createHeld(context, request);
+        return idempotencyService.run(
+                idempotencyKey,
+                "WORKSPACE",
+                context.workspaceId(),
+                context.actorId(),
+                "POST /api/bookings",
+                IdempotencyService.fingerprint(workspaceSlug, actorKey, request),
+                () -> bookingService.createHeld(context, request));
     }
 
     @GetMapping
@@ -50,20 +62,36 @@ public class BookingsController {
     }
 
     @PostMapping("/{bookingId}/cancel")
-    BookingDetails cancelHeld(
+    ResponseEntity<Object> cancelHeld(
             @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
             @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
             @PathVariable UUID bookingId) {
         AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
-        return bookingService.cancelHeld(context, bookingId);
+        return idempotencyService.run(
+                idempotencyKey,
+                "WORKSPACE",
+                context.workspaceId(),
+                context.actorId(),
+                "POST /api/bookings/{bookingId}/cancel",
+                IdempotencyService.fingerprint(workspaceSlug, actorKey, bookingId),
+                () -> bookingService.cancelHeld(context, bookingId));
     }
 
     @PostMapping("/{bookingId}/expire")
-    BookingDetails expireHeld(
+    ResponseEntity<Object> expireHeld(
             @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
             @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
             @PathVariable UUID bookingId) {
         AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
-        return bookingService.expireHeld(context, bookingId);
+        return idempotencyService.run(
+                idempotencyKey,
+                "WORKSPACE",
+                context.workspaceId(),
+                context.actorId(),
+                "POST /api/bookings/{bookingId}/expire",
+                IdempotencyService.fingerprint(workspaceSlug, actorKey, bookingId),
+                () -> bookingService.expireHeld(context, bookingId));
     }
 }
