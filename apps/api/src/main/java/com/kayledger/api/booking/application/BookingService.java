@@ -24,6 +24,9 @@ import com.kayledger.api.booking.store.BookingStore;
 import com.kayledger.api.catalog.Offering;
 import com.kayledger.api.catalog.OfferingAvailabilityWindow;
 import com.kayledger.api.catalog.OfferingStore;
+import com.kayledger.api.finance.application.FinanceService;
+import com.kayledger.api.finance.model.FeeBreakdown;
+import com.kayledger.api.finance.model.Money;
 import com.kayledger.api.identity.CustomerProfile;
 import com.kayledger.api.identity.ProfileStore;
 import com.kayledger.api.identity.ProviderProfile;
@@ -43,16 +46,19 @@ public class BookingService {
     private final OfferingStore offeringStore;
     private final ProfileStore profileStore;
     private final AccessPolicy accessPolicy;
+    private final FinanceService financeService;
 
     public BookingService(
             BookingStore bookingStore,
             OfferingStore offeringStore,
             ProfileStore profileStore,
-            AccessPolicy accessPolicy) {
+            AccessPolicy accessPolicy,
+            FinanceService financeService) {
         this.bookingStore = bookingStore;
         this.offeringStore = offeringStore;
         this.profileStore = profileStore;
         this.accessPolicy = accessPolicy;
+        this.financeService = financeService;
     }
 
     @Transactional
@@ -150,6 +156,7 @@ public class BookingService {
         requireSlotAlignment(offering, scheduledStartAt);
         requireAvailability(context.workspaceId(), offering, scheduledStartAt, scheduledEndAt);
         bookingStore.expireHeldForOffering(context.workspaceId(), offering.id(), now);
+        FeeBreakdown fees = financeService.calculateFees(context.workspaceId(), offering.id(), grossAmount(offering, 1));
         return bookingStore.createHeld(
                 context.workspaceId(),
                 offering.id(),
@@ -159,7 +166,11 @@ public class BookingService {
                 scheduledStartAt,
                 scheduledEndAt,
                 1,
-                holdExpiresAt);
+                holdExpiresAt,
+                fees.grossAmount().currencyCode(),
+                fees.grossAmount().amountMinor(),
+                fees.feeAmount().amountMinor(),
+                fees.netAmount().amountMinor());
     }
 
     private Booking createQuantityHold(
@@ -178,6 +189,7 @@ public class BookingService {
         if (activeQuantity + quantity > offering.quantityAvailable()) {
             throw new BadRequestException("Requested quantity exceeds available quantity.");
         }
+        FeeBreakdown fees = financeService.calculateFees(context.workspaceId(), offering.id(), grossAmount(offering, quantity));
         return bookingStore.createHeld(
                 context.workspaceId(),
                 offering.id(),
@@ -187,7 +199,20 @@ public class BookingService {
                 null,
                 null,
                 quantity,
-                holdExpiresAt);
+                holdExpiresAt,
+                fees.grossAmount().currencyCode(),
+                fees.grossAmount().amountMinor(),
+                fees.feeAmount().amountMinor(),
+                fees.netAmount().amountMinor());
+    }
+
+    private Money grossAmount(Offering offering, int quantity) {
+        var pricingRules = offeringStore.listPricingRules(offering.workspaceId(), offering.id());
+        if (pricingRules.isEmpty()) {
+            throw new BadRequestException("Offering has no active pricing rule.");
+        }
+        var rule = pricingRules.get(0);
+        return new Money(rule.currencyCode(), rule.amountMinor() * quantity);
     }
 
     private void requireNotice(Offering offering, Instant scheduledStartAt, Instant now) {

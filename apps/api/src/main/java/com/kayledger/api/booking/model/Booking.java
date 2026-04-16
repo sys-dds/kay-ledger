@@ -17,6 +17,11 @@ public record Booking(
         Instant holdExpiresAt,
         Instant confirmedAt,
         Instant cancelledAt,
+        String currencyCode,
+        Long grossAmountMinor,
+        Long feeAmountMinor,
+        Long netAmountMinor,
+        UUID financialReferenceId,
         Instant createdAt,
         Instant updatedAt) {
 }

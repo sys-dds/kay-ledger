@@ -60,6 +60,9 @@ class Kay003Kay004IdempotencyIntegrationTest {
         Map<String, Object> workspace = post("/api/workspaces", headers("idem-workspace"), workspaceBody("idem-alpha", "Idem Alpha"));
         Map<String, Object> workspaceReplay = post("/api/workspaces", headers("idem-workspace"), workspaceBody("idem-alpha", "Idem Alpha"));
         assertThat(workspaceReplay.get("id")).isEqualTo(workspace.get("id"));
+        List<Map<String, Object>> concurrentWorkspaceReplay = concurrentWorkspaceCreates(headers("idem-concurrent-workspace"), workspaceBody("idem-concurrent-alpha", "Idem Concurrent Alpha"));
+        assertThat(concurrentWorkspaceReplay).hasSize(2);
+        assertThat(concurrentWorkspaceReplay.get(0).get("id")).isEqualTo(concurrentWorkspaceReplay.get(1).get("id"));
 
         Map<String, Object> owner = post("/api/actors", headers("idem-owner"), actorBody("idem-owner", "Idem Owner"));
         Map<String, Object> ownerReplay = post("/api/actors", headers("idem-owner"), actorBody("idem-owner", "Idem Owner"));
@@ -170,6 +173,21 @@ class Kay003Kay004IdempotencyIntegrationTest {
                 statuses.add(future.get());
             }
             return statuses;
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    private List<Map<String, Object>> concurrentWorkspaceCreates(HttpHeaders headers, Map<String, Object> body) throws Exception {
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Callable<Map<String, Object>> task = () -> post("/api/workspaces", headers, body);
+            List<Future<Map<String, Object>>> futures = executor.invokeAll(List.of(task, task));
+            List<Map<String, Object>> responses = new ArrayList<>();
+            for (Future<Map<String, Object>> future : futures) {
+                responses.add(future.get());
+            }
+            return responses;
         } finally {
             executor.shutdownNow();
         }

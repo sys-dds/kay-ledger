@@ -87,14 +87,6 @@ public class IdempotencyStore {
                 """, responseStatusCode, responseBody, id);
     }
 
-    public void fail(UUID id) {
-        jdbcTemplate.update("""
-                UPDATE idempotency_records
-                SET status = 'FAILED'
-                WHERE id = ?
-                """, id);
-    }
-
     private static Instant instant(ResultSet rs, String column) throws SQLException {
         return rs.getTimestamp(column).toInstant();
     }
