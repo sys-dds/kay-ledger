@@ -32,7 +32,10 @@ public class AccessPolicy {
             AccessScope.ACCESS_CONTEXT_READ,
             AccessScope.CATALOG_READ,
             AccessScope.CATALOG_WRITE,
-            AccessScope.CATALOG_PUBLISH);
+            AccessScope.CATALOG_PUBLISH,
+            AccessScope.BOOKING_CREATE,
+            AccessScope.BOOKING_READ,
+            AccessScope.BOOKING_MANAGE);
 
     public void requireWorkspaceRole(AccessContext context, String... roles) {
         if (!Set.copyOf(Arrays.asList(roles)).contains(context.workspaceRole())) {
@@ -99,7 +102,10 @@ public class AccessPolicy {
                     AccessScope.ACCESS_CONTEXT_READ,
                     AccessScope.CATALOG_READ,
                     AccessScope.CATALOG_WRITE,
-                    AccessScope.CATALOG_PUBLISH);
+                    AccessScope.CATALOG_PUBLISH,
+                    AccessScope.BOOKING_CREATE,
+                    AccessScope.BOOKING_READ,
+                    AccessScope.BOOKING_MANAGE);
             case WorkspaceRole.PROVIDER -> List.of(
                     AccessScope.WORKSPACE_READ,
                     AccessScope.PROFILE_READ,
@@ -107,13 +113,16 @@ public class AccessPolicy {
                     AccessScope.ACCESS_CONTEXT_READ,
                     AccessScope.CATALOG_READ,
                     AccessScope.CATALOG_WRITE,
-                    AccessScope.CATALOG_PUBLISH);
+                    AccessScope.CATALOG_PUBLISH,
+                    AccessScope.BOOKING_READ);
             case WorkspaceRole.CUSTOMER -> List.of(
                     AccessScope.WORKSPACE_READ,
                     AccessScope.PROFILE_READ,
                     AccessScope.PROFILE_MANAGE,
                     AccessScope.ACCESS_CONTEXT_READ,
-                    AccessScope.CATALOG_READ);
+                    AccessScope.CATALOG_READ,
+                    AccessScope.BOOKING_CREATE,
+                    AccessScope.BOOKING_READ);
             default -> throw new BadRequestException("role is invalid.");
         };
     }

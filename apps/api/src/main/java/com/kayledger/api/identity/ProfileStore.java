@@ -82,6 +82,15 @@ public class ProfileStore {
                 """, CUSTOMER_ROW_MAPPER, workspaceId, actorId, displayName);
     }
 
+    public Optional<CustomerProfile> findCustomer(UUID workspaceId, UUID customerProfileId) {
+        return jdbcTemplate.query("""
+                SELECT *
+                FROM customer_profiles
+                WHERE workspace_id = ?
+                  AND id = ?
+                """, CUSTOMER_ROW_MAPPER, workspaceId, customerProfileId).stream().findFirst();
+    }
+
     public List<CustomerProfile> listCustomers(UUID workspaceId) {
         return jdbcTemplate.query("""
                 SELECT *

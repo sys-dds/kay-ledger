@@ -10,6 +10,7 @@ import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.kayledger.api.access.application.AccessContext;
 import com.kayledger.api.access.application.AccessContextResolver;
 import com.kayledger.api.identity.Actor;
@@ -17,6 +18,7 @@ import com.kayledger.api.identity.CustomerProfile;
 import com.kayledger.api.identity.ProviderProfile;
 import com.kayledger.api.identity.WorkspaceMembership;
 import com.kayledger.api.identity.application.IdentityService;
+import com.kayledger.api.shared.api.BadRequestException;
 
 @RestController
 @RequestMapping("/api")
@@ -34,6 +36,14 @@ public class WorkspaceActorsController {
 
     @PostMapping("/actors")
     Actor createActor(@RequestBody CreateActorRequest request) {
+        if (request.platformRoles() != null
+                || request.platformRole() != null
+                || request.operatorRole() != null
+                || request.platformRolesSnake() != null
+                || request.platformRoleSnake() != null
+                || request.operatorRoleSnake() != null) {
+            throw new BadRequestException("Platform/operator role assignment is not allowed on public actor creation.");
+        }
         return identityService.createActor(request.actorKey(), request.displayName());
     }
 
@@ -100,7 +110,15 @@ public class WorkspaceActorsController {
         return accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
     }
 
-    record CreateActorRequest(String actorKey, String displayName) {
+    record CreateActorRequest(
+            String actorKey,
+            String displayName,
+            Object platformRoles,
+            Object platformRole,
+            Object operatorRole,
+            @JsonProperty("platform_roles") Object platformRolesSnake,
+            @JsonProperty("platform_role") Object platformRoleSnake,
+            @JsonProperty("operator_role") Object operatorRoleSnake) {
     }
 
     record CreateMembershipRequest(String workspaceSlug, UUID actorId, String role, List<String> scopes) {

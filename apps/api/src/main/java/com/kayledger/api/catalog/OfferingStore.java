@@ -220,6 +220,31 @@ public class OfferingStore {
                 """, OFFERING_ROW_MAPPER, workspaceId, offeringId).stream().findFirst();
     }
 
+    public Optional<Offering> findForWorkspaceForUpdate(UUID workspaceId, UUID offeringId) {
+        return jdbcTemplate.query("""
+                SELECT
+                    id,
+                    workspace_id,
+                    provider_profile_id,
+                    title,
+                    status,
+                    offer_type,
+                    pricing_metadata::text AS pricing_metadata,
+                    duration_minutes,
+                    min_notice_minutes,
+                    max_notice_days,
+                    slot_interval_minutes,
+                    quantity_available,
+                    scheduling_metadata::text AS scheduling_metadata,
+                    created_at,
+                    updated_at
+                FROM offerings
+                WHERE workspace_id = ?
+                  AND id = ?
+                FOR UPDATE
+                """, OFFERING_ROW_MAPPER, workspaceId, offeringId).stream().findFirst();
+    }
+
     public Offering publish(UUID workspaceId, UUID offeringId) {
         return changeStatus(workspaceId, offeringId, "PUBLISHED");
     }
