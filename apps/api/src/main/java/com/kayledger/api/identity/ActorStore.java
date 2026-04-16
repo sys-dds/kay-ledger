@@ -41,14 +41,6 @@ public class ActorStore {
                 """, ACTOR_ROW_MAPPER, actorKey, displayName);
     }
 
-    public List<Actor> list() {
-        return jdbcTemplate.query("""
-                SELECT *
-                FROM actors
-                ORDER BY created_at, actor_key
-                """, ACTOR_ROW_MAPPER);
-    }
-
     public List<Actor> listForWorkspace(UUID workspaceId) {
         return jdbcTemplate.query("""
                 SELECT a.*

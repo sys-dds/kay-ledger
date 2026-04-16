@@ -3,12 +3,13 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 MAVEN_VERSION=3.9.14
-MAVEN_HOME="${HOME}/.m2/wrapper/dists/apache-maven-${MAVEN_VERSION}"
+MAVEN_DISTS_DIR="${MAVEN_WRAPPER_DISTS_DIR:-${CODEX_SCRATCH:-/tmp/codex-scratch}/maven}"
+MAVEN_HOME="${MAVEN_DISTS_DIR}/apache-maven-${MAVEN_VERSION}"
 MAVEN_BIN="${MAVEN_HOME}/bin/mvn"
 
 if [ ! -x "$MAVEN_BIN" ]; then
-  ARCHIVE="${HOME}/.m2/wrapper/dists/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
-  mkdir -p "${HOME}/.m2/wrapper/dists"
+  ARCHIVE="${MAVEN_DISTS_DIR}/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+  mkdir -p "${MAVEN_DISTS_DIR}"
   if [ ! -f "$ARCHIVE" ]; then
     if command -v curl >/dev/null 2>&1; then
       curl -fsSL "https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "$ARCHIVE"
@@ -19,7 +20,7 @@ if [ ! -x "$MAVEN_BIN" ]; then
       exit 1
     fi
   fi
-  tar -xzf "$ARCHIVE" -C "${HOME}/.m2/wrapper/dists"
+  tar -xzf "$ARCHIVE" -C "${MAVEN_DISTS_DIR}"
 fi
 
 exec "$MAVEN_BIN" -f "${SCRIPT_DIR}/pom.xml" "$@"
