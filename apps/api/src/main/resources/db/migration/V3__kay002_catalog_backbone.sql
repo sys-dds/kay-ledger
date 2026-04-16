@@ -72,7 +72,7 @@ ALTER TABLE offerings
     ADD CONSTRAINT offerings_offer_type_shape_check CHECK (
         (offer_type = 'SCHEDULED_TIME' AND duration_minutes IS NOT NULL AND slot_interval_minutes IS NOT NULL AND quantity_available IS NULL)
         OR
-        (offer_type = 'QUANTITY' AND quantity_available IS NOT NULL)
+        (offer_type = 'QUANTITY' AND quantity_available IS NOT NULL AND duration_minutes IS NULL AND max_notice_days IS NULL AND slot_interval_minutes IS NULL)
     ),
     ADD CONSTRAINT offerings_workspace_id_unique UNIQUE (workspace_id, id);
 

@@ -54,9 +54,15 @@ public class CatalogService {
         accessPolicy.requireScope(context, AccessScope.CATALOG_WRITE);
         ProviderProfile providerProfile = providerProfile(context, command.providerProfileId());
         enforceProviderOwnership(context, providerProfile);
-        validateOfferShape(command.offerType(), command.durationMinutes(), command.slotIntervalMinutes(), command.quantityAvailable());
+        validateOfferShape(
+                command.offerType(),
+                command.durationMinutes(),
+                command.minNoticeMinutes(),
+                command.maxNoticeDays(),
+                command.slotIntervalMinutes(),
+                command.quantityAvailable());
         validatePricingRules(command.pricingRules());
-        validateAvailabilityWindows(command.availabilityWindows());
+        validateAvailabilityPosture(command.offerType(), command.availabilityWindows());
 
         Offering offering = offeringStore.createDraft(
                 context.workspaceId(),
@@ -85,6 +91,10 @@ public class CatalogService {
         accessPolicy.requireWorkspaceRole(context, WorkspaceRole.OWNER, WorkspaceRole.ADMIN, WorkspaceRole.PROVIDER);
         accessPolicy.requireScope(context, AccessScope.CATALOG_PUBLISH);
         Offering offering = offering(context, offeringId);
+        if (!"DRAFT".equals(offering.status())) {
+            throw new BadRequestException("Only DRAFT offerings can be published.");
+        }
+        ensurePublishReady(context.workspaceId(), offering);
         enforceProviderOwnership(context, providerProfile(context, offering.providerProfileId()));
         Offering published = offeringStore.publish(context.workspaceId(), offeringId);
         return details(context.workspaceId(), published);
@@ -95,6 +105,9 @@ public class CatalogService {
         accessPolicy.requireWorkspaceRole(context, WorkspaceRole.OWNER, WorkspaceRole.ADMIN, WorkspaceRole.PROVIDER);
         accessPolicy.requireScope(context, AccessScope.CATALOG_PUBLISH);
         Offering offering = offering(context, offeringId);
+        if (!List.of("DRAFT", "PUBLISHED").contains(offering.status())) {
+            throw new BadRequestException("Only DRAFT or PUBLISHED offerings can be archived.");
+        }
         enforceProviderOwnership(context, providerProfile(context, offering.providerProfileId()));
         Offering archived = offeringStore.archive(context.workspaceId(), offeringId);
         return details(context.workspaceId(), archived);
@@ -123,6 +136,15 @@ public class CatalogService {
     private void enforceProviderOwnership(AccessContext context, ProviderProfile providerProfile) {
         if (WorkspaceRole.PROVIDER.equals(context.workspaceRole()) && !providerProfile.actorId().equals(context.actorId())) {
             throw new ForbiddenException("Providers can only manage their own offerings.");
+        }
+    }
+
+    private void ensurePublishReady(UUID workspaceId, Offering offering) {
+        if (offeringStore.listPricingRules(workspaceId, offering.id()).isEmpty()) {
+            throw new BadRequestException("Offering must have at least one active pricing rule before publish.");
+        }
+        if (SCHEDULED_TIME.equals(offering.offerType()) && offeringStore.listAvailabilityWindows(workspaceId, offering.id()).isEmpty()) {
+            throw new BadRequestException("Scheduled-time offering must have at least one active availability window before publish.");
         }
     }
 
@@ -172,6 +194,14 @@ public class CatalogService {
         });
     }
 
+    private void validateAvailabilityPosture(String offerType, List<AvailabilityWindowCommand> availabilityWindows) {
+        List<AvailabilityWindowCommand> windows = availabilityWindows == null ? List.of() : availabilityWindows;
+        if (QUANTITY.equals(requireOfferType(offerType)) && !windows.isEmpty()) {
+            throw new BadRequestException("Quantity offerings must not define availability windows.");
+        }
+        validateAvailabilityWindows(windows);
+    }
+
     private void validateAvailabilityWindows(List<AvailabilityWindowCommand> availabilityWindows) {
         List<AvailabilityWindowCommand> windows = availabilityWindows == null ? List.of() : availabilityWindows;
         windows.forEach(window -> {
@@ -187,17 +217,35 @@ public class CatalogService {
         });
     }
 
-    private void validateOfferShape(String offerType, Integer durationMinutes, Integer slotIntervalMinutes, Integer quantityAvailable) {
+    private void validateOfferShape(
+            String offerType,
+            Integer durationMinutes,
+            Integer minNoticeMinutes,
+            Integer maxNoticeDays,
+            Integer slotIntervalMinutes,
+            Integer quantityAvailable) {
         String requiredOfferType = requireOfferType(offerType);
         if (SCHEDULED_TIME.equals(requiredOfferType)) {
             requirePositive(durationMinutes, "durationMinutes");
             requirePositive(slotIntervalMinutes, "slotIntervalMinutes");
+            if (minNoticeMinutes != null && minNoticeMinutes < 0) {
+                throw new BadRequestException("minNoticeMinutes must be zero or greater.");
+            }
+            if (maxNoticeDays != null && maxNoticeDays <= 0) {
+                throw new BadRequestException("maxNoticeDays must be greater than zero.");
+            }
             if (quantityAvailable != null) {
                 throw new BadRequestException("quantityAvailable must be omitted for scheduled time offerings.");
             }
         }
         if (QUANTITY.equals(requiredOfferType)) {
             requirePositive(quantityAvailable, "quantityAvailable");
+            if (durationMinutes != null || slotIntervalMinutes != null || maxNoticeDays != null) {
+                throw new BadRequestException("Quantity offerings must omit scheduled-time fields.");
+            }
+            if (minNoticeMinutes != null && minNoticeMinutes != 0) {
+                throw new BadRequestException("Quantity offerings must omit scheduled-time fields.");
+            }
         }
     }
 

@@ -11,6 +11,9 @@ public final class AccessScope {
     public static final String CATALOG_READ = "CATALOG_READ";
     public static final String CATALOG_WRITE = "CATALOG_WRITE";
     public static final String CATALOG_PUBLISH = "CATALOG_PUBLISH";
+    public static final String BOOKING_CREATE = "BOOKING_CREATE";
+    public static final String BOOKING_READ = "BOOKING_READ";
+    public static final String BOOKING_MANAGE = "BOOKING_MANAGE";
 
     private AccessScope() {
     }
