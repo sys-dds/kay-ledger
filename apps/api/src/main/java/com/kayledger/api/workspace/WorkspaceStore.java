@@ -3,6 +3,7 @@ package com.kayledger.api.workspace;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -46,6 +47,14 @@ public class WorkspaceStore {
                 FROM workspaces
                 WHERE slug = ?
                 """, WORKSPACE_ROW_MAPPER, slug).stream().findFirst();
+    }
+
+    public List<Workspace> listAll() {
+        return jdbcTemplate.query("""
+                SELECT *
+                FROM workspaces
+                ORDER BY created_at, slug
+                """, WORKSPACE_ROW_MAPPER);
     }
 
     private static Instant instant(ResultSet rs, String column) throws SQLException {
