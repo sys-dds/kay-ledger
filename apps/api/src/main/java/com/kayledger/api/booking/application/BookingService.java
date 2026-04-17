@@ -23,6 +23,7 @@ import com.kayledger.api.booking.model.BookingHold;
 import com.kayledger.api.booking.store.BookingStore;
 import com.kayledger.api.catalog.Offering;
 import com.kayledger.api.catalog.OfferingAvailabilityWindow;
+import com.kayledger.api.catalog.OfferingPricingRule;
 import com.kayledger.api.catalog.OfferingStore;
 import com.kayledger.api.finance.application.FinanceService;
 import com.kayledger.api.finance.model.FeeBreakdown;
@@ -207,12 +208,25 @@ public class BookingService {
     }
 
     private Money grossAmount(Offering offering, int quantity) {
-        var pricingRules = offeringStore.listPricingRules(offering.workspaceId(), offering.id());
+        List<OfferingPricingRule> pricingRules = offeringStore.listPricingRules(offering.workspaceId(), offering.id());
         if (pricingRules.isEmpty()) {
             throw new BadRequestException("Offering has no active pricing rule.");
         }
-        var rule = pricingRules.get(0);
-        return new Money(rule.currencyCode(), rule.amountMinor() * quantity);
+        String currencyCode = pricingRules.get(0).currencyCode();
+        long grossAmountMinor = 0;
+        for (OfferingPricingRule rule : pricingRules) {
+            if (!currencyCode.equals(rule.currencyCode())) {
+                throw new BadRequestException("Offering pricing rules must use one currency.");
+            }
+            if ("FIXED_PRICE".equals(rule.ruleType())) {
+                grossAmountMinor += rule.amountMinor();
+            } else if ("PER_UNIT".equals(rule.ruleType())) {
+                grossAmountMinor += rule.amountMinor() * quantity;
+            } else {
+                throw new BadRequestException("Offering pricing rule type is not supported for booking.");
+            }
+        }
+        return new Money(currencyCode, grossAmountMinor);
     }
 
     private void requireNotice(Offering offering, Instant scheduledStartAt, Instant now) {

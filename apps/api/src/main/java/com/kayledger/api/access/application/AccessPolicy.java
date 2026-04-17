@@ -37,7 +37,9 @@ public class AccessPolicy {
             AccessScope.BOOKING_READ,
             AccessScope.BOOKING_MANAGE,
             AccessScope.FINANCE_READ,
-            AccessScope.FINANCE_WRITE);
+            AccessScope.FINANCE_WRITE,
+            AccessScope.PAYMENT_READ,
+            AccessScope.PAYMENT_WRITE);
 
     public void requireWorkspaceRole(AccessContext context, String... roles) {
         if (!Set.copyOf(Arrays.asList(roles)).contains(context.workspaceRole())) {
@@ -109,7 +111,9 @@ public class AccessPolicy {
                     AccessScope.BOOKING_READ,
                     AccessScope.BOOKING_MANAGE,
                     AccessScope.FINANCE_READ,
-                    AccessScope.FINANCE_WRITE);
+                    AccessScope.FINANCE_WRITE,
+                    AccessScope.PAYMENT_READ,
+                    AccessScope.PAYMENT_WRITE);
             case WorkspaceRole.PROVIDER -> List.of(
                     AccessScope.WORKSPACE_READ,
                     AccessScope.PROFILE_READ,

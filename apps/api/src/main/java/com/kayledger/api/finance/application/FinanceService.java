@@ -35,9 +35,12 @@ public class FinanceService {
             "FEE_REVENUE",
             "REFUND_RESERVE",
             "CLEARING",
-            "SUSPENSE");
+            "SUSPENSE",
+            "AUTHORIZED_FUNDS",
+            "CAPTURED_FUNDS",
+            "PLATFORM_CLEARING");
     private static final Set<String> FEE_RULE_TYPES = Set.of("FLAT", "BASIS_POINTS", "COMBINED");
-    private static final Set<String> REFERENCE_TYPES = Set.of("BOOKING", "OFFERING", "MANUAL", "EXTERNAL");
+    private static final Set<String> REFERENCE_TYPES = Set.of("BOOKING", "OFFERING", "MANUAL", "EXTERNAL", "PAYMENT");
     private static final Set<String> ENTRY_SIDES = Set.of("DEBIT", "CREDIT");
 
     private final FinanceStore financeStore;
@@ -105,7 +108,16 @@ public class FinanceService {
         long feeAmountMinor = 0;
         for (FeeRule rule : rules) {
             if (!grossAmount.currencyCode().equals(rule.currencyCode())) {
-                continue;
+                throw new BadRequestException("Fee rule currency does not match the booking currency.");
+            }
+            if ("FLAT".equals(rule.ruleType()) && (rule.flatAmountMinor() == null || rule.basisPoints() != null)) {
+                throw new BadRequestException("FLAT fee rule configuration is invalid.");
+            }
+            if ("BASIS_POINTS".equals(rule.ruleType()) && (rule.flatAmountMinor() != null || rule.basisPoints() == null)) {
+                throw new BadRequestException("BASIS_POINTS fee rule configuration is invalid.");
+            }
+            if ("COMBINED".equals(rule.ruleType()) && (rule.flatAmountMinor() == null || rule.basisPoints() == null)) {
+                throw new BadRequestException("COMBINED fee rule configuration is invalid.");
             }
             if (rule.flatAmountMinor() != null) {
                 feeAmountMinor += rule.flatAmountMinor();
@@ -130,6 +142,7 @@ public class FinanceService {
     @Transactional
     public JournalEntryDetails createJournalEntryForReference(UUID workspaceId, CreateJournalEntryCommand command) {
         validateBalanced(command.postings());
+        validatePostingAccounts(workspaceId, command.postings());
         JournalEntry entry = financeStore.createJournalEntry(
                 workspaceId,
                 requireOneOf(command.referenceType(), REFERENCE_TYPES, "referenceType"),
@@ -146,10 +159,18 @@ public class FinanceService {
                         requirePositive(posting.amountMinor(), "amountMinor"),
                         Money.requireCurrency(posting.currencyCode())))
                 .toList();
-        if (command.bookingId() != null) {
+        if ("BOOKING".equals(command.referenceType()) && command.bookingId() != null) {
             bookingStore.attachFinancialReference(workspaceId, command.bookingId(), entry.id());
         }
         return new JournalEntryDetails(entry, postings);
+    }
+
+    public FinancialAccount accountByPurpose(UUID workspaceId, String accountPurpose, String currencyCode) {
+        return financeStore.findAccountByPurpose(
+                        workspaceId,
+                        requireOneOf(accountPurpose, ACCOUNT_PURPOSES, "accountPurpose"),
+                        Money.requireCurrency(currencyCode))
+                .orElseThrow(() -> new BadRequestException("Required financial account purpose is not configured for this workspace."));
     }
 
     public List<JournalEntryDetails> listJournalEntries(AccessContext context) {
@@ -171,9 +192,9 @@ public class FinanceService {
 
     public AccountBalance balance(AccessContext context, UUID accountId) {
         requireFinanceRead(context);
-        financeStore.findAccount(context.workspaceId(), requireId(accountId, "accountId"))
+        FinancialAccount account = financeStore.findAccount(context.workspaceId(), requireId(accountId, "accountId"))
                 .orElseThrow(() -> new BadRequestException("accountId is not valid for this workspace."));
-        return financeStore.balance(accountId);
+        return financeStore.balance(account);
     }
 
     private JournalEntryDetails details(JournalEntry entry) {
@@ -202,6 +223,16 @@ public class FinanceService {
         }
         if (debits != credits) {
             throw new BadRequestException("Journal entry postings must balance.");
+        }
+    }
+
+    private void validatePostingAccounts(UUID workspaceId, List<PostingCommand> postings) {
+        for (PostingCommand posting : postings) {
+            FinancialAccount account = financeStore.findAccount(workspaceId, requireId(posting.accountId(), "accountId"))
+                    .orElseThrow(() -> new BadRequestException("Journal posting account is not valid for this workspace."));
+            if (!account.currencyCode().equals(Money.requireCurrency(posting.currencyCode()))) {
+                throw new BadRequestException("Journal posting currency must match the financial account currency.");
+            }
         }
     }
 
