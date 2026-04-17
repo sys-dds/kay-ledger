@@ -28,7 +28,6 @@ import com.kayledger.api.payment.model.FrozenFund;
 import com.kayledger.api.payment.model.PayoutAttempt;
 import com.kayledger.api.payment.model.PayoutRequest;
 import com.kayledger.api.payment.model.ProviderBalanceSummary;
-import com.kayledger.api.payment.model.ProviderPayableBalance;
 import com.kayledger.api.payment.model.RefundRecord;
 import com.kayledger.api.payment.store.PaymentStore;
 import com.kayledger.api.shared.api.BadRequestException;
@@ -159,6 +158,8 @@ public class PaymentService {
             PaymentAttempt attempt = paymentStore.createAttempt(context.workspaceId(), settled.id(), "SETTLE", "SUCCEEDED", amount, externalReference(command), null);
             attachJournal(context.workspaceId(), settled, attempt, "Payment settlement creates payable and fee revenue", List.of(
                     posting(account(context.workspaceId(), "PLATFORM_CLEARING", settled.currencyCode()), "DEBIT", amount, settled.currencyCode()),
+                    posting(account(context.workspaceId(), "CASH_PLACEHOLDER", settled.currencyCode()), "DEBIT", amount, settled.currencyCode()),
+                    posting(account(context.workspaceId(), "CAPTURED_FUNDS", settled.currencyCode()), "CREDIT", amount, settled.currencyCode()),
                     posting(account(context.workspaceId(), "SELLER_PAYABLE", settled.currencyCode()), "CREDIT", settled.netAmountMinor(), settled.currencyCode()),
                     posting(account(context.workspaceId(), "FEE_REVENUE", settled.currencyCode()), "CREDIT", settled.feeAmountMinor(), settled.currencyCode())));
             paymentStore.refreshPayableBalance(
@@ -220,12 +221,14 @@ public class PaymentService {
         }
     }
 
-    public List<ProviderPayableBalance> listPayableBalances(AccessContext context, UUID providerProfileId) {
+    public List<ProviderBalanceSummary> listPayableBalances(AccessContext context, UUID providerProfileId) {
         requirePaymentRead(context);
         if (providerProfileId == null) {
-            return paymentStore.listPayableBalances(context.workspaceId());
+            return paymentStore.listProviderBalanceSummaries(context.workspaceId());
         }
-        return paymentStore.listPayableBalancesForProvider(context.workspaceId(), providerProfileId);
+        return paymentStore.listProviderBalanceSummaries(context.workspaceId()).stream()
+                .filter(summary -> summary.providerProfileId().equals(providerProfileId))
+                .toList();
     }
 
     public List<ProviderBalanceSummary> listProviderBalanceSummaries(AccessContext context) {
@@ -336,6 +339,33 @@ public class PaymentService {
     }
 
     @Transactional
+    public RefundRecord markRefundFailed(AccessContext context, UUID refundId, RefundFailureCommand command) {
+        requirePaymentWrite(context);
+        RefundRecord refund = refund(context, refundId);
+        PaymentIntent intent = intent(context, refund.paymentIntentId());
+        RefundRecord failed = paymentStore.markRefundFailed(context.workspaceId(), refund.id());
+        paymentStore.createRefundAttempt(context.workspaceId(), failed.id(), "FAILED", requireText(command == null ? null : command.failureReason(), "failureReason"), externalReference(command));
+        attachRefundJournal(context.workspaceId(), failed, intent, "Refund failure reverses prior refund posture", reverseRefundPostings(context.workspaceId(), intent, refund.refundType(), refund.amountMinor(), refund.payableReductionAmountMinor()));
+        return failed;
+    }
+
+    @Transactional
+    public RefundRecord retryRefund(AccessContext context, UUID refundId, RefundFailureCommand command) {
+        requirePaymentWrite(context);
+        RefundRecord refund = refund(context, refundId);
+        PaymentIntent intent = intent(context, refund.paymentIntentId());
+        long alreadyRefunded = paymentStore.refundedAmountForIntent(context.workspaceId(), intent.id());
+        long alreadyDisputed = paymentStore.activeDisputeExposureForIntent(context.workspaceId(), intent.id());
+        if (refund.amountMinor() > intent.grossAmountMinor() - alreadyRefunded - alreadyDisputed) {
+            throw new BadRequestException("Retried refund amount exceeds remaining payment exposure.");
+        }
+        RefundRecord succeeded = paymentStore.markRefundSucceeded(context.workspaceId(), refund.id());
+        paymentStore.createRefundAttempt(context.workspaceId(), succeeded.id(), "SUCCEEDED", null, externalReference(command));
+        attachRefundJournal(context.workspaceId(), succeeded, intent, "Refund retry reapplies compensating payable and fee effects", refundPostings(context.workspaceId(), intent, succeeded.refundType(), succeeded.amountMinor(), succeeded.payableReductionAmountMinor()));
+        return succeeded;
+    }
+
+    @Transactional
     public DisputeRecord openDispute(AccessContext context, DisputeCommand command) {
         requirePaymentWrite(context);
         if (command == null) {
@@ -346,6 +376,12 @@ public class PaymentService {
             throw new BadRequestException("Disputes require a settled payment intent.");
         }
         long amountMinor = requirePositive(command.amountMinor(), "amountMinor");
+        long alreadyRefunded = paymentStore.refundedAmountForIntent(context.workspaceId(), intent.id());
+        long alreadyDisputed = paymentStore.activeDisputeExposureForIntent(context.workspaceId(), intent.id());
+        long remainingDisputable = intent.grossAmountMinor() - alreadyRefunded - alreadyDisputed;
+        if (amountMinor > remainingDisputable) {
+            throw new BadRequestException("Dispute amount exceeds remaining payment exposure.");
+        }
         ProviderBalanceSummary summary = paymentStore.balanceSummary(context.workspaceId(), intent.providerProfileId(), intent.currencyCode());
         if (amountMinor > summary.availableAmountMinor()) {
             throw new BadRequestException("Dispute cannot freeze more than available payable balance.");
@@ -388,7 +424,8 @@ public class PaymentService {
             throw new BadRequestException("Refunds and reversals require a settled payment intent.");
         }
         long alreadyRefunded = paymentStore.refundedAmountForIntent(context.workspaceId(), intent.id());
-        long remainingRefundable = intent.grossAmountMinor() - alreadyRefunded;
+        long alreadyDisputed = paymentStore.activeDisputeExposureForIntent(context.workspaceId(), intent.id());
+        long remainingRefundable = intent.grossAmountMinor() - alreadyRefunded - alreadyDisputed;
         long amountMinor;
         if ("FULL".equals(refundType)) {
             amountMinor = remainingRefundable;
@@ -398,12 +435,13 @@ public class PaymentService {
         if (amountMinor <= 0 || amountMinor > remainingRefundable) {
             throw new BadRequestException("Refund amount exceeds remaining refundable amount.");
         }
-        long priorPayableReduction = paymentStore.payableReductionForIntent(context.workspaceId(), intent.id());
+        long priorPayableReduction = paymentStore.payableReductionForIntent(context.workspaceId(), intent.id())
+                + paymentStore.activeDisputePayableExposureForIntent(context.workspaceId(), intent.id());
         long remainingPayableExposure = Math.max(intent.netAmountMinor() - priorPayableReduction, 0);
         long payableReduction = Math.min(amountMinor, remainingPayableExposure);
         RefundRecord refund = paymentStore.createRefund(context.workspaceId(), intent.id(), intent.bookingId(), refundType, amountMinor, payableReduction);
         paymentStore.createRefundAttempt(context.workspaceId(), refund.id(), "SUCCEEDED", null, externalReference(command));
-        return attachRefundJournal(context.workspaceId(), refund, intent, "Refund or reversal creates compensating payable and fee effects", refundPostings(context.workspaceId(), intent, amountMinor, payableReduction));
+        return attachRefundJournal(context.workspaceId(), refund, intent, refundDescription(refundType), refundPostings(context.workspaceId(), intent, refundType, amountMinor, payableReduction));
     }
 
     private PaymentIntentDetails details(UUID workspaceId, PaymentIntent intent) {
@@ -498,7 +536,14 @@ public class PaymentService {
         return paymentStore.findDispute(workspaceId, dispute.id()).orElse(dispute);
     }
 
-    private List<PostingCommand> refundPostings(UUID workspaceId, PaymentIntent intent, long amountMinor, long payableReduction) {
+    private String refundDescription(String refundType) {
+        if ("REVERSAL".equals(refundType)) {
+            return "Reversal creates compensating payable and liability effects";
+        }
+        return "Refund creates compensating payable and fee effects";
+    }
+
+    private List<PostingCommand> refundPostings(UUID workspaceId, PaymentIntent intent, String refundType, long amountMinor, long payableReduction) {
         long feeReduction = amountMinor - payableReduction;
         List<PostingCommand> postings = new ArrayList<>();
         if (payableReduction > 0) {
@@ -507,7 +552,22 @@ public class PaymentService {
         if (feeReduction > 0) {
             postings.add(posting(account(workspaceId, "FEE_REVENUE", intent.currencyCode()), "DEBIT", feeReduction, intent.currencyCode()));
         }
-        postings.add(posting(account(workspaceId, "REFUND_RESERVE", intent.currencyCode()), "CREDIT", amountMinor, intent.currencyCode()));
+        String liabilityPurpose = "REVERSAL".equals(refundType) ? "REFUND_LIABILITY" : "REFUND_RESERVE";
+        postings.add(posting(account(workspaceId, liabilityPurpose, intent.currencyCode()), "CREDIT", amountMinor, intent.currencyCode()));
+        return postings;
+    }
+
+    private List<PostingCommand> reverseRefundPostings(UUID workspaceId, PaymentIntent intent, String refundType, long amountMinor, long payableReduction) {
+        long feeReduction = amountMinor - payableReduction;
+        String liabilityPurpose = "REVERSAL".equals(refundType) ? "REFUND_LIABILITY" : "REFUND_RESERVE";
+        List<PostingCommand> postings = new ArrayList<>();
+        postings.add(posting(account(workspaceId, liabilityPurpose, intent.currencyCode()), "DEBIT", amountMinor, intent.currencyCode()));
+        if (payableReduction > 0) {
+            postings.add(posting(account(workspaceId, "SELLER_PAYABLE", intent.currencyCode()), "CREDIT", payableReduction, intent.currencyCode()));
+        }
+        if (feeReduction > 0) {
+            postings.add(posting(account(workspaceId, "FEE_REVENUE", intent.currencyCode()), "CREDIT", feeReduction, intent.currencyCode()));
+        }
         return postings;
     }
 
@@ -532,6 +592,11 @@ public class PaymentService {
     private DisputeRecord dispute(AccessContext context, UUID disputeId) {
         return paymentStore.findDispute(context.workspaceId(), requireId(disputeId, "disputeId"))
                 .orElseThrow(() -> new NotFoundException("Dispute was not found."));
+    }
+
+    private RefundRecord refund(AccessContext context, UUID refundId) {
+        return paymentStore.findRefund(context.workspaceId(), requireId(refundId, "refundId"))
+                .orElseThrow(() -> new NotFoundException("Refund was not found."));
     }
 
     private Booking booking(AccessContext context, UUID bookingId) {
@@ -598,6 +663,10 @@ public class PaymentService {
         return command == null ? null : blankToNull(command.externalReference());
     }
 
+    private static String externalReference(RefundFailureCommand command) {
+        return command == null ? null : blankToNull(command.externalReference());
+    }
+
     private static long requirePositive(Long value, String field) {
         if (value == null || value <= 0) {
             throw new BadRequestException(field + " must be greater than zero.");
@@ -645,6 +714,9 @@ public class PaymentService {
     }
 
     public record RefundCommand(UUID paymentIntentId, Long amountMinor, String externalReference) {
+    }
+
+    public record RefundFailureCommand(String failureReason, String externalReference) {
     }
 
     public record DisputeCommand(UUID paymentIntentId, Long amountMinor) {

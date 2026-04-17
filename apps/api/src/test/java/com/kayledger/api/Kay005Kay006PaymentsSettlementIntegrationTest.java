@@ -204,7 +204,7 @@ class Kay005Kay006PaymentsSettlementIntegrationTest {
         Map<String, Object> clearingBalance = getMap("/api/finance/accounts/" + platformClearing.get("id") + "/balance", ownerHeaders, HttpStatus.OK);
         assertThat(clearingBalance.get("signedBalanceMinor")).isEqualTo(0);
         Map<String, Object> capturedBalance = getMap("/api/finance/accounts/" + capturedFunds.get("id") + "/balance", ownerHeaders, HttpStatus.OK);
-        assertThat(capturedBalance.get("signedBalanceMinor")).isEqualTo(24000);
+        assertThat(capturedBalance.get("signedBalanceMinor")).isEqualTo(0);
         Map<String, Object> byBooking = getMap("/api/payments/intents/by-booking/" + bookingId, ownerHeaders, HttpStatus.OK);
         assertThat(((Map<?, ?>) byBooking.get("paymentIntent")).get("id")).isEqualTo(paymentIntentId);
         assertThat(getList("/api/payments/intents", betaOwnerHeaders, HttpStatus.OK)).isEmpty();

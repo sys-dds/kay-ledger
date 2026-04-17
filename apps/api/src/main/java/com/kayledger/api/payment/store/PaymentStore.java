@@ -703,6 +703,37 @@ public class PaymentStore {
                 """, REFUND_MAPPER, workspaceId);
     }
 
+    public Optional<RefundRecord> findRefund(UUID workspaceId, UUID refundId) {
+        return jdbcTemplate.query("""
+                SELECT *
+                FROM refunds
+                WHERE workspace_id = ?
+                  AND id = ?
+                """, REFUND_MAPPER, workspaceId, refundId).stream().findFirst();
+    }
+
+    public RefundRecord markRefundFailed(UUID workspaceId, UUID refundId) {
+        return jdbcTemplate.queryForObject("""
+                UPDATE refunds
+                SET status = 'FAILED'
+                WHERE workspace_id = ?
+                  AND id = ?
+                  AND status = 'SUCCEEDED'
+                RETURNING *
+                """, REFUND_MAPPER, workspaceId, refundId);
+    }
+
+    public RefundRecord markRefundSucceeded(UUID workspaceId, UUID refundId) {
+        return jdbcTemplate.queryForObject("""
+                UPDATE refunds
+                SET status = 'SUCCEEDED'
+                WHERE workspace_id = ?
+                  AND id = ?
+                  AND status = 'FAILED'
+                RETURNING *
+                """, REFUND_MAPPER, workspaceId, refundId);
+    }
+
     public long refundedAmountForIntent(UUID workspaceId, UUID paymentIntentId) {
         Long value = jdbcTemplate.queryForObject("""
                 SELECT COALESCE(SUM(amount_minor), 0)
@@ -721,6 +752,28 @@ public class PaymentStore {
                 WHERE workspace_id = ?
                   AND payment_intent_id = ?
                   AND status = 'SUCCEEDED'
+                """, Long.class, workspaceId, paymentIntentId);
+        return value == null ? 0 : value;
+    }
+
+    public long activeDisputeExposureForIntent(UUID workspaceId, UUID paymentIntentId) {
+        Long value = jdbcTemplate.queryForObject("""
+                SELECT COALESCE(SUM(disputed_amount_minor), 0)
+                FROM disputes
+                WHERE workspace_id = ?
+                  AND payment_intent_id = ?
+                  AND status IN ('OPEN', 'LOST')
+                """, Long.class, workspaceId, paymentIntentId);
+        return value == null ? 0 : value;
+    }
+
+    public long activeDisputePayableExposureForIntent(UUID workspaceId, UUID paymentIntentId) {
+        Long value = jdbcTemplate.queryForObject("""
+                SELECT COALESCE(SUM(frozen_amount_minor), 0)
+                FROM disputes
+                WHERE workspace_id = ?
+                  AND payment_intent_id = ?
+                  AND status IN ('OPEN', 'LOST')
                 """, Long.class, workspaceId, paymentIntentId);
         return value == null ? 0 : value;
     }

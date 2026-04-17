@@ -76,6 +76,7 @@ class Kay006Kay007PayoutRefundDisputeIntegrationTest {
         post("/api/finance/accounts", workspaceHeaders("acct-seller-kay007", "kay007-alpha", "kay007-owner"), account("2100", "Seller Payable", "LIABILITY", "SELLER_PAYABLE"));
         post("/api/finance/accounts", workspaceHeaders("acct-fee-kay007", "kay007-alpha", "kay007-owner"), account("4100", "Fee Revenue", "REVENUE", "FEE_REVENUE"));
         post("/api/finance/accounts", workspaceHeaders("acct-refund-kay007", "kay007-alpha", "kay007-owner"), account("2200", "Refund Reserve", "LIABILITY", "REFUND_RESERVE"));
+        post("/api/finance/accounts", workspaceHeaders("acct-refund-liability-kay007", "kay007-alpha", "kay007-owner"), account("2210", "Refund Liability", "LIABILITY", "REFUND_LIABILITY"));
         post("/api/finance/accounts", workspaceHeaders("acct-dispute-kay007", "kay007-alpha", "kay007-owner"), account("2300", "Dispute Reserve", "LIABILITY", "DISPUTE_RESERVE"));
         post("/api/finance/accounts", workspaceHeaders("acct-frozen-kay007", "kay007-alpha", "kay007-owner"), account("2400", "Frozen Payable", "LIABILITY", "FROZEN_PAYABLE"));
         post("/api/finance/accounts", workspaceHeaders("acct-cash-kay007", "kay007-alpha", "kay007-owner"), account("1000", "Cash Placeholder", "ASSET", "CASH_PLACEHOLDER"));
@@ -101,6 +102,8 @@ class Kay006Kay007PayoutRefundDisputeIntegrationTest {
         cancelJournals.forEach(entry -> assertBalanced((Map<?, ?>) entry));
         Map<String, Object> authorizedBalance = getMap("/api/finance/accounts/" + accountIdByPurpose(ownerHeaders, "AUTHORIZED_FUNDS") + "/balance", ownerHeaders, HttpStatus.OK);
         assertThat(authorizedBalance.get("signedBalanceMinor")).isEqualTo(0);
+        Map<String, Object> capturedBalance = getMap("/api/finance/accounts/" + accountIdByPurpose(ownerHeaders, "CAPTURED_FUNDS") + "/balance", ownerHeaders, HttpStatus.OK);
+        assertThat(capturedBalance.get("signedBalanceMinor")).isEqualTo(0);
 
         Map<String, Object> payout = post("/api/payments/payouts", workspaceHeaders("payout-request-kay007", "kay007-alpha", "kay007-owner"), Map.of(
                 "providerProfileId", providerProfile.get("id"),
@@ -128,6 +131,8 @@ class Kay006Kay007PayoutRefundDisputeIntegrationTest {
         Map<String, Object> fullRefund = post("/api/payments/refunds/full", workspaceHeaders("full-refund-kay007", "kay007-alpha", "kay007-owner"), Map.of("paymentIntentId", firstPaymentId));
         Map<String, Object> partialRefund = post("/api/payments/refunds/partial", workspaceHeaders("partial-refund-kay007", "kay007-alpha", "kay007-owner"), Map.of("paymentIntentId", secondPaymentId, "amountMinor", 1000));
         Map<String, Object> reversal = post("/api/payments/reversals", workspaceHeaders("reversal-kay007", "kay007-alpha", "kay007-owner"), Map.of("paymentIntentId", secondPaymentId, "amountMinor", 500));
+        post("/api/payments/refunds/" + partialRefund.get("id") + "/fail", workspaceHeaders("partial-refund-fail-kay007", "kay007-alpha", "kay007-owner"), Map.of("failureReason", "provider correction"));
+        post("/api/payments/refunds/" + partialRefund.get("id") + "/retry", workspaceHeaders("partial-refund-retry-kay007", "kay007-alpha", "kay007-owner"), Map.of());
         assertThat(fullRefund.get("refundType")).isEqualTo("FULL");
         assertThat(partialRefund.get("refundType")).isEqualTo("PARTIAL");
         assertThat(reversal.get("refundType")).isEqualTo("REVERSAL");

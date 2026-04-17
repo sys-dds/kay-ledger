@@ -21,6 +21,7 @@ import com.kayledger.api.payment.application.PaymentService.DisputeCommand;
 import com.kayledger.api.payment.application.PaymentService.PayoutMutationCommand;
 import com.kayledger.api.payment.application.PaymentService.PayoutRequestCommand;
 import com.kayledger.api.payment.application.PaymentService.RefundCommand;
+import com.kayledger.api.payment.application.PaymentService.RefundFailureCommand;
 import com.kayledger.api.payment.application.PaymentService.ResolveDisputeCommand;
 import com.kayledger.api.payment.model.DisputeRecord;
 import com.kayledger.api.payment.model.PaymentIntent;
@@ -334,6 +335,42 @@ public class PaymentsController {
             @RequestHeader(value = "X-Actor-Key", required = false) String actorKey) {
         AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
         return paymentService.listRefunds(context);
+    }
+
+    @PostMapping("/refunds/{refundId}/fail")
+    ResponseEntity<Object> markRefundFailed(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @PathVariable UUID refundId,
+            @RequestBody RefundFailureCommand request) {
+        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
+        return idempotencyService.run(
+                idempotencyKey,
+                "WORKSPACE",
+                context.workspaceId(),
+                context.actorId(),
+                "POST /api/payments/refunds/{refundId}/fail",
+                IdempotencyService.fingerprint(workspaceSlug, actorKey, refundId, request),
+                () -> paymentService.markRefundFailed(context, refundId, request));
+    }
+
+    @PostMapping("/refunds/{refundId}/retry")
+    ResponseEntity<Object> retryRefund(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @PathVariable UUID refundId,
+            @RequestBody(required = false) RefundFailureCommand request) {
+        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
+        return idempotencyService.run(
+                idempotencyKey,
+                "WORKSPACE",
+                context.workspaceId(),
+                context.actorId(),
+                "POST /api/payments/refunds/{refundId}/retry",
+                IdempotencyService.fingerprint(workspaceSlug, actorKey, refundId, request),
+                () -> paymentService.retryRefund(context, refundId, request));
     }
 
     @PostMapping("/disputes")

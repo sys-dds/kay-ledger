@@ -25,7 +25,6 @@ import com.kayledger.api.finance.model.FinancialAccount;
 import com.kayledger.api.finance.model.JournalEntryDetails;
 import com.kayledger.api.payment.application.PaymentService;
 import com.kayledger.api.payment.model.ProviderBalanceSummary;
-import com.kayledger.api.payment.model.ProviderPayableBalance;
 import com.kayledger.api.shared.idempotency.IdempotencyService;
 
 @RestController
@@ -143,7 +142,7 @@ public class FinanceController {
     }
 
     @GetMapping("/payable-balances")
-    List<ProviderPayableBalance> payableBalances(
+    List<ProviderBalanceSummary> payableBalances(
             @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
             @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
             @RequestParam(required = false) UUID providerProfileId) {
