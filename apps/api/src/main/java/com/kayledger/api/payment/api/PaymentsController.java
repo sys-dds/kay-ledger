@@ -17,8 +17,17 @@ import com.kayledger.api.access.application.AccessContextResolver;
 import com.kayledger.api.payment.application.PaymentService;
 import com.kayledger.api.payment.application.PaymentService.AmountCommand;
 import com.kayledger.api.payment.application.PaymentService.CreatePaymentIntentCommand;
+import com.kayledger.api.payment.application.PaymentService.DisputeCommand;
+import com.kayledger.api.payment.application.PaymentService.PayoutMutationCommand;
+import com.kayledger.api.payment.application.PaymentService.PayoutRequestCommand;
+import com.kayledger.api.payment.application.PaymentService.RefundCommand;
+import com.kayledger.api.payment.application.PaymentService.ResolveDisputeCommand;
+import com.kayledger.api.payment.model.DisputeRecord;
 import com.kayledger.api.payment.model.PaymentIntent;
 import com.kayledger.api.payment.model.PaymentIntentDetails;
+import com.kayledger.api.payment.model.PayoutAttempt;
+import com.kayledger.api.payment.model.PayoutRequest;
+import com.kayledger.api.payment.model.RefundRecord;
 import com.kayledger.api.shared.idempotency.IdempotencyService;
 
 @RestController
@@ -178,5 +187,195 @@ public class PaymentsController {
                 "POST /api/payments/intents/{paymentIntentId}/settle",
                 IdempotencyService.fingerprint(workspaceSlug, actorKey, paymentIntentId, request),
                 () -> paymentService.settle(context, paymentIntentId, request));
+    }
+
+    @PostMapping("/payouts")
+    ResponseEntity<Object> requestPayout(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @RequestBody PayoutRequestCommand request) {
+        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
+        return idempotencyService.run(
+                idempotencyKey,
+                "WORKSPACE",
+                context.workspaceId(),
+                context.actorId(),
+                "POST /api/payments/payouts",
+                IdempotencyService.fingerprint(workspaceSlug, actorKey, request),
+                () -> paymentService.requestPayout(context, request));
+    }
+
+    @GetMapping("/payouts")
+    List<PayoutRequest> listPayouts(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey) {
+        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
+        return paymentService.listPayouts(context);
+    }
+
+    @GetMapping("/payouts/{payoutRequestId}/attempts")
+    List<PayoutAttempt> payoutAttempts(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @PathVariable UUID payoutRequestId) {
+        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
+        return paymentService.listPayoutAttempts(context, payoutRequestId);
+    }
+
+    @PostMapping("/payouts/{payoutRequestId}/retry")
+    ResponseEntity<Object> retryPayout(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @PathVariable UUID payoutRequestId,
+            @RequestBody(required = false) PayoutMutationCommand request) {
+        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
+        return idempotencyService.run(
+                idempotencyKey,
+                "WORKSPACE",
+                context.workspaceId(),
+                context.actorId(),
+                "POST /api/payments/payouts/{payoutRequestId}/retry",
+                IdempotencyService.fingerprint(workspaceSlug, actorKey, payoutRequestId, request),
+                () -> paymentService.retryPayout(context, payoutRequestId, request));
+    }
+
+    @PostMapping("/payouts/{payoutRequestId}/succeed")
+    ResponseEntity<Object> markPayoutSucceeded(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @PathVariable UUID payoutRequestId,
+            @RequestBody(required = false) PayoutMutationCommand request) {
+        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
+        return idempotencyService.run(
+                idempotencyKey,
+                "WORKSPACE",
+                context.workspaceId(),
+                context.actorId(),
+                "POST /api/payments/payouts/{payoutRequestId}/succeed",
+                IdempotencyService.fingerprint(workspaceSlug, actorKey, payoutRequestId, request),
+                () -> paymentService.markPayoutSucceeded(context, payoutRequestId, request));
+    }
+
+    @PostMapping("/payouts/{payoutRequestId}/fail")
+    ResponseEntity<Object> markPayoutFailed(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @PathVariable UUID payoutRequestId,
+            @RequestBody(required = false) PayoutMutationCommand request) {
+        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
+        return idempotencyService.run(
+                idempotencyKey,
+                "WORKSPACE",
+                context.workspaceId(),
+                context.actorId(),
+                "POST /api/payments/payouts/{payoutRequestId}/fail",
+                IdempotencyService.fingerprint(workspaceSlug, actorKey, payoutRequestId, request),
+                () -> paymentService.markPayoutFailed(context, payoutRequestId, request));
+    }
+
+    @PostMapping("/refunds/full")
+    ResponseEntity<Object> createFullRefund(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @RequestBody RefundCommand request) {
+        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
+        return idempotencyService.run(
+                idempotencyKey,
+                "WORKSPACE",
+                context.workspaceId(),
+                context.actorId(),
+                "POST /api/payments/refunds/full",
+                IdempotencyService.fingerprint(workspaceSlug, actorKey, request),
+                () -> paymentService.createFullRefund(context, request));
+    }
+
+    @PostMapping("/refunds/partial")
+    ResponseEntity<Object> createPartialRefund(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @RequestBody RefundCommand request) {
+        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
+        return idempotencyService.run(
+                idempotencyKey,
+                "WORKSPACE",
+                context.workspaceId(),
+                context.actorId(),
+                "POST /api/payments/refunds/partial",
+                IdempotencyService.fingerprint(workspaceSlug, actorKey, request),
+                () -> paymentService.createPartialRefund(context, request));
+    }
+
+    @PostMapping("/reversals")
+    ResponseEntity<Object> createReversal(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @RequestBody RefundCommand request) {
+        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
+        return idempotencyService.run(
+                idempotencyKey,
+                "WORKSPACE",
+                context.workspaceId(),
+                context.actorId(),
+                "POST /api/payments/reversals",
+                IdempotencyService.fingerprint(workspaceSlug, actorKey, request),
+                () -> paymentService.createReversal(context, request));
+    }
+
+    @GetMapping("/refunds")
+    List<RefundRecord> listRefunds(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey) {
+        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
+        return paymentService.listRefunds(context);
+    }
+
+    @PostMapping("/disputes")
+    ResponseEntity<Object> openDispute(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @RequestBody DisputeCommand request) {
+        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
+        return idempotencyService.run(
+                idempotencyKey,
+                "WORKSPACE",
+                context.workspaceId(),
+                context.actorId(),
+                "POST /api/payments/disputes",
+                IdempotencyService.fingerprint(workspaceSlug, actorKey, request),
+                () -> paymentService.openDispute(context, request));
+    }
+
+    @PostMapping("/disputes/{disputeId}/resolve")
+    ResponseEntity<Object> resolveDispute(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @PathVariable UUID disputeId,
+            @RequestBody ResolveDisputeCommand request) {
+        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
+        return idempotencyService.run(
+                idempotencyKey,
+                "WORKSPACE",
+                context.workspaceId(),
+                context.actorId(),
+                "POST /api/payments/disputes/{disputeId}/resolve",
+                IdempotencyService.fingerprint(workspaceSlug, actorKey, disputeId, request),
+                () -> paymentService.resolveDispute(context, disputeId, request));
+    }
+
+    @GetMapping("/disputes")
+    List<DisputeRecord> listDisputes(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey) {
+        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
+        return paymentService.listDisputes(context);
     }
 }
