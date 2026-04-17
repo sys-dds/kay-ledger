@@ -36,6 +36,11 @@ public class BookingStore {
                     instant(rs, "hold_expires_at"),
                     instantOrNull(rs, "confirmed_at"),
                     instantOrNull(rs, "cancelled_at"),
+                    rs.getString("currency_code"),
+                    (Long) rs.getObject("gross_amount_minor"),
+                    (Long) rs.getObject("fee_amount_minor"),
+                    (Long) rs.getObject("net_amount_minor"),
+                    rs.getObject("financial_reference_id", UUID.class),
                     instant(rs, "created_at"),
                     instant(rs, "updated_at"));
         }
@@ -71,7 +76,11 @@ public class BookingStore {
             Instant scheduledStartAt,
             Instant scheduledEndAt,
             int quantityReserved,
-            Instant holdExpiresAt) {
+            Instant holdExpiresAt,
+            String currencyCode,
+            long grossAmountMinor,
+            long feeAmountMinor,
+            long netAmountMinor) {
         return jdbcTemplate.queryForObject("""
                 INSERT INTO bookings (
                     workspace_id,
@@ -83,9 +92,13 @@ public class BookingStore {
                     scheduled_start_at,
                     scheduled_end_at,
                     quantity_reserved,
-                    hold_expires_at
+                    hold_expires_at,
+                    currency_code,
+                    gross_amount_minor,
+                    fee_amount_minor,
+                    net_amount_minor
                 )
-                VALUES (?, ?, ?, ?, ?, 'HELD', ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, 'HELD', ?, ?, ?, ?, ?, ?, ?, ?)
                 RETURNING *
                 """, BOOKING_ROW_MAPPER,
                 workspaceId,
@@ -96,7 +109,20 @@ public class BookingStore {
                 timestampOrNull(scheduledStartAt),
                 timestampOrNull(scheduledEndAt),
                 quantityReserved,
-                timestamp(holdExpiresAt));
+                timestamp(holdExpiresAt),
+                currencyCode,
+                grossAmountMinor,
+                feeAmountMinor,
+                netAmountMinor);
+    }
+
+    public void attachFinancialReference(UUID workspaceId, UUID bookingId, UUID journalEntryId) {
+        jdbcTemplate.update("""
+                UPDATE bookings
+                SET financial_reference_id = ?
+                WHERE workspace_id = ?
+                  AND id = ?
+                """, journalEntryId, workspaceId, bookingId);
     }
 
     public BookingHold createHold(UUID workspaceId, UUID bookingId, Instant expiresAt) {

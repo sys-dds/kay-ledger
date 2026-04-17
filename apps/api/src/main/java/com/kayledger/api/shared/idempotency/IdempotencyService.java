@@ -54,18 +54,13 @@ public class IdempotencyService {
             return ResponseEntity.status(record.responseStatusCode()).body(json(record.responseBody()));
         }
         if (!IN_PROGRESS.equals(record.status())) {
-            throw new BadRequestException("Idempotency-Key cannot be reused after a failed mutation.");
+            throw new BadRequestException("Idempotency-Key is in an unsupported state.");
         }
 
-        try {
-            Object responseBody = mutation.get();
-            String responseJson = toJson(responseBody == null ? java.util.Map.of() : responseBody);
-            idempotencyStore.complete(record.id(), HttpStatus.OK.value(), responseJson);
-            return ResponseEntity.ok(responseBody == null ? java.util.Map.of() : responseBody);
-        } catch (RuntimeException exception) {
-            idempotencyStore.fail(record.id());
-            throw exception;
-        }
+        Object responseBody = mutation.get();
+        String responseJson = toJson(responseBody == null ? java.util.Map.of() : responseBody);
+        idempotencyStore.complete(record.id(), HttpStatus.OK.value(), responseJson);
+        return ResponseEntity.ok(responseBody == null ? java.util.Map.of() : responseBody);
     }
 
     public static List<Object> fingerprint(Object... parts) {

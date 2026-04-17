@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -50,12 +51,17 @@ class Kay001Kay002RecoveryIntegrationTest {
     @Autowired
     JdbcTemplate jdbcTemplate;
 
+    private final AtomicInteger idempotencySequence = new AtomicInteger();
+
     @Test
     void kay001RecoveryAndKay002CatalogWorkEndToEnd() {
-        Map<String, Object> operatorCandidate = post("/api/actors", Map.of(
+        assertStatus("/api/actors", HttpMethod.POST, new HttpHeaders(), Map.of(
                 "actorKey", "operator-candidate",
                 "displayName", "Operator Candidate",
-                "platformRoles", List.of("OPERATOR")));
+                "platformRoles", List.of("OPERATOR")), HttpStatus.BAD_REQUEST);
+        Map<String, Object> operatorCandidate = post("/api/actors", Map.of(
+                "actorKey", "operator-candidate",
+                "displayName", "Operator Candidate"));
         assertStatus("/api/operator/workspaces", HttpMethod.GET, actorHeader("operator-candidate"), null, HttpStatus.FORBIDDEN);
         assertStatus("/api/operator/bootstrap/operator-role", HttpMethod.POST, bootstrapHeaders("wrong-key", "operator-candidate"), null, HttpStatus.FORBIDDEN);
         assertStatus("/api/operator/bootstrap/operator-role", HttpMethod.POST, bootstrapHeaders("test-bootstrap-operator-key", "operator-candidate"), null, HttpStatus.OK);
@@ -237,7 +243,18 @@ class Kay001Kay002RecoveryIntegrationTest {
             HttpHeaders headers,
             Object body,
             Class<T> responseType) {
-        return restTemplate.exchange("http://localhost:" + port + path, method, new HttpEntity<>(body, headers), responseType);
+        HttpHeaders effectiveHeaders = method == HttpMethod.POST ? withIdempotency(headers, path) : headers;
+        return restTemplate.exchange("http://localhost:" + port + path, method, new HttpEntity<>(body, effectiveHeaders), responseType);
+    }
+
+    private HttpHeaders withIdempotency(HttpHeaders source, String path) {
+        if (source.containsKey("Idempotency-Key")) {
+            return source;
+        }
+        HttpHeaders headers = new HttpHeaders();
+        headers.putAll(source);
+        headers.add("Idempotency-Key", "kay001-kay002-" + path.replaceAll("[^A-Za-z0-9]", "-") + "-" + idempotencySequence.incrementAndGet());
+        return headers;
     }
 
     @SuppressWarnings("unchecked")

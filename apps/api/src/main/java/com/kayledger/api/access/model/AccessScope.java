@@ -14,6 +14,8 @@ public final class AccessScope {
     public static final String BOOKING_CREATE = "BOOKING_CREATE";
     public static final String BOOKING_READ = "BOOKING_READ";
     public static final String BOOKING_MANAGE = "BOOKING_MANAGE";
+    public static final String FINANCE_READ = "FINANCE_READ";
+    public static final String FINANCE_WRITE = "FINANCE_WRITE";
 
     private AccessScope() {
     }
