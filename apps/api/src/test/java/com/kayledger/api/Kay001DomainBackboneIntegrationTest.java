@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -46,6 +47,8 @@ class Kay001DomainBackboneIntegrationTest {
     @Autowired
     TestRestTemplate restTemplate;
 
+    private final AtomicInteger idempotencySequence = new AtomicInteger();
+
     @Test
     void kay001BackboneIsTenantSafeRoleScopedAndOperatorBounded() {
         Map<String, Object> alphaWorkspace = post("/api/workspaces", Map.of(
@@ -70,10 +73,19 @@ class Kay001DomainBackboneIntegrationTest {
         Map<String, Object> betaOwner = post("/api/actors", Map.of(
                 "actorKey", "beta-owner",
                 "displayName", "Beta Owner"));
-        Map<String, Object> operator = post("/api/actors", Map.of(
+        assertStatus("/api/actors", HttpMethod.POST, new HttpHeaders(), Map.of(
                 "actorKey", "platform-operator",
                 "displayName", "Platform Operator",
-                "platformRoles", List.of("OPERATOR")));
+                "platformRoles", List.of("OPERATOR")), HttpStatus.BAD_REQUEST);
+        Map<String, Object> operator = post("/api/actors", Map.of(
+                "actorKey", "platform-operator",
+                "displayName", "Platform Operator"));
+        assertStatus(
+                "/api/operator/bootstrap/operator-role",
+                HttpMethod.POST,
+                bootstrapHeaders("test-bootstrap-operator-key", "platform-operator"),
+                null,
+                HttpStatus.OK);
 
         post("/api/memberships", Map.of(
                 "workspaceSlug", alphaWorkspace.get("slug"),
@@ -192,13 +204,30 @@ class Kay001DomainBackboneIntegrationTest {
         return headers;
     }
 
+    private HttpHeaders bootstrapHeaders(String bootstrapKey, String actorKey) {
+        HttpHeaders headers = singleActorHeader(actorKey);
+        headers.add("X-Bootstrap-Key", bootstrapKey);
+        return headers;
+    }
+
     private <T> ResponseEntity<T> exchange(
             String path,
             HttpMethod method,
             HttpHeaders headers,
             Object body,
             Class<T> responseType) {
-        return restTemplate.exchange("http://localhost:" + port + path, method, new HttpEntity<>(body, headers), responseType);
+        HttpHeaders effectiveHeaders = method == HttpMethod.POST ? withIdempotency(headers, path) : headers;
+        return restTemplate.exchange("http://localhost:" + port + path, method, new HttpEntity<>(body, effectiveHeaders), responseType);
+    }
+
+    private HttpHeaders withIdempotency(HttpHeaders source, String path) {
+        if (source.containsKey("Idempotency-Key")) {
+            return source;
+        }
+        HttpHeaders headers = new HttpHeaders();
+        headers.putAll(source);
+        headers.add("Idempotency-Key", "kay001-" + path.replaceAll("[^A-Za-z0-9]", "-") + "-" + idempotencySequence.incrementAndGet());
+        return headers;
     }
 
     @SuppressWarnings("unchecked")

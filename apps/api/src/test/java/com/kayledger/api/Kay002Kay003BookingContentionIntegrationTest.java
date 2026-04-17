@@ -10,6 +10,7 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -51,6 +52,8 @@ class Kay002Kay003BookingContentionIntegrationTest {
 
     @Autowired
     TestRestTemplate restTemplate;
+
+    private final AtomicInteger idempotencySequence = new AtomicInteger();
 
     @Test
     void kay002RecoveryAndKay003BookingsWorkEndToEnd() throws Exception {
@@ -329,7 +332,18 @@ class Kay002Kay003BookingContentionIntegrationTest {
             HttpHeaders headers,
             Object body,
             Class<T> responseType) {
-        return restTemplate.exchange("http://localhost:" + port + path, method, new HttpEntity<>(body, headers), responseType);
+        HttpHeaders effectiveHeaders = method == HttpMethod.POST ? withIdempotency(headers, path) : headers;
+        return restTemplate.exchange("http://localhost:" + port + path, method, new HttpEntity<>(body, effectiveHeaders), responseType);
+    }
+
+    private HttpHeaders withIdempotency(HttpHeaders source, String path) {
+        if (source.containsKey("Idempotency-Key")) {
+            return source;
+        }
+        HttpHeaders headers = new HttpHeaders();
+        headers.putAll(source);
+        headers.add("Idempotency-Key", "kay002-kay003-" + path.replaceAll("[^A-Za-z0-9]", "-") + "-" + idempotencySequence.incrementAndGet());
+        return headers;
     }
 
     @SuppressWarnings("unchecked")
