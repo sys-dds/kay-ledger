@@ -7,6 +7,8 @@ public record PaymentIntent(
         UUID id,
         UUID workspaceId,
         UUID bookingId,
+        UUID subscriptionId,
+        UUID subscriptionCycleId,
         UUID providerProfileId,
         String status,
         String currencyCode,

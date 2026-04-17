@@ -32,6 +32,8 @@ import com.kayledger.api.payment.model.RefundRecord;
 import com.kayledger.api.payment.store.PaymentStore;
 import com.kayledger.api.shared.api.BadRequestException;
 import com.kayledger.api.shared.api.NotFoundException;
+import com.kayledger.api.subscription.model.SubscriptionCycle;
+import com.kayledger.api.subscription.store.SubscriptionStore;
 
 @Service
 public class PaymentService {
@@ -47,12 +49,14 @@ public class PaymentService {
     private final BookingStore bookingStore;
     private final AccessPolicy accessPolicy;
     private final FinanceService financeService;
+    private final SubscriptionStore subscriptionStore;
 
-    public PaymentService(PaymentStore paymentStore, BookingStore bookingStore, AccessPolicy accessPolicy, FinanceService financeService) {
+    public PaymentService(PaymentStore paymentStore, BookingStore bookingStore, AccessPolicy accessPolicy, FinanceService financeService, SubscriptionStore subscriptionStore) {
         this.paymentStore = paymentStore;
         this.bookingStore = bookingStore;
         this.accessPolicy = accessPolicy;
         this.financeService = financeService;
+        this.subscriptionStore = subscriptionStore;
     }
 
     @Transactional
@@ -176,6 +180,7 @@ public class PaymentService {
                     context.workspaceId(),
                     settled.providerProfileId(),
                     settled.currencyCode());
+            activateSubscriptionCycleIfPresent(context.workspaceId(), settled);
             return details(context.workspaceId(), settled);
         } catch (EmptyResultDataAccessException exception) {
             throw new BadRequestException("Payment intent could not be settled.");
@@ -456,6 +461,31 @@ public class PaymentService {
 
     private PaymentIntentDetails details(UUID workspaceId, PaymentIntent intent) {
         return new PaymentIntentDetails(intent, paymentStore.listAttempts(workspaceId, intent.id()));
+    }
+
+    private void activateSubscriptionCycleIfPresent(UUID workspaceId, PaymentIntent settled) {
+        if (settled.subscriptionCycleId() == null) {
+            return;
+        }
+        SubscriptionCycle cycle = subscriptionStore.findCycleByPaymentIntent(workspaceId, settled.id())
+                .orElseThrow(() -> new BadRequestException("Settled subscription payment intent is not linked to a subscription cycle."));
+        SubscriptionCycle paid = subscriptionStore.markCyclePaid(workspaceId, cycle.id());
+        subscriptionStore.advancePeriod(
+                workspaceId,
+                paid.subscriptionId(),
+                paid.planId(),
+                paid.providerProfileId(),
+                paid.cycleStartAt(),
+                paid.cycleEndAt());
+        subscriptionStore.pendingPlanChange(workspaceId, paid.subscriptionId(), paid.cycleNumber(), paid.cycleStartAt())
+                .ifPresent(change -> subscriptionStore.markPlanChangeApplied(workspaceId, change.id()));
+        subscriptionStore.upsertEntitlement(
+                workspaceId,
+                paid.subscriptionId(),
+                paid.customerProfileId(),
+                "ACTIVE",
+                paid.cycleStartAt(),
+                paid.cycleEndAt());
     }
 
     private void attachJournal(UUID workspaceId, PaymentIntent intent, PaymentAttempt attempt, String description, List<PostingCommand> postings) {

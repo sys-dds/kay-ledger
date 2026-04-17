@@ -108,11 +108,22 @@ class Kay007Kay008SubscriptionsRecurringBillingIntegrationTest {
                 "planId", monthly.get("id"),
                 "startAt", startAt));
         String subscriptionId = (String) subscription.get("id");
-        assertThat(subscription.get("status")).isEqualTo("ACTIVE");
+        assertThat(subscription.get("status")).isEqualTo("PENDING_ACTIVATION");
         List<?> firstCycles = getList("/api/subscriptions/" + subscriptionId + "/cycles", ownerHeaders, HttpStatus.OK);
         assertThat(firstCycles).hasSize(1);
         assertThat(((Map<?, ?>) firstCycles.get(0)).get("cycleNumber")).isEqualTo(1);
+        assertThat(((Map<?, ?>) firstCycles.get(0)).get("status")).isEqualTo("PENDING_PAYMENT");
+        String cycleOneId = (String) ((Map<?, ?>) firstCycles.get(0)).get("id");
+        String initialSubscriptionPaymentId = paymentIntentIdForCycle(ownerHeaders, cycleOneId);
+        settleSubscriptionPayment(initialSubscriptionPaymentId, 2000, "initial-sub");
+        firstCycles = getList("/api/subscriptions/" + subscriptionId + "/cycles", ownerHeaders, HttpStatus.OK);
         assertThat(((Map<?, ?>) firstCycles.get(0)).get("status")).isEqualTo("PAID");
+        assertThat(getList("/api/subscriptions", ownerHeaders, HttpStatus.OK).stream()
+                .map(value -> (Map<?, ?>) value)
+                .filter(value -> subscriptionId.equals(value.get("id")))
+                .findFirst()
+                .orElseThrow()
+                .get("status")).isEqualTo("ACTIVE");
         assertEntitlement(ownerHeaders, subscriptionId, "ACTIVE");
 
         Map<String, Object> renewal = post("/api/subscriptions/renewals/run", workspaceHeaders("renew-run", "subs-alpha", "subs-owner"), Map.of("now", "2032-02-01T00:00:00Z"));
@@ -121,12 +132,15 @@ class Kay007Kay008SubscriptionsRecurringBillingIntegrationTest {
         Map<String, Object> renewalReplay = post("/api/subscriptions/renewals/run", workspaceHeaders("renew-run", "subs-alpha", "subs-owner"), Map.of("now", "2032-02-01T00:00:00Z"));
         assertThat(renewalReplay).isEqualTo(renewal);
         Map<String, Object> renewalAgain = post("/api/subscriptions/renewals/run", workspaceHeaders("renew-run-again", "subs-alpha", "subs-owner"), Map.of("now", "2032-02-01T00:00:00Z"));
-        assertThat(renewalAgain.get("subscriptionsProcessed")).isEqualTo(0);
+        assertThat(renewalAgain.get("paymentIntentsCreated")).isEqualTo(0);
         List<?> secondCycles = getList("/api/subscriptions/" + subscriptionId + "/cycles", ownerHeaders, HttpStatus.OK);
         assertThat(secondCycles).hasSize(2);
         String cycleTwoId = (String) ((Map<?, ?>) secondCycles.get(1)).get("id");
+        assertThat(((Map<?, ?>) secondCycles.get(1)).get("status")).isEqualTo("PENDING_PAYMENT");
         assertThat(getList("/api/payments/intents/by-subscription-cycle/" + cycleTwoId, ownerHeaders, HttpStatus.OK)).hasSize(1);
-        assertThat(getList("/api/payments/intents/by-subscription/" + subscriptionId, ownerHeaders, HttpStatus.OK)).hasSize(1);
+        assertThat(((Map<?, ?>) getList("/api/payments/intents/by-subscription-cycle/" + cycleTwoId, ownerHeaders, HttpStatus.OK).get(0)).get("subscriptionCycleId")).isEqualTo(cycleTwoId);
+        assertThat(getList("/api/payments/intents/by-subscription/" + subscriptionId, ownerHeaders, HttpStatus.OK)).hasSize(2);
+        settleSubscriptionPayment(paymentIntentIdForCycle(ownerHeaders, cycleTwoId), 2000, "renewal-sub");
 
         post("/api/subscriptions/" + subscriptionId + "/plan-changes", workspaceHeaders("plan-change", "subs-alpha", "subs-owner"), Map.of(
                 "targetPlanId", yearly.get("id"),
@@ -136,6 +150,11 @@ class Kay007Kay008SubscriptionsRecurringBillingIntegrationTest {
                 "forceFailure", true));
         assertThat(failedRenewal.get("subscriptionsProcessed")).isEqualTo(1);
         assertEntitlement(ownerHeaders, subscriptionId, "GRACE");
+        Map<String, Object> failedRenewalAgain = post("/api/subscriptions/renewals/run", workspaceHeaders("renew-fail-again", "subs-alpha", "subs-owner"), Map.of(
+                "now", "2032-03-02T00:00:00Z",
+                "forceFailure", true));
+        assertThat(failedRenewalAgain.get("subscriptionsProcessed")).isEqualTo(0);
+        assertThat(getList("/api/subscriptions/" + subscriptionId + "/cycles", ownerHeaders, HttpStatus.OK)).hasSize(3);
         Map<String, Object> suspended = post("/api/subscriptions/suspensions/run", workspaceHeaders("suspend-run", "subs-alpha", "subs-owner"), Map.of("now", "2032-03-10T00:00:00Z"));
         assertThat(suspended.get("subscriptionsSuspended")).isEqualTo(1);
         assertEntitlement(ownerHeaders, subscriptionId, "SUSPENDED");
@@ -173,6 +192,18 @@ class Kay007Kay008SubscriptionsRecurringBillingIntegrationTest {
         post("/api/payments/intents/" + paymentId + "/capture", workspaceHeaders("capture-subs", "subs-alpha", "subs-owner"), Map.of("amountMinor", 12000));
         post("/api/payments/intents/" + paymentId + "/settle", workspaceHeaders("settle-subs", "subs-alpha", "subs-owner"), Map.of("amountMinor", 12000));
         return paymentId;
+    }
+
+    private String paymentIntentIdForCycle(HttpHeaders headers, String cycleId) {
+        List<?> intents = getList("/api/payments/intents/by-subscription-cycle/" + cycleId, headers, HttpStatus.OK);
+        assertThat(intents).hasSize(1);
+        return (String) ((Map<?, ?>) intents.get(0)).get("id");
+    }
+
+    private void settleSubscriptionPayment(String paymentIntentId, int amountMinor, String keyPrefix) {
+        post("/api/payments/intents/" + paymentIntentId + "/authorize", workspaceHeaders(keyPrefix + "-auth", "subs-alpha", "subs-owner"), Map.of("amountMinor", amountMinor));
+        post("/api/payments/intents/" + paymentIntentId + "/capture", workspaceHeaders(keyPrefix + "-capture", "subs-alpha", "subs-owner"), Map.of("amountMinor", amountMinor));
+        post("/api/payments/intents/" + paymentIntentId + "/settle", workspaceHeaders(keyPrefix + "-settle", "subs-alpha", "subs-owner"), Map.of("amountMinor", amountMinor));
     }
 
     private void assertEntitlement(HttpHeaders headers, String subscriptionId, String status) {

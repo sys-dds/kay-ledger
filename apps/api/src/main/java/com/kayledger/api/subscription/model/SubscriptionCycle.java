@@ -15,6 +15,10 @@ public record SubscriptionCycle(
         Instant cycleEndAt,
         String status,
         UUID paymentIntentId,
+        String currencyCode,
+        long grossAmountMinor,
+        long feeAmountMinor,
+        long netAmountMinor,
         String externalReference,
         Instant createdAt,
         Instant updatedAt) {

@@ -69,8 +69,18 @@ public class SubscriptionService {
                 plan,
                 startAt,
                 endAt);
-        subscriptionStore.createCycle(context.workspaceId(), subscription.id(), 1, plan, subscription.customerProfileId(), startAt, endAt, "PAID", "initial-cycle");
-        subscriptionStore.upsertEntitlement(context.workspaceId(), subscription.id(), subscription.customerProfileId(), "ACTIVE", startAt, endAt);
+        SubscriptionCycle cycle = subscriptionStore.createCycle(context.workspaceId(), subscription.id(), 1, plan, subscription.customerProfileId(), startAt, endAt, "PENDING_PAYMENT", "initial-cycle");
+        PaymentIntent intent = paymentStore.createSubscriptionIntent(
+                context.workspaceId(),
+                subscription.id(),
+                cycle.id(),
+                plan.providerProfileId(),
+                cycle.currencyCode(),
+                cycle.grossAmountMinor(),
+                cycle.feeAmountMinor(),
+                cycle.netAmountMinor(),
+                "subscription-cycle-" + cycle.id());
+        subscriptionStore.attachPaymentIntent(context.workspaceId(), cycle.id(), intent.id());
         return subscription;
     }
 
@@ -145,14 +155,12 @@ public class SubscriptionService {
                         subscription.id(),
                         cycle.id(),
                         plan.providerProfileId(),
-                        plan.currencyCode(),
-                        plan.amountMinor(),
-                        0,
-                        plan.amountMinor(),
+                        cycle.currencyCode(),
+                        cycle.grossAmountMinor(),
+                        cycle.feeAmountMinor(),
+                        cycle.netAmountMinor(),
                         "subscription-cycle-" + cycle.id());
                 subscriptionStore.attachPaymentIntent(context.workspaceId(), cycle.id(), intent.id());
-                subscriptionStore.advancePeriod(context.workspaceId(), subscription.id(), plan.id(), plan.providerProfileId(), startAt, endAt);
-                subscriptionStore.upsertEntitlement(context.workspaceId(), subscription.id(), subscription.customerProfileId(), "ACTIVE", startAt, endAt);
                 paymentIntentsCreated++;
             }
             processed++;
@@ -178,7 +186,6 @@ public class SubscriptionService {
         var change = subscriptionStore.pendingPlanChange(workspaceId, subscription.id(), cycleNumber, subscription.currentPeriodEndAt());
         if (change.isPresent()) {
             SubscriptionPlan target = activePlan(workspaceId, change.get().targetPlanId());
-            subscriptionStore.markPlanChangeApplied(workspaceId, change.get().id());
             return target;
         }
         return plan;

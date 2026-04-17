@@ -29,6 +29,8 @@ public class PaymentStore {
             rs.getObject("id", UUID.class),
             rs.getObject("workspace_id", UUID.class),
             rs.getObject("booking_id", UUID.class),
+            rs.getObject("subscription_id", UUID.class),
+            rs.getObject("subscription_cycle_id", UUID.class),
             rs.getObject("provider_profile_id", UUID.class),
             rs.getString("status"),
             rs.getString("currency_code"),

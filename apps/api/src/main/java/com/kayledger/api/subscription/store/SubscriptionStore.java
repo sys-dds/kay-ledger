@@ -63,6 +63,10 @@ public class SubscriptionStore {
             instant(rs, "cycle_end_at"),
             rs.getString("status"),
             rs.getObject("payment_intent_id", UUID.class),
+            rs.getString("currency_code"),
+            rs.getLong("gross_amount_minor"),
+            rs.getLong("fee_amount_minor"),
+            rs.getLong("net_amount_minor"),
             rs.getString("external_reference"),
             instant(rs, "created_at"),
             instant(rs, "updated_at"));
@@ -130,7 +134,7 @@ public class SubscriptionStore {
                     workspace_id, customer_profile_id, current_plan_id, provider_profile_id, status,
                     start_at, current_period_start_at, current_period_end_at
                 )
-                VALUES (?, ?, ?, ?, 'ACTIVE', ?, ?, ?)
+                VALUES (?, ?, ?, ?, 'PENDING_ACTIVATION', ?, ?, ?)
                 RETURNING *
                 """, SUBSCRIPTION_MAPPER, workspaceId, customerProfileId, plan.id(), plan.providerProfileId(), timestamp(startAt), timestamp(startAt), timestamp(periodEndAt));
     }
@@ -158,7 +162,7 @@ public class SubscriptionStore {
                 SELECT *
                 FROM subscriptions
                 WHERE workspace_id = ?
-                  AND status IN ('ACTIVE', 'GRACE')
+                  AND status = 'ACTIVE'
                   AND current_period_end_at <= ?
                 ORDER BY current_period_end_at, id
                 """, SUBSCRIPTION_MAPPER, workspaceId, timestamp(now));
@@ -239,13 +243,22 @@ public class SubscriptionStore {
         return jdbcTemplate.queryForObject("""
                 INSERT INTO subscription_cycles (
                     workspace_id, subscription_id, cycle_number, plan_id, provider_profile_id, customer_profile_id,
-                    cycle_start_at, cycle_end_at, status, external_reference
+                    cycle_start_at, cycle_end_at, status, currency_code, gross_amount_minor, fee_amount_minor, net_amount_minor, external_reference
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (workspace_id, subscription_id, cycle_number) DO UPDATE
                 SET external_reference = COALESCE(subscription_cycles.external_reference, EXCLUDED.external_reference)
                 RETURNING *
-                """, CYCLE_MAPPER, workspaceId, subscriptionId, cycleNumber, plan.id(), plan.providerProfileId(), customerProfileId, timestamp(startAt), timestamp(endAt), status, externalReference);
+                """, CYCLE_MAPPER, workspaceId, subscriptionId, cycleNumber, plan.id(), plan.providerProfileId(), customerProfileId, timestamp(startAt), timestamp(endAt), status, plan.currencyCode(), plan.amountMinor(), 0L, plan.amountMinor(), externalReference);
+    }
+
+    public Optional<SubscriptionCycle> findCycleByPaymentIntent(UUID workspaceId, UUID paymentIntentId) {
+        return jdbcTemplate.query("""
+                SELECT *
+                FROM subscription_cycles
+                WHERE workspace_id = ?
+                  AND payment_intent_id = ?
+                """, CYCLE_MAPPER, workspaceId, paymentIntentId).stream().findFirst();
     }
 
     public List<SubscriptionCycle> listCycles(UUID workspaceId, UUID subscriptionId) {
@@ -267,6 +280,17 @@ public class SubscriptionStore {
                   AND payment_intent_id IS NULL
                 RETURNING *
                 """, CYCLE_MAPPER, paymentIntentId, workspaceId, cycleId);
+    }
+
+    public SubscriptionCycle markCyclePaid(UUID workspaceId, UUID cycleId) {
+        return jdbcTemplate.queryForObject("""
+                UPDATE subscription_cycles
+                SET status = 'PAID'
+                WHERE workspace_id = ?
+                  AND id = ?
+                  AND status = 'PENDING_PAYMENT'
+                RETURNING *
+                """, CYCLE_MAPPER, workspaceId, cycleId);
     }
 
     public SubscriptionPlanChange schedulePlanChange(UUID workspaceId, UUID subscriptionId, UUID targetPlanId, int effectiveCycleNumber) {
