@@ -11,6 +11,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
 
+import com.kayledger.api.shared.api.BadRequestException;
 import com.kayledger.api.finance.model.AccountBalance;
 import com.kayledger.api.finance.model.FeeRule;
 import com.kayledger.api.finance.model.FinancialAccount;
@@ -118,6 +119,19 @@ public class FinanceStore {
                 """, ACCOUNT_MAPPER, workspaceId, accountId).stream().findFirst();
     }
 
+    public Optional<FinancialAccount> findAccountByPurpose(UUID workspaceId, String accountPurpose, String currencyCode) {
+        return jdbcTemplate.query("""
+                SELECT *
+                FROM financial_accounts
+                WHERE workspace_id = ?
+                  AND account_purpose = ?
+                  AND currency_code = ?
+                  AND status = 'ACTIVE'
+                ORDER BY account_code
+                LIMIT 1
+                """, ACCOUNT_MAPPER, workspaceId, accountPurpose, currencyCode).stream().findFirst();
+    }
+
     public FeeRule createFeeRule(UUID workspaceId, UUID offeringId, String ruleType, Long flatAmountMinor, Integer basisPoints, String currencyCode) {
         return jdbcTemplate.queryForObject("""
                 INSERT INTO fee_rules (
@@ -178,7 +192,7 @@ public class FinanceStore {
     }
 
     public JournalPosting createPosting(UUID journalEntryId, UUID accountId, String entrySide, long amountMinor, String currencyCode) {
-        return jdbcTemplate.queryForObject("""
+        List<JournalPosting> postings = jdbcTemplate.query("""
                 INSERT INTO journal_postings (
                     journal_entry_id,
                     account_id,
@@ -186,9 +200,19 @@ public class FinanceStore {
                     amount_minor,
                     currency_code
                 )
-                VALUES (?, ?, ?, ?, ?)
+                SELECT ?, ?, ?, ?, ?
+                FROM journal_entries entry
+                JOIN financial_accounts account ON account.id = ?
+                WHERE entry.id = ?
+                  AND entry.workspace_id = account.workspace_id
+                  AND account.status = 'ACTIVE'
+                  AND account.currency_code = ?
                 RETURNING *
-                """, POSTING_MAPPER, journalEntryId, accountId, entrySide, amountMinor, currencyCode);
+                """, POSTING_MAPPER, journalEntryId, accountId, entrySide, amountMinor, currencyCode, accountId, journalEntryId, currencyCode);
+        if (postings.isEmpty()) {
+            throw new BadRequestException("Journal posting account is not valid for this journal workspace.");
+        }
+        return postings.get(0);
     }
 
     public List<JournalEntry> listJournalEntries(UUID workspaceId) {
@@ -220,18 +244,23 @@ public class FinanceStore {
                 """, POSTING_MAPPER, journalEntryId);
     }
 
-    public AccountBalance balance(UUID accountId) {
-        return jdbcTemplate.queryForObject("""
+    public AccountBalance balance(FinancialAccount account) {
+        List<AccountBalance> balances = jdbcTemplate.query("""
                 SELECT
-                    account_id,
-                    currency_code,
+                    account.id AS account_id,
+                    account.currency_code AS currency_code,
                     COALESCE(SUM(CASE WHEN entry_side = 'DEBIT' THEN amount_minor ELSE 0 END), 0) AS debit_amount_minor,
                     COALESCE(SUM(CASE WHEN entry_side = 'CREDIT' THEN amount_minor ELSE 0 END), 0) AS credit_amount_minor,
                     COALESCE(SUM(CASE WHEN entry_side = 'DEBIT' THEN amount_minor ELSE -amount_minor END), 0) AS signed_balance_minor
-                FROM journal_postings
-                WHERE account_id = ?
-                GROUP BY account_id, currency_code
-                """, BALANCE_MAPPER, accountId);
+                FROM financial_accounts account
+                LEFT JOIN journal_postings posting ON posting.account_id = account.id
+                WHERE account.id = ?
+                GROUP BY account.id, account.currency_code
+                """, BALANCE_MAPPER, account.id());
+        if (balances.isEmpty()) {
+            return new AccountBalance(account.id(), account.currencyCode(), 0, 0, 0);
+        }
+        return balances.get(0);
     }
 
     private static Instant instant(ResultSet rs, String column) throws SQLException {

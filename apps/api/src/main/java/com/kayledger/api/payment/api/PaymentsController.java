@@ -1,4 +1,4 @@
-package com.kayledger.api.finance.api;
+package com.kayledger.api.payment.api;
 
 import java.util.List;
 import java.util.UUID;
@@ -10,143 +10,137 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.kayledger.api.access.application.AccessContext;
 import com.kayledger.api.access.application.AccessContextResolver;
-import com.kayledger.api.finance.application.FinanceService;
-import com.kayledger.api.finance.application.FinanceService.CreateAccountCommand;
-import com.kayledger.api.finance.application.FinanceService.CreateFeeRuleCommand;
-import com.kayledger.api.finance.application.FinanceService.CreateJournalEntryCommand;
-import com.kayledger.api.finance.model.AccountBalance;
-import com.kayledger.api.finance.model.FeeRule;
-import com.kayledger.api.finance.model.FinancialAccount;
-import com.kayledger.api.finance.model.JournalEntryDetails;
 import com.kayledger.api.payment.application.PaymentService;
-import com.kayledger.api.payment.model.ProviderPayableBalance;
+import com.kayledger.api.payment.application.PaymentService.AmountCommand;
+import com.kayledger.api.payment.application.PaymentService.CreatePaymentIntentCommand;
+import com.kayledger.api.payment.model.PaymentIntent;
+import com.kayledger.api.payment.model.PaymentIntentDetails;
 import com.kayledger.api.shared.idempotency.IdempotencyService;
 
 @RestController
-@RequestMapping("/api/finance")
-public class FinanceController {
+@RequestMapping("/api/payments")
+public class PaymentsController {
 
-    private final FinanceService financeService;
     private final PaymentService paymentService;
     private final AccessContextResolver accessContextResolver;
     private final IdempotencyService idempotencyService;
 
-    public FinanceController(
-            FinanceService financeService,
+    public PaymentsController(
             PaymentService paymentService,
             AccessContextResolver accessContextResolver,
             IdempotencyService idempotencyService) {
-        this.financeService = financeService;
         this.paymentService = paymentService;
         this.accessContextResolver = accessContextResolver;
         this.idempotencyService = idempotencyService;
     }
 
-    @PostMapping("/accounts")
-    ResponseEntity<Object> createAccount(
+    @PostMapping("/intents")
+    ResponseEntity<Object> createIntent(
             @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
             @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
             @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
-            @RequestBody CreateAccountCommand request) {
+            @RequestBody CreatePaymentIntentCommand request) {
         AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
         return idempotencyService.run(
                 idempotencyKey,
                 "WORKSPACE",
                 context.workspaceId(),
                 context.actorId(),
-                "POST /api/finance/accounts",
+                "POST /api/payments/intents",
                 IdempotencyService.fingerprint(workspaceSlug, actorKey, request),
-                () -> financeService.createAccount(context, request));
+                () -> paymentService.createIntent(context, request));
     }
 
-    @GetMapping("/accounts")
-    List<FinancialAccount> listAccounts(
+    @GetMapping("/intents")
+    List<PaymentIntent> listIntents(
             @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
             @RequestHeader(value = "X-Actor-Key", required = false) String actorKey) {
         AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
-        return financeService.listAccounts(context);
+        return paymentService.list(context);
     }
 
-    @PostMapping("/fee-rules")
-    ResponseEntity<Object> createFeeRule(
+    @GetMapping("/intents/by-booking/{bookingId}")
+    PaymentIntentDetails byBooking(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @PathVariable UUID bookingId) {
+        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
+        return paymentService.findByBooking(context, bookingId);
+    }
+
+    @PostMapping("/intents/{paymentIntentId}/authorize")
+    ResponseEntity<Object> authorize(
             @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
             @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
             @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
-            @RequestBody CreateFeeRuleCommand request) {
+            @PathVariable UUID paymentIntentId,
+            @RequestBody(required = false) AmountCommand request) {
         AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
         return idempotencyService.run(
                 idempotencyKey,
                 "WORKSPACE",
                 context.workspaceId(),
                 context.actorId(),
-                "POST /api/finance/fee-rules",
-                IdempotencyService.fingerprint(workspaceSlug, actorKey, request),
-                () -> financeService.createFeeRule(context, request));
+                "POST /api/payments/intents/{paymentIntentId}/authorize",
+                IdempotencyService.fingerprint(workspaceSlug, actorKey, paymentIntentId, request),
+                () -> paymentService.authorize(context, paymentIntentId, request));
     }
 
-    @GetMapping("/fee-rules")
-    List<FeeRule> listFeeRules(
-            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
-            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey) {
-        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
-        return financeService.listFeeRules(context);
-    }
-
-    @PostMapping("/journal-entries")
-    ResponseEntity<Object> createJournalEntry(
+    @PostMapping("/intents/{paymentIntentId}/capture")
+    ResponseEntity<Object> capture(
             @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
             @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
             @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
-            @RequestBody CreateJournalEntryCommand request) {
+            @PathVariable UUID paymentIntentId,
+            @RequestBody(required = false) AmountCommand request) {
         AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
         return idempotencyService.run(
                 idempotencyKey,
                 "WORKSPACE",
                 context.workspaceId(),
                 context.actorId(),
-                "POST /api/finance/journal-entries",
-                IdempotencyService.fingerprint(workspaceSlug, actorKey, request),
-                () -> financeService.createJournalEntry(context, request));
+                "POST /api/payments/intents/{paymentIntentId}/capture",
+                IdempotencyService.fingerprint(workspaceSlug, actorKey, paymentIntentId, request),
+                () -> paymentService.capture(context, paymentIntentId, request));
     }
 
-    @GetMapping("/journal-entries")
-    List<JournalEntryDetails> listJournalEntries(
-            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
-            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey) {
-        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
-        return financeService.listJournalEntries(context);
-    }
-
-    @GetMapping("/journal-entries/by-reference")
-    List<JournalEntryDetails> journalEntriesByReference(
+    @PostMapping("/intents/{paymentIntentId}/cancel")
+    ResponseEntity<Object> cancel(
             @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
             @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
-            @RequestParam String referenceType,
-            @RequestParam UUID referenceId) {
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @PathVariable UUID paymentIntentId,
+            @RequestBody(required = false) AmountCommand request) {
         AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
-        return financeService.listJournalEntriesByReference(context, referenceType, referenceId);
+        return idempotencyService.run(
+                idempotencyKey,
+                "WORKSPACE",
+                context.workspaceId(),
+                context.actorId(),
+                "POST /api/payments/intents/{paymentIntentId}/cancel",
+                IdempotencyService.fingerprint(workspaceSlug, actorKey, paymentIntentId, request),
+                () -> paymentService.cancel(context, paymentIntentId, request));
     }
 
-    @GetMapping("/accounts/{accountId}/balance")
-    AccountBalance balance(
+    @PostMapping("/intents/{paymentIntentId}/settle")
+    ResponseEntity<Object> settle(
             @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
             @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
-            @PathVariable UUID accountId) {
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @PathVariable UUID paymentIntentId,
+            @RequestBody(required = false) AmountCommand request) {
         AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
-        return financeService.balance(context, accountId);
-    }
-
-    @GetMapping("/payable-balances")
-    List<ProviderPayableBalance> payableBalances(
-            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
-            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
-            @RequestParam(required = false) UUID providerProfileId) {
-        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
-        return paymentService.listPayableBalances(context, providerProfileId);
+        return idempotencyService.run(
+                idempotencyKey,
+                "WORKSPACE",
+                context.workspaceId(),
+                context.actorId(),
+                "POST /api/payments/intents/{paymentIntentId}/settle",
+                IdempotencyService.fingerprint(workspaceSlug, actorKey, paymentIntentId, request),
+                () -> paymentService.settle(context, paymentIntentId, request));
     }
 }

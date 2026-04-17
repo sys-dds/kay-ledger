@@ -15,6 +15,7 @@ import org.springframework.stereotype.Repository;
 
 import com.kayledger.api.booking.model.Booking;
 import com.kayledger.api.booking.model.BookingHold;
+import com.kayledger.api.shared.api.BadRequestException;
 
 @Repository
 public class BookingStore {
@@ -117,12 +118,21 @@ public class BookingStore {
     }
 
     public void attachFinancialReference(UUID workspaceId, UUID bookingId, UUID journalEntryId) {
-        jdbcTemplate.update("""
+        int updated = jdbcTemplate.update("""
                 UPDATE bookings
                 SET financial_reference_id = ?
                 WHERE workspace_id = ?
                   AND id = ?
-                """, journalEntryId, workspaceId, bookingId);
+                  AND EXISTS (
+                      SELECT 1
+                      FROM journal_entries journal
+                      WHERE journal.id = ?
+                        AND journal.workspace_id = bookings.workspace_id
+                  )
+                """, journalEntryId, workspaceId, bookingId, journalEntryId);
+        if (updated != 1) {
+            throw new BadRequestException("Financial reference is not valid for this booking workspace.");
+        }
     }
 
     public BookingHold createHold(UUID workspaceId, UUID bookingId, Instant expiresAt) {
