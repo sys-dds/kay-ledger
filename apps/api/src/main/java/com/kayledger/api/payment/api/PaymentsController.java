@@ -126,6 +126,42 @@ public class PaymentsController {
                 () -> paymentService.cancel(context, paymentIntentId, request));
     }
 
+    @PostMapping("/intents/{paymentIntentId}/requires-action")
+    ResponseEntity<Object> requireAction(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @PathVariable UUID paymentIntentId,
+            @RequestBody(required = false) AmountCommand request) {
+        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
+        return idempotencyService.run(
+                idempotencyKey,
+                "WORKSPACE",
+                context.workspaceId(),
+                context.actorId(),
+                "POST /api/payments/intents/{paymentIntentId}/requires-action",
+                IdempotencyService.fingerprint(workspaceSlug, actorKey, paymentIntentId, request),
+                () -> paymentService.requireAction(context, paymentIntentId, request));
+    }
+
+    @PostMapping("/intents/{paymentIntentId}/fail")
+    ResponseEntity<Object> fail(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @PathVariable UUID paymentIntentId,
+            @RequestBody(required = false) AmountCommand request) {
+        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
+        return idempotencyService.run(
+                idempotencyKey,
+                "WORKSPACE",
+                context.workspaceId(),
+                context.actorId(),
+                "POST /api/payments/intents/{paymentIntentId}/fail",
+                IdempotencyService.fingerprint(workspaceSlug, actorKey, paymentIntentId, request),
+                () -> paymentService.fail(context, paymentIntentId, request));
+    }
+
     @PostMapping("/intents/{paymentIntentId}/settle")
     ResponseEntity<Object> settle(
             @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,

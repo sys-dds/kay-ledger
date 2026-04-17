@@ -166,6 +166,28 @@ public class PaymentStore {
                 """, INTENT_MAPPER, workspaceId, paymentIntentId);
     }
 
+    public PaymentIntent requireAction(UUID workspaceId, UUID paymentIntentId) {
+        return jdbcTemplate.queryForObject("""
+                UPDATE payment_intents
+                SET status = 'REQUIRES_ACTION'
+                WHERE workspace_id = ?
+                  AND id = ?
+                  AND status = 'CREATED'
+                RETURNING *
+                """, INTENT_MAPPER, workspaceId, paymentIntentId);
+    }
+
+    public PaymentIntent fail(UUID workspaceId, UUID paymentIntentId) {
+        return jdbcTemplate.queryForObject("""
+                UPDATE payment_intents
+                SET status = 'FAILED'
+                WHERE workspace_id = ?
+                  AND id = ?
+                  AND status IN ('CREATED', 'REQUIRES_ACTION')
+                RETURNING *
+                """, INTENT_MAPPER, workspaceId, paymentIntentId);
+    }
+
     public PaymentAttempt createAttempt(
             UUID workspaceId,
             UUID paymentIntentId,
@@ -209,7 +231,7 @@ public class PaymentStore {
                 """, ATTEMPT_MAPPER, workspaceId, paymentIntentId);
     }
 
-    public ProviderPayableBalance upsertPayableBalance(UUID workspaceId, UUID providerProfileId, String currencyCode, long payableAmountMinor) {
+    public ProviderPayableBalance refreshPayableBalance(UUID workspaceId, UUID providerProfileId, String currencyCode) {
         return jdbcTemplate.queryForObject("""
                 INSERT INTO provider_payable_balances (
                     workspace_id,
@@ -217,11 +239,16 @@ public class PaymentStore {
                     currency_code,
                     payable_amount_minor
                 )
-                VALUES (?, ?, ?, ?)
+                SELECT ?, ?, ?, COALESCE(SUM(net_amount_minor), 0)
+                FROM payment_intents
+                WHERE workspace_id = ?
+                  AND provider_profile_id = ?
+                  AND currency_code = ?
+                  AND status = 'SETTLED'
                 ON CONFLICT (workspace_id, provider_profile_id, currency_code) DO UPDATE
                 SET payable_amount_minor = EXCLUDED.payable_amount_minor
                 RETURNING *
-                """, PAYABLE_MAPPER, workspaceId, providerProfileId, currencyCode, payableAmountMinor);
+                """, PAYABLE_MAPPER, workspaceId, providerProfileId, currencyCode, workspaceId, providerProfileId, currencyCode);
     }
 
     public List<ProviderPayableBalance> listPayableBalances(UUID workspaceId) {

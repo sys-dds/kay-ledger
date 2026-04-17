@@ -121,7 +121,9 @@ public class PaymentService {
             PaymentAttempt attempt = paymentStore.createAttempt(context.workspaceId(), captured.id(), "CAPTURE", "SUCCEEDED", amount, externalReference(command), null);
             attachJournal(context.workspaceId(), captured, attempt, "Payment capture into clearing posture", List.of(
                     posting(account(context.workspaceId(), "PLATFORM_CLEARING", captured.currencyCode()), "DEBIT", amount, captured.currencyCode()),
-                    posting(account(context.workspaceId(), "CAPTURED_FUNDS", captured.currencyCode()), "CREDIT", amount, captured.currencyCode())));
+                    posting(account(context.workspaceId(), "CAPTURED_FUNDS", captured.currencyCode()), "DEBIT", amount, captured.currencyCode()),
+                    posting(account(context.workspaceId(), "AUTHORIZED_FUNDS", captured.currencyCode()), "CREDIT", amount, captured.currencyCode()),
+                    posting(account(context.workspaceId(), "PLATFORM_CLEARING", captured.currencyCode()), "CREDIT", amount, captured.currencyCode())));
             return details(context.workspaceId(), captured);
         } catch (EmptyResultDataAccessException exception) {
             throw new BadRequestException("Payment intent could not be captured.");
@@ -146,14 +148,13 @@ public class PaymentService {
             PaymentIntent settled = paymentStore.settle(context.workspaceId(), existing.id(), amount);
             PaymentAttempt attempt = paymentStore.createAttempt(context.workspaceId(), settled.id(), "SETTLE", "SUCCEEDED", amount, externalReference(command), null);
             attachJournal(context.workspaceId(), settled, attempt, "Payment settlement creates payable and fee revenue", List.of(
-                    posting(account(context.workspaceId(), "CAPTURED_FUNDS", settled.currencyCode()), "DEBIT", amount, settled.currencyCode()),
+                    posting(account(context.workspaceId(), "PLATFORM_CLEARING", settled.currencyCode()), "DEBIT", amount, settled.currencyCode()),
                     posting(account(context.workspaceId(), "SELLER_PAYABLE", settled.currencyCode()), "CREDIT", settled.netAmountMinor(), settled.currencyCode()),
                     posting(account(context.workspaceId(), "FEE_REVENUE", settled.currencyCode()), "CREDIT", settled.feeAmountMinor(), settled.currencyCode())));
-            paymentStore.upsertPayableBalance(
+            paymentStore.refreshPayableBalance(
                     context.workspaceId(),
                     settled.providerProfileId(),
-                    settled.currencyCode(),
-                    settled.netAmountMinor());
+                    settled.currencyCode());
             return details(context.workspaceId(), settled);
         } catch (EmptyResultDataAccessException exception) {
             throw new BadRequestException("Payment intent could not be settled.");
@@ -166,10 +167,46 @@ public class PaymentService {
         PaymentIntent existing = intent(context, paymentIntentId);
         try {
             PaymentIntent cancelled = paymentStore.cancel(context.workspaceId(), existing.id());
-            paymentStore.createAttempt(context.workspaceId(), cancelled.id(), "CANCEL", "SUCCEEDED", 0, externalReference(command), null);
+            PaymentAttempt attempt = paymentStore.createAttempt(context.workspaceId(), cancelled.id(), "CANCEL", "SUCCEEDED", existing.authorizedAmountMinor(), externalReference(command), null);
+            if (AUTHORIZED.equals(existing.status()) && existing.authorizedAmountMinor() > 0) {
+                attachJournal(context.workspaceId(), cancelled, attempt, "Payment cancellation reverses authorization posture", List.of(
+                        posting(account(context.workspaceId(), "PLATFORM_CLEARING", cancelled.currencyCode()), "DEBIT", existing.authorizedAmountMinor(), cancelled.currencyCode()),
+                        posting(account(context.workspaceId(), "AUTHORIZED_FUNDS", cancelled.currencyCode()), "CREDIT", existing.authorizedAmountMinor(), cancelled.currencyCode())));
+            }
             return details(context.workspaceId(), cancelled);
         } catch (EmptyResultDataAccessException exception) {
             throw new BadRequestException("Payment intent could not be cancelled.");
+        }
+    }
+
+    @Transactional
+    public PaymentIntentDetails requireAction(AccessContext context, UUID paymentIntentId, AmountCommand command) {
+        requirePaymentWrite(context);
+        PaymentIntent existing = intent(context, paymentIntentId);
+        if (!CREATED.equals(existing.status())) {
+            throw new BadRequestException("Only created payment intents can be moved to requires action.");
+        }
+        try {
+            PaymentIntent requiresAction = paymentStore.requireAction(context.workspaceId(), existing.id());
+            return details(context.workspaceId(), requiresAction);
+        } catch (EmptyResultDataAccessException exception) {
+            throw new BadRequestException("Payment intent could not be moved to requires action.");
+        }
+    }
+
+    @Transactional
+    public PaymentIntentDetails fail(AccessContext context, UUID paymentIntentId, AmountCommand command) {
+        requirePaymentWrite(context);
+        PaymentIntent existing = intent(context, paymentIntentId);
+        if (AUTHORIZED.equals(existing.status()) || CAPTURED.equals(existing.status())) {
+            throw new BadRequestException("Authorized or captured payment intents must be cancelled or settled through financial transitions.");
+        }
+        try {
+            PaymentIntent failed = paymentStore.fail(context.workspaceId(), existing.id());
+            paymentStore.createAttempt(context.workspaceId(), failed.id(), "AUTHORIZE", "FAILED", 0, externalReference(command), null);
+            return details(context.workspaceId(), failed);
+        } catch (EmptyResultDataAccessException exception) {
+            throw new BadRequestException("Payment intent could not be failed.");
         }
     }
 
