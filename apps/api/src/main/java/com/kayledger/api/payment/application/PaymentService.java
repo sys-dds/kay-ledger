@@ -88,6 +88,16 @@ public class PaymentService {
         return details(context.workspaceId(), intent);
     }
 
+    public List<PaymentIntent> listBySubscription(AccessContext context, UUID subscriptionId) {
+        requirePaymentRead(context);
+        return paymentStore.listBySubscription(context.workspaceId(), requireId(subscriptionId, "subscriptionId"));
+    }
+
+    public List<PaymentIntent> listBySubscriptionCycle(AccessContext context, UUID subscriptionCycleId) {
+        requirePaymentRead(context);
+        return paymentStore.listBySubscriptionCycle(context.workspaceId(), requireId(subscriptionCycleId, "subscriptionCycleId"));
+    }
+
     @Transactional
     public PaymentIntentDetails authorize(AccessContext context, UUID paymentIntentId, AmountCommand command) {
         requirePaymentWrite(context);

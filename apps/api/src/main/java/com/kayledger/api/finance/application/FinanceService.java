@@ -44,7 +44,7 @@ public class FinanceService {
             "CAPTURED_FUNDS",
             "PLATFORM_CLEARING");
     private static final Set<String> FEE_RULE_TYPES = Set.of("FLAT", "BASIS_POINTS", "COMBINED");
-    private static final Set<String> REFERENCE_TYPES = Set.of("BOOKING", "OFFERING", "MANUAL", "EXTERNAL", "PAYMENT", "PAYOUT", "REFUND", "DISPUTE");
+    private static final Set<String> REFERENCE_TYPES = Set.of("BOOKING", "OFFERING", "MANUAL", "EXTERNAL", "PAYMENT", "PAYOUT", "REFUND", "DISPUTE", "SUBSCRIPTION", "SUBSCRIPTION_CYCLE");
     private static final Set<String> ENTRY_SIDES = Set.of("DEBIT", "CREDIT");
 
     private final FinanceStore financeStore;
