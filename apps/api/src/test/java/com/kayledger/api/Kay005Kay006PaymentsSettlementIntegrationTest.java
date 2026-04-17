@@ -1,6 +1,7 @@
 package com.kayledger.api;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.time.Instant;
 import java.util.List;
@@ -16,6 +17,7 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -47,6 +49,9 @@ class Kay005Kay006PaymentsSettlementIntegrationTest {
     @Autowired
     TestRestTemplate restTemplate;
 
+    @Autowired
+    JdbcTemplate jdbcTemplate;
+
     @Test
     void kay005RecoveryAndKay006PaymentsSettlementWorkEndToEnd() {
         post("/api/workspaces", headers("ws-alpha"), Map.of("slug", "payments-alpha", "displayName", "Payments Alpha"));
@@ -72,6 +77,7 @@ class Kay005Kay006PaymentsSettlementIntegrationTest {
         Map<String, Object> capturedFunds = post("/api/finance/accounts", workspaceHeaders("acct-captured", "payments-alpha", "payments-owner"), account("1130", "Captured Funds", "ASSET", "CAPTURED_FUNDS", "USD"));
         post("/api/finance/accounts", workspaceHeaders("acct-seller", "payments-alpha", "payments-owner"), account("2100", "Seller Payable", "LIABILITY", "SELLER_PAYABLE", "USD"));
         post("/api/finance/accounts", workspaceHeaders("acct-fee", "payments-alpha", "payments-owner"), account("4100", "Fee Revenue", "REVENUE", "FEE_REVENUE", "USD"));
+        Map<String, Object> cashPlaceholder = post("/api/finance/accounts", workspaceHeaders("acct-cash", "payments-alpha", "payments-owner"), account("1000", "Cash Placeholder", "ASSET", "CASH_PLACEHOLDER", "USD"));
         Map<String, Object> suspense = post("/api/finance/accounts", workspaceHeaders("acct-suspense", "payments-alpha", "payments-owner"), account("9999", "Suspense", "ASSET", "SUSPENSE", "USD"));
         Map<String, Object> betaAccount = post("/api/finance/accounts", workspaceHeaders("acct-beta", "payments-beta", "payments-beta-owner"), account("1110", "Beta Authorized Funds", "ASSET", "AUTHORIZED_FUNDS", "USD"));
 
@@ -117,9 +123,15 @@ class Kay005Kay006PaymentsSettlementIntegrationTest {
                 "referenceType", "MANUAL",
                 "description", "Immutable posted entry",
                 "postings", List.of(
-                        posting(authorizedFunds.get("id"), "DEBIT", 500),
-                        posting(platformClearing.get("id"), "CREDIT", 500))));
+                        posting(suspense.get("id"), "DEBIT", 500),
+                        posting(cashPlaceholder.get("id"), "CREDIT", 500))));
         assertThat(((List<?>) manualJournal.get("postings"))).hasSize(2);
+        String manualJournalId = (String) ((Map<?, ?>) manualJournal.get("journalEntry")).get("id");
+        String manualPostingId = (String) ((Map<?, ?>) ((List<?>) manualJournal.get("postings")).get(0)).get("id");
+        assertThatThrownBy(() -> jdbcTemplate.update("UPDATE journal_entries SET description = ? WHERE id = ?::uuid", "mutated", manualJournalId))
+                .hasMessageContaining("journal_entries are immutable");
+        assertThatThrownBy(() -> jdbcTemplate.update("UPDATE journal_postings SET amount_minor = ? WHERE id = ?::uuid", 501, manualPostingId))
+                .hasMessageContaining("journal_postings are immutable");
 
         Map<String, Object> intent = post("/api/payments/intents", workspaceHeaders("payment-intent", "payments-alpha", "payments-owner"), Map.of(
                 "bookingId", bookingId,
@@ -149,10 +161,48 @@ class Kay005Kay006PaymentsSettlementIntegrationTest {
         assertThat(paymentJournals).hasSize(3);
         paymentJournals.forEach(entry -> assertBalanced((Map<?, ?>) entry));
 
+        Map<String, Object> cancelBooking = post("/api/bookings", workspaceHeaders("cancel-booking", "payments-alpha", "payments-customer"),
+                scheduledBooking(offeringId, customerProfile.get("id"), "2030-01-07T13:00:00Z", "2030-01-07T14:00:00Z"));
+        String cancelBookingId = (String) ((Map<?, ?>) cancelBooking.get("booking")).get("id");
+        Map<String, Object> cancelIntent = post("/api/payments/intents", workspaceHeaders("cancel-intent", "payments-alpha", "payments-owner"), Map.of("bookingId", cancelBookingId));
+        String cancelPaymentIntentId = (String) ((Map<?, ?>) cancelIntent.get("paymentIntent")).get("id");
+        post("/api/payments/intents/" + cancelPaymentIntentId + "/authorize", workspaceHeaders("cancel-authorize", "payments-alpha", "payments-owner"), Map.of("amountMinor", 12000));
+        Map<String, Object> cancelled = post("/api/payments/intents/" + cancelPaymentIntentId + "/cancel", workspaceHeaders("cancel-after-authorize", "payments-alpha", "payments-owner"), Map.of());
+        assertThat(((Map<?, ?>) cancelled.get("paymentIntent")).get("status")).isEqualTo("CANCELLED");
+        List<?> cancelJournals = getList("/api/finance/journal-entries/by-reference?referenceType=PAYMENT&referenceId=" + cancelPaymentIntentId, ownerHeaders, HttpStatus.OK);
+        assertThat(cancelJournals).hasSize(2);
+        cancelJournals.forEach(entry -> assertBalanced((Map<?, ?>) entry));
+
+        Map<String, Object> secondBooking = post("/api/bookings", workspaceHeaders("second-booking", "payments-alpha", "payments-customer"),
+                scheduledBooking(offeringId, customerProfile.get("id"), "2030-01-07T14:00:00Z", "2030-01-07T15:00:00Z"));
+        String secondBookingId = (String) ((Map<?, ?>) secondBooking.get("booking")).get("id");
+        Map<String, Object> secondIntent = post("/api/payments/intents", workspaceHeaders("second-payment-intent", "payments-alpha", "payments-owner"), Map.of("bookingId", secondBookingId));
+        String secondPaymentIntentId = (String) ((Map<?, ?>) secondIntent.get("paymentIntent")).get("id");
+        post("/api/payments/intents/" + secondPaymentIntentId + "/authorize", workspaceHeaders("second-payment-authorize", "payments-alpha", "payments-owner"), Map.of("amountMinor", 12000));
+        post("/api/payments/intents/" + secondPaymentIntentId + "/capture", workspaceHeaders("second-payment-capture", "payments-alpha", "payments-owner"), Map.of("amountMinor", 12000));
+        post("/api/payments/intents/" + secondPaymentIntentId + "/settle", workspaceHeaders("second-payment-settle", "payments-alpha", "payments-owner"), Map.of("amountMinor", 12000));
+
+        Map<String, Object> actionBooking = post("/api/bookings", workspaceHeaders("action-booking", "payments-alpha", "payments-customer"),
+                scheduledBooking(offeringId, customerProfile.get("id"), "2030-01-07T15:00:00Z", "2030-01-07T16:00:00Z"));
+        String actionBookingId = (String) ((Map<?, ?>) actionBooking.get("booking")).get("id");
+        Map<String, Object> actionIntent = post("/api/payments/intents", workspaceHeaders("action-payment-intent", "payments-alpha", "payments-owner"), Map.of("bookingId", actionBookingId));
+        String actionPaymentIntentId = (String) ((Map<?, ?>) actionIntent.get("paymentIntent")).get("id");
+        Map<String, Object> requiresAction = post("/api/payments/intents/" + actionPaymentIntentId + "/requires-action", workspaceHeaders("payment-requires-action", "payments-alpha", "payments-owner"), Map.of());
+        assertThat(((Map<?, ?>) requiresAction.get("paymentIntent")).get("status")).isEqualTo("REQUIRES_ACTION");
+        Map<String, Object> failed = post("/api/payments/intents/" + actionPaymentIntentId + "/fail", workspaceHeaders("payment-fail", "payments-alpha", "payments-owner"), Map.of("externalReference", "internal-failure"));
+        assertThat(((Map<?, ?>) failed.get("paymentIntent")).get("status")).isEqualTo("FAILED");
+        assertThat((List<?>) failed.get("attempts")).anySatisfy(attempt -> {
+            assertThat(((Map<?, ?>) attempt).get("status")).isEqualTo("FAILED");
+        });
+
         List<?> payables = getList("/api/finance/payable-balances?providerProfileId=" + providerProfile.get("id"), ownerHeaders, HttpStatus.OK);
         assertThat(payables).hasSize(1);
-        assertThat(((Map<?, ?>) payables.get(0)).get("payableAmountMinor")).isEqualTo(10800);
+        assertThat(((Map<?, ?>) payables.get(0)).get("payableAmountMinor")).isEqualTo(21600);
 
+        Map<String, Object> authorizedBalance = getMap("/api/finance/accounts/" + authorizedFunds.get("id") + "/balance", ownerHeaders, HttpStatus.OK);
+        assertThat(authorizedBalance.get("signedBalanceMinor")).isEqualTo(0);
+        Map<String, Object> clearingBalance = getMap("/api/finance/accounts/" + platformClearing.get("id") + "/balance", ownerHeaders, HttpStatus.OK);
+        assertThat(clearingBalance.get("signedBalanceMinor")).isEqualTo(0);
         Map<String, Object> capturedBalance = getMap("/api/finance/accounts/" + capturedFunds.get("id") + "/balance", ownerHeaders, HttpStatus.OK);
         assertThat(capturedBalance.get("signedBalanceMinor")).isEqualTo(0);
         Map<String, Object> byBooking = getMap("/api/payments/intents/by-booking/" + bookingId, ownerHeaders, HttpStatus.OK);
