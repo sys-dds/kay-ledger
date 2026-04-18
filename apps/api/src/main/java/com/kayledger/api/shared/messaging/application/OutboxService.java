@@ -59,8 +59,8 @@ public class OutboxService {
                 properties.getRelay().getBackoffSeconds());
     }
 
-    public OutboxEvent replayParked(UUID eventId) {
-        return outboxStore.replay(eventId);
+    public OutboxEvent replayParked(UUID workspaceId, UUID eventId) {
+        return outboxStore.replay(workspaceId, eventId);
     }
 
     public List<OutboxEvent> listParked(UUID workspaceId) {

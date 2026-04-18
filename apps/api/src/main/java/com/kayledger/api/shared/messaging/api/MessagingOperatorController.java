@@ -17,6 +17,7 @@ import com.kayledger.api.access.application.AccessContextResolver;
 import com.kayledger.api.access.application.AccessPolicy;
 import com.kayledger.api.access.model.WorkspaceRole;
 import com.kayledger.api.shared.idempotency.IdempotencyService;
+import com.kayledger.api.shared.messaging.application.InboxService;
 import com.kayledger.api.shared.messaging.application.OutboxRelayService;
 import com.kayledger.api.shared.messaging.application.OutboxService;
 import com.kayledger.api.shared.messaging.model.OutboxEvent;
@@ -29,6 +30,7 @@ public class MessagingOperatorController {
     private final AccessPolicy accessPolicy;
     private final OutboxService outboxService;
     private final OutboxRelayService outboxRelayService;
+    private final InboxService inboxService;
     private final IdempotencyService idempotencyService;
 
     public MessagingOperatorController(
@@ -36,11 +38,13 @@ public class MessagingOperatorController {
             AccessPolicy accessPolicy,
             OutboxService outboxService,
             OutboxRelayService outboxRelayService,
+            InboxService inboxService,
             IdempotencyService idempotencyService) {
         this.accessContextResolver = accessContextResolver;
         this.accessPolicy = accessPolicy;
         this.outboxService = outboxService;
         this.outboxRelayService = outboxRelayService;
+        this.inboxService = inboxService;
         this.idempotencyService = idempotencyService;
     }
 
@@ -90,7 +94,33 @@ public class MessagingOperatorController {
                 context.actorId(),
                 "POST /api/messaging/outbox/parked/{eventId}/replay",
                 IdempotencyService.fingerprint(workspaceSlug, actorKey, eventId),
-                () -> outboxService.replayParked(eventId));
+                () -> outboxService.replayParked(context.workspaceId(), eventId));
+    }
+
+    @GetMapping("/inbox/parked")
+    List<Map<String, Object>> parkedInbox(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey) {
+        AccessContext context = operatorContext(workspaceSlug, actorKey);
+        return inboxService.listParked(context.workspaceId());
+    }
+
+    @PostMapping("/inbox/parked/{consumerName}/{dedupeKey}/replay")
+    ResponseEntity<Object> replayInbox(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @PathVariable String consumerName,
+            @PathVariable String dedupeKey) {
+        AccessContext context = operatorContext(workspaceSlug, actorKey);
+        return idempotencyService.run(
+                idempotencyKey,
+                "WORKSPACE",
+                context.workspaceId(),
+                context.actorId(),
+                "POST /api/messaging/inbox/parked/{consumerName}/{dedupeKey}/replay",
+                IdempotencyService.fingerprint(workspaceSlug, actorKey, consumerName, dedupeKey),
+                () -> Map.of("replayed", inboxService.replayParked(context.workspaceId(), consumerName, dedupeKey)));
     }
 
     private AccessContext operatorContext(String workspaceSlug, String actorKey) {
