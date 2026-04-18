@@ -9,6 +9,11 @@ spring:
   flyway:
     enabled: true
     locations: classpath:db/migration
+  kafka:
+    bootstrap-servers: ${KAY_LEDGER_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      auto-offset-reset: earliest
+      enable-auto-commit: false
 
 management:
   endpoints:
@@ -29,3 +34,11 @@ integrations:
 kay-ledger:
   bootstrap:
     operator-admin-key: ${KAY_LEDGER_BOOTSTRAP_OPERATOR_ADMIN_KEY:}
+  async:
+    kafka:
+      topic: ${KAY_LEDGER_EVENTS_TOPIC:kay-ledger.events}
+      consumer-group-id: ${KAY_LEDGER_EVENTS_CONSUMER_GROUP:kay-ledger-api-projections}
+    relay:
+      batch-size: ${KAY_LEDGER_OUTBOX_RELAY_BATCH_SIZE:25}
+      max-attempts: ${KAY_LEDGER_OUTBOX_MAX_ATTEMPTS:3}
+      backoff-seconds: ${KAY_LEDGER_OUTBOX_BACKOFF_SECONDS:30}

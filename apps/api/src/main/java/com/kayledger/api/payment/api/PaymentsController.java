@@ -1,6 +1,7 @@
 package com.kayledger.api.payment.api;
 
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import org.springframework.http.ResponseEntity;
@@ -30,6 +31,7 @@ import com.kayledger.api.payment.model.PayoutAttempt;
 import com.kayledger.api.payment.model.PayoutRequest;
 import com.kayledger.api.payment.model.RefundRecord;
 import com.kayledger.api.shared.idempotency.IdempotencyService;
+import com.kayledger.api.shared.messaging.store.ProjectionStore;
 
 @RestController
 @RequestMapping("/api/payments")
@@ -38,14 +40,17 @@ public class PaymentsController {
     private final PaymentService paymentService;
     private final AccessContextResolver accessContextResolver;
     private final IdempotencyService idempotencyService;
+    private final ProjectionStore projectionStore;
 
     public PaymentsController(
             PaymentService paymentService,
             AccessContextResolver accessContextResolver,
-            IdempotencyService idempotencyService) {
+            IdempotencyService idempotencyService,
+            ProjectionStore projectionStore) {
         this.paymentService = paymentService;
         this.accessContextResolver = accessContextResolver;
         this.idempotencyService = idempotencyService;
+        this.projectionStore = projectionStore;
     }
 
     @PostMapping("/intents")
@@ -63,6 +68,15 @@ public class PaymentsController {
                 "POST /api/payments/intents",
                 IdempotencyService.fingerprint(workspaceSlug, actorKey, request),
                 () -> paymentService.createIntent(context, request));
+    }
+
+    @GetMapping("/projections")
+    List<Map<String, Object>> projections(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey) {
+        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
+        paymentService.list(context);
+        return projectionStore.listPayments(context.workspaceId());
     }
 
     @GetMapping("/intents")

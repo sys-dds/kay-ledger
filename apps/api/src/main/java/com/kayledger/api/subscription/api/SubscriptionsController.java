@@ -1,6 +1,7 @@
 package com.kayledger.api.subscription.api;
 
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import org.springframework.http.ResponseEntity;
@@ -15,6 +16,7 @@ import org.springframework.web.bind.annotation.RestController;
 import com.kayledger.api.access.application.AccessContext;
 import com.kayledger.api.access.application.AccessContextResolver;
 import com.kayledger.api.shared.idempotency.IdempotencyService;
+import com.kayledger.api.shared.messaging.store.ProjectionStore;
 import com.kayledger.api.subscription.application.SubscriptionService;
 import com.kayledger.api.subscription.application.SubscriptionService.CreatePlanCommand;
 import com.kayledger.api.subscription.application.SubscriptionService.CreateSubscriptionCommand;
@@ -36,14 +38,26 @@ public class SubscriptionsController {
     private final SubscriptionService subscriptionService;
     private final AccessContextResolver accessContextResolver;
     private final IdempotencyService idempotencyService;
+    private final ProjectionStore projectionStore;
 
     public SubscriptionsController(
             SubscriptionService subscriptionService,
             AccessContextResolver accessContextResolver,
-            IdempotencyService idempotencyService) {
+            IdempotencyService idempotencyService,
+            ProjectionStore projectionStore) {
         this.subscriptionService = subscriptionService;
         this.accessContextResolver = accessContextResolver;
         this.idempotencyService = idempotencyService;
+        this.projectionStore = projectionStore;
+    }
+
+    @GetMapping("/projections")
+    List<Map<String, Object>> projections(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey) {
+        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
+        subscriptionService.listSubscriptions(context);
+        return projectionStore.listSubscriptions(context.workspaceId());
     }
 
     @PostMapping("/plans")

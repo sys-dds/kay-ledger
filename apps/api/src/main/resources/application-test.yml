@@ -4,6 +4,10 @@ spring:
   flyway:
     enabled: true
     locations: classpath:db/migration
+  kafka:
+    consumer:
+      auto-offset-reset: earliest
+      enable-auto-commit: false
 
 management:
   endpoints:
@@ -14,3 +18,11 @@ management:
 kay-ledger:
   bootstrap:
     operator-admin-key: test-bootstrap-operator-key
+  async:
+    kafka:
+      topic: kay-ledger.test.events
+      consumer-group-id: kay-ledger-test-projections
+    relay:
+      batch-size: 10
+      max-attempts: 2
+      backoff-seconds: 1

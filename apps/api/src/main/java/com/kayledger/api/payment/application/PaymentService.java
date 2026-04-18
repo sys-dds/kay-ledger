@@ -1,7 +1,9 @@
 package com.kayledger.api.payment.application;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
@@ -32,6 +34,7 @@ import com.kayledger.api.payment.model.RefundRecord;
 import com.kayledger.api.payment.store.PaymentStore;
 import com.kayledger.api.shared.api.BadRequestException;
 import com.kayledger.api.shared.api.NotFoundException;
+import com.kayledger.api.shared.messaging.application.OutboxService;
 import com.kayledger.api.subscription.model.SubscriptionCycle;
 import com.kayledger.api.subscription.store.SubscriptionStore;
 
@@ -50,13 +53,15 @@ public class PaymentService {
     private final AccessPolicy accessPolicy;
     private final FinanceService financeService;
     private final SubscriptionStore subscriptionStore;
+    private final OutboxService outboxService;
 
-    public PaymentService(PaymentStore paymentStore, BookingStore bookingStore, AccessPolicy accessPolicy, FinanceService financeService, SubscriptionStore subscriptionStore) {
+    public PaymentService(PaymentStore paymentStore, BookingStore bookingStore, AccessPolicy accessPolicy, FinanceService financeService, SubscriptionStore subscriptionStore, OutboxService outboxService) {
         this.paymentStore = paymentStore;
         this.bookingStore = bookingStore;
         this.accessPolicy = accessPolicy;
         this.financeService = financeService;
         this.subscriptionStore = subscriptionStore;
+        this.outboxService = outboxService;
     }
 
     @Transactional
@@ -77,6 +82,7 @@ public class PaymentService {
                 booking.netAmountMinor(),
                 blankToNull(command.externalReference()));
         requireIntentMatchesBooking(intent, booking);
+        appendPaymentEvent(context.workspaceId(), intent, "payment.intent.created");
         return details(context.workspaceId(), intent);
     }
 
@@ -119,6 +125,7 @@ public class PaymentService {
             attachJournal(context.workspaceId(), authorized, attempt, "Payment authorization held funds posture", List.of(
                     posting(account(context.workspaceId(), "AUTHORIZED_FUNDS", authorized.currencyCode()), "DEBIT", amount, authorized.currencyCode()),
                     posting(account(context.workspaceId(), "PLATFORM_CLEARING", authorized.currencyCode()), "CREDIT", amount, authorized.currencyCode())));
+            appendPaymentEvent(context.workspaceId(), authorized, "payment.authorized");
             return details(context.workspaceId(), authorized);
         } catch (EmptyResultDataAccessException exception) {
             throw new BadRequestException("Payment intent could not be authorized.");
@@ -147,6 +154,7 @@ public class PaymentService {
                     posting(account(context.workspaceId(), "CAPTURED_FUNDS", captured.currencyCode()), "DEBIT", amount, captured.currencyCode()),
                     posting(account(context.workspaceId(), "AUTHORIZED_FUNDS", captured.currencyCode()), "CREDIT", amount, captured.currencyCode()),
                     posting(account(context.workspaceId(), "PLATFORM_CLEARING", captured.currencyCode()), "CREDIT", amount, captured.currencyCode())));
+            appendPaymentEvent(context.workspaceId(), captured, "payment.captured");
             return details(context.workspaceId(), captured);
         } catch (EmptyResultDataAccessException exception) {
             throw new BadRequestException("Payment intent could not be captured.");
@@ -176,6 +184,7 @@ public class PaymentService {
                     settled.providerProfileId(),
                     settled.currencyCode());
             activateSubscriptionCycleIfPresent(context.workspaceId(), settled);
+            appendPaymentEvent(context.workspaceId(), settled, "payment.settled");
             return details(context.workspaceId(), settled);
         } catch (EmptyResultDataAccessException exception) {
             throw new BadRequestException("Payment intent could not be settled.");
@@ -194,6 +203,7 @@ public class PaymentService {
                         posting(account(context.workspaceId(), "PLATFORM_CLEARING", cancelled.currencyCode()), "DEBIT", existing.authorizedAmountMinor(), cancelled.currencyCode()),
                         posting(account(context.workspaceId(), "AUTHORIZED_FUNDS", cancelled.currencyCode()), "CREDIT", existing.authorizedAmountMinor(), cancelled.currencyCode())));
             }
+            appendPaymentEvent(context.workspaceId(), cancelled, "payment.cancelled");
             return details(context.workspaceId(), cancelled);
         } catch (EmptyResultDataAccessException exception) {
             throw new BadRequestException("Payment intent could not be cancelled.");
@@ -225,6 +235,7 @@ public class PaymentService {
         try {
             PaymentIntent failed = paymentStore.fail(context.workspaceId(), existing.id());
             paymentStore.createAttempt(context.workspaceId(), failed.id(), "AUTHORIZE", "FAILED", 0, externalReference(command), null);
+            appendPaymentEvent(context.workspaceId(), failed, "payment.failed");
             return details(context.workspaceId(), failed);
         } catch (EmptyResultDataAccessException exception) {
             throw new BadRequestException("Payment intent could not be failed.");
@@ -356,6 +367,7 @@ public class PaymentService {
         RefundRecord failed = paymentStore.markRefundFailed(context.workspaceId(), refund.id());
         paymentStore.createRefundAttempt(context.workspaceId(), failed.id(), "FAILED", requireText(command == null ? null : command.failureReason(), "failureReason"), externalReference(command));
         attachRefundJournal(context.workspaceId(), failed, intent, "Refund failure reverses prior refund posture", reverseRefundPostings(context.workspaceId(), intent, refund.refundType(), refund.amountMinor(), refund.payableReductionAmountMinor()));
+        outboxService.append(context.workspaceId(), "REFUND", failed.id(), "refund.failed", "refund.failed:" + failed.id(), refundData(failed, intent));
         return failed;
     }
 
@@ -372,6 +384,7 @@ public class PaymentService {
         RefundRecord succeeded = paymentStore.markRefundSucceeded(context.workspaceId(), refund.id());
         paymentStore.createRefundAttempt(context.workspaceId(), succeeded.id(), "SUCCEEDED", null, externalReference(command));
         attachRefundJournal(context.workspaceId(), succeeded, intent, "Refund retry reapplies compensating payable and fee effects", refundPostings(context.workspaceId(), intent, succeeded.refundType(), succeeded.amountMinor(), succeeded.payableReductionAmountMinor()));
+        outboxService.append(context.workspaceId(), "REFUND", succeeded.id(), "refund.retried", "refund.retried:" + succeeded.id(), refundData(succeeded, intent));
         return succeeded;
     }
 
@@ -398,9 +411,11 @@ public class PaymentService {
         }
         DisputeRecord dispute = paymentStore.createDispute(context.workspaceId(), intent.id(), intent.bookingId(), amountMinor, amountMinor);
         paymentStore.createFrozenFund(context.workspaceId(), intent.providerProfileId(), dispute.id(), intent.currencyCode(), amountMinor);
-        return attachDisputeOpenJournal(context.workspaceId(), dispute, intent, "Dispute opening freezes seller payable", List.of(
+        DisputeRecord opened = attachDisputeOpenJournal(context.workspaceId(), dispute, intent, "Dispute opening freezes seller payable", List.of(
                 posting(account(context.workspaceId(), "SELLER_PAYABLE", intent.currencyCode()), "DEBIT", amountMinor, intent.currencyCode()),
                 posting(account(context.workspaceId(), "FROZEN_PAYABLE", intent.currencyCode()), "CREDIT", amountMinor, intent.currencyCode())));
+        outboxService.append(context.workspaceId(), "DISPUTE", opened.id(), "dispute.opened", "dispute.opened:" + opened.id(), disputeData(opened, intent));
+        return opened;
     }
 
     @Transactional
@@ -414,9 +429,11 @@ public class PaymentService {
         paymentStore.updateFrozenFundStatus(context.workspaceId(), frozenFund.id(), frozenStatus);
         DisputeRecord resolved = paymentStore.resolveDispute(context.workspaceId(), dispute.id(), resolution, resolution);
         String creditPurpose = "LOST".equals(resolution) ? "DISPUTE_RESERVE" : "SELLER_PAYABLE";
-        return attachDisputeResolveJournal(context.workspaceId(), resolved, frozenFund, "Dispute resolution updates frozen payable posture", List.of(
+        DisputeRecord completed = attachDisputeResolveJournal(context.workspaceId(), resolved, frozenFund, "Dispute resolution updates frozen payable posture", List.of(
                 posting(account(context.workspaceId(), "FROZEN_PAYABLE", frozenFund.currencyCode()), "DEBIT", frozenFund.amountMinor(), frozenFund.currencyCode()),
                 posting(account(context.workspaceId(), creditPurpose, frozenFund.currencyCode()), "CREDIT", frozenFund.amountMinor(), frozenFund.currencyCode())));
+        outboxService.append(context.workspaceId(), "DISPUTE", completed.id(), "dispute.resolved", "dispute.resolved:" + completed.id() + ":" + resolution, disputeData(completed, intent(context, completed.paymentIntentId())));
+        return completed;
     }
 
     public List<DisputeRecord> listDisputes(AccessContext context) {
@@ -451,11 +468,57 @@ public class PaymentService {
         long payableReduction = Math.min(amountMinor, remainingPayableExposure);
         RefundRecord refund = paymentStore.createRefund(context.workspaceId(), intent.id(), intent.bookingId(), refundType, amountMinor, payableReduction);
         paymentStore.createRefundAttempt(context.workspaceId(), refund.id(), "SUCCEEDED", null, externalReference(command));
-        return attachRefundJournal(context.workspaceId(), refund, intent, refundDescription(refundType), refundPostings(context.workspaceId(), intent, refundType, amountMinor, payableReduction));
+        RefundRecord recorded = attachRefundJournal(context.workspaceId(), refund, intent, refundDescription(refundType), refundPostings(context.workspaceId(), intent, refundType, amountMinor, payableReduction));
+        outboxService.append(context.workspaceId(), "REFUND", recorded.id(), "refund.created", "refund.created:" + recorded.id(), refundData(recorded, intent));
+        return recorded;
     }
 
     private PaymentIntentDetails details(UUID workspaceId, PaymentIntent intent) {
         return new PaymentIntentDetails(intent, paymentStore.listAttempts(workspaceId, intent.id()));
+    }
+
+    private void appendPaymentEvent(UUID workspaceId, PaymentIntent intent, String eventType) {
+        outboxService.append(workspaceId, "PAYMENT", intent.id(), eventType, eventType + ":" + intent.id() + ":" + intent.status(), paymentData(intent));
+    }
+
+    private Map<String, Object> paymentData(PaymentIntent intent) {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("paymentIntentId", intent.id());
+        put(data, "bookingId", intent.bookingId());
+        put(data, "subscriptionId", intent.subscriptionId());
+        put(data, "subscriptionCycleId", intent.subscriptionCycleId());
+        data.put("providerProfileId", intent.providerProfileId());
+        data.put("status", intent.status());
+        data.put("currencyCode", intent.currencyCode());
+        data.put("grossAmountMinor", intent.grossAmountMinor());
+        data.put("feeAmountMinor", intent.feeAmountMinor());
+        data.put("netAmountMinor", intent.netAmountMinor());
+        return data;
+    }
+
+    private Map<String, Object> refundData(RefundRecord refund, PaymentIntent intent) {
+        Map<String, Object> data = paymentData(intent);
+        data.put("refundId", refund.id());
+        data.put("refundType", refund.refundType());
+        data.put("refundStatus", refund.status());
+        data.put("amountMinor", refund.amountMinor());
+        data.put("payableReductionAmountMinor", refund.payableReductionAmountMinor());
+        return data;
+    }
+
+    private Map<String, Object> disputeData(DisputeRecord dispute, PaymentIntent intent) {
+        Map<String, Object> data = paymentData(intent);
+        data.put("disputeId", dispute.id());
+        data.put("status", dispute.status());
+        data.put("disputedAmountMinor", dispute.disputedAmountMinor());
+        data.put("frozenAmountMinor", dispute.frozenAmountMinor());
+        return data;
+    }
+
+    private static void put(Map<String, Object> data, String key, Object value) {
+        if (value != null) {
+            data.put(key, value);
+        }
     }
 
     private List<PostingCommand> settlementPostings(UUID workspaceId, PaymentIntent settled, long amount) {
@@ -487,7 +550,15 @@ public class PaymentService {
                 paid.cycleStartAt(),
                 paid.cycleEndAt());
         subscriptionStore.pendingPlanChange(workspaceId, paid.subscriptionId(), paid.cycleNumber(), paid.cycleStartAt())
-                .ifPresent(change -> subscriptionStore.markPlanChangeApplied(workspaceId, change.id()));
+                .ifPresent(change -> {
+                    subscriptionStore.markPlanChangeApplied(workspaceId, change.id());
+                    Map<String, Object> data = new LinkedHashMap<>();
+                    data.put("subscriptionId", paid.subscriptionId());
+                    data.put("subscriptionCycleId", paid.id());
+                    data.put("planChangeId", change.id());
+                    data.put("targetPlanId", change.targetPlanId());
+                    outboxService.append(workspaceId, "SUBSCRIPTION", paid.subscriptionId(), "subscription.plan_change.applied", "subscription.plan_change.applied:" + change.id() + ":" + paid.id(), data);
+                });
         subscriptionStore.upsertEntitlement(
                 workspaceId,
                 paid.subscriptionId(),
@@ -495,6 +566,14 @@ public class PaymentService {
                 "ACTIVE",
                 paid.cycleStartAt(),
                 paid.cycleEndAt());
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("subscriptionId", paid.subscriptionId());
+        data.put("subscriptionCycleId", paid.id());
+        data.put("cycleNumber", paid.cycleNumber());
+        data.put("currentPlanId", paid.planId());
+        data.put("entitlementStatus", "ACTIVE");
+        data.put("nextRenewalBoundary", paid.cycleEndAt());
+        outboxService.append(workspaceId, "SUBSCRIPTION", paid.subscriptionId(), "subscription.renewal.succeeded", "subscription.renewal.succeeded:" + paid.subscriptionId() + ":" + paid.id(), data);
     }
 
     private void attachJournal(UUID workspaceId, PaymentIntent intent, PaymentAttempt attempt, String description, List<PostingCommand> postings) {

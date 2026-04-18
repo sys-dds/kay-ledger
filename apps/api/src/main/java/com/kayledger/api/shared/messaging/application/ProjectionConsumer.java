@@ -1,0 +1,87 @@
+package com.kayledger.api.shared.messaging.application;
+
+import java.util.Map;
+import java.util.UUID;
+
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.springframework.kafka.annotation.KafkaListener;
+import org.springframework.stereotype.Component;
+
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.kayledger.api.shared.events.DomainEventPayload;
+import com.kayledger.api.shared.messaging.store.ProjectionStore;
+
+@Component
+public class ProjectionConsumer {
+
+    private static final String CONSUMER_NAME = "projection-consumer";
+
+    private final InboxService inboxService;
+    private final ProjectionStore projectionStore;
+    private final ObjectMapper objectMapper;
+
+    public ProjectionConsumer(InboxService inboxService, ProjectionStore projectionStore, ObjectMapper objectMapper) {
+        this.inboxService = inboxService;
+        this.projectionStore = projectionStore;
+        this.objectMapper = objectMapper;
+    }
+
+    @KafkaListener(
+            topics = "${kay-ledger.async.kafka.topic}",
+            groupId = "${kay-ledger.async.kafka.consumer-group-id}")
+    public void consume(ConsumerRecord<String, String> record) {
+        DomainEventPayload event = payload(record.value());
+        inboxService.processOnce(
+                event.workspaceId(),
+                record.topic(),
+                record.partition(),
+                record.key(),
+                event.eventId(),
+                event.dedupeKey(),
+                CONSUMER_NAME,
+                () -> {
+                    apply(event);
+                    return true;
+                });
+    }
+
+    public void apply(DomainEventPayload event) {
+        if (event.eventType().startsWith("payment.")) {
+            projectionStore.upsertPayment(event.workspaceId(), event.data());
+        }
+        if (event.eventType().startsWith("subscription.")) {
+            UUID subscriptionId = subscriptionId(event);
+            if (subscriptionId != null) {
+                projectionStore.upsertSubscription(event.workspaceId(), subscriptionId, event.data());
+            }
+        }
+    }
+
+    private DomainEventPayload payload(String value) {
+        try {
+            Map<String, Object> raw = objectMapper.readValue(value, new TypeReference<>() {
+            });
+            return new DomainEventPayload(
+                    UUID.fromString(raw.get("eventId").toString()),
+                    raw.get("workspaceId") == null ? null : UUID.fromString(raw.get("workspaceId").toString()),
+                    raw.get("aggregateType").toString(),
+                    UUID.fromString(raw.get("aggregateId").toString()),
+                    raw.get("eventType").toString(),
+                    raw.get("dedupeKey").toString(),
+                    null,
+                    objectMapper.convertValue(raw.get("data"), new TypeReference<>() {
+                    }));
+        } catch (Exception exception) {
+            throw new IllegalArgumentException("Event payload could not be consumed.", exception);
+        }
+    }
+
+    private static UUID subscriptionId(DomainEventPayload event) {
+        Object value = event.data().get("subscriptionId");
+        if (value == null && "SUBSCRIPTION".equals(event.aggregateType())) {
+            return event.aggregateId();
+        }
+        return value == null ? null : UUID.fromString(value.toString());
+    }
+}
