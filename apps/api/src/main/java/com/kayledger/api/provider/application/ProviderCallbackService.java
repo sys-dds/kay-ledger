@@ -1,5 +1,8 @@
 package com.kayledger.api.provider.application;
 
+import java.security.MessageDigest;
+import java.security.SecureRandom;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.HexFormat;
 import java.util.List;
@@ -13,12 +16,12 @@ import javax.crypto.spec.SecretKeySpec;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.kayledger.api.access.application.AccessContext;
 import com.kayledger.api.access.application.AccessPolicy;
 import com.kayledger.api.access.model.AccessScope;
 import com.kayledger.api.access.model.WorkspaceRole;
+import com.kayledger.api.investigation.application.InvestigationIndexingService;
 import com.kayledger.api.payment.application.PaymentService;
 import com.kayledger.api.provider.model.ProviderCallback;
 import com.kayledger.api.provider.model.ProviderConfig;
@@ -39,17 +42,20 @@ public class ProviderCallbackService {
             "REFUND_FAILED",
             "PAYOUT_SUCCEEDED",
             "PAYOUT_FAILED");
+    private static final SecureRandom SECURE_RANDOM = new SecureRandom();
 
     private final ProviderStore providerStore;
     private final PaymentService paymentService;
     private final AccessPolicy accessPolicy;
     private final ObjectMapper objectMapper;
+    private final InvestigationIndexingService investigationIndexingService;
 
-    public ProviderCallbackService(ProviderStore providerStore, PaymentService paymentService, AccessPolicy accessPolicy, ObjectMapper objectMapper) {
+    public ProviderCallbackService(ProviderStore providerStore, PaymentService paymentService, AccessPolicy accessPolicy, ObjectMapper objectMapper, InvestigationIndexingService investigationIndexingService) {
         this.providerStore = providerStore;
         this.paymentService = paymentService;
         this.accessPolicy = accessPolicy;
         this.objectMapper = objectMapper;
+        this.investigationIndexingService = investigationIndexingService;
     }
 
     @Transactional
@@ -59,7 +65,8 @@ public class ProviderCallbackService {
                 context.workspaceId(),
                 requireText(command.providerKey(), "providerKey"),
                 requireText(command.displayName(), "displayName"),
-                requireText(command.signingSecret(), "signingSecret"));
+                requireText(command.signingSecret(), "signingSecret"),
+                callbackToken(command.callbackToken()));
     }
 
     public List<ProviderCallback> listCallbacks(AccessContext context) {
@@ -67,27 +74,44 @@ public class ProviderCallbackService {
         return providerStore.listCallbacks(context.workspaceId());
     }
 
-    @Transactional
-    public ProviderCallback ingest(UUID workspaceId, String providerKey, String signatureHeader, ProviderCallbackCommand command) {
-        ProviderConfig config = providerStore.findConfig(workspaceId, requireText(providerKey, "providerKey"))
-                .orElseThrow(() -> new NotFoundException("Provider config was not found."));
-        return ingest(config, signatureHeader, command);
+    public Map<String, Object> investigationReference(AccessContext context, UUID callbackId) {
+        requireProviderRead(context);
+        ProviderCallback callback = providerStore.findCallback(context.workspaceId(), callbackId)
+                .orElseThrow(() -> new NotFoundException("Provider callback was not found."));
+        return Map.of(
+                "referenceType", "PROVIDER_CALLBACK",
+                "referenceId", callback.id(),
+                "providerEventId", callback.providerEventId(),
+                "businessReferenceType", callback.businessReferenceType(),
+                "businessReferenceId", callback.businessReferenceId());
     }
 
-    @Transactional
-    public ProviderCallback ingestExternal(String workspaceSlug, String providerKey, String signatureHeader, ProviderCallbackCommand command) {
-        ProviderConfig config = providerStore.findConfigByWorkspaceSlug(requireText(workspaceSlug, "X-Workspace-Slug"), requireText(providerKey, "providerKey"))
+    public ProviderCallback ingestExternal(String callbackToken, String signatureHeader, byte[] rawPayload) {
+        ProviderConfig config = providerStore.findConfigByCallbackToken(requireText(callbackToken, "callbackToken"))
                 .orElseThrow(() -> new NotFoundException("Provider config was not found."));
-        return ingest(config, signatureHeader, command);
+        if (rawPayload == null || rawPayload.length == 0) {
+            throw new BadRequestException("request body is required.");
+        }
+        return ingest(config, signatureHeader, rawPayload);
     }
 
-    private ProviderCallback ingest(ProviderConfig config, String signatureHeader, ProviderCallbackCommand command) {
+    public ProviderCallback ingestWorkspaceScoped(AccessContext context, String providerKey, String signatureHeader, byte[] rawPayload) {
+        requireProviderAdmin(context);
+        ProviderConfig config = providerStore.findConfig(context.workspaceId(), requireText(providerKey, "providerKey"))
+                .orElseThrow(() -> new NotFoundException("Provider config was not found."));
+        if (rawPayload == null || rawPayload.length == 0) {
+            throw new BadRequestException("request body is required.");
+        }
+        return ingest(config, signatureHeader, rawPayload);
+    }
+
+    private ProviderCallback ingest(ProviderConfig config, String signatureHeader, byte[] rawPayload) {
         UUID workspaceId = config.workspaceId();
-        String payload = payloadJson(command);
-        String expected = sign(config.signingSecret(), payload);
-        if (!expected.equals(requireText(signatureHeader, "X-Provider-Signature"))) {
+        ProviderCallbackCommand command = payload(rawPayload);
+        if (!validSignature(config.signingSecret(), rawPayload, command, requireText(signatureHeader, "X-Provider-Signature"))) {
             throw new ForbiddenException("Provider callback signature is invalid.");
         }
+        String payloadJson = new String(rawPayload, StandardCharsets.UTF_8);
         String callbackType = requireOneOf(command.callbackType(), CALLBACK_TYPES, "callbackType");
         String referenceType = referenceType(callbackType);
         UUID referenceId = requireId(command.businessReferenceId(), "businessReferenceId");
@@ -101,22 +125,39 @@ public class ProviderCallbackService {
                 callbackType,
                 referenceType,
                 referenceId,
-                payload,
+                payloadJson,
                 signatureHeader,
                 true,
-                dedupeKey);
+                dedupeKey)
+                .orElseGet(() -> providerStore.findCallbackByDedupe(workspaceId, config.providerKey(), dedupeKey)
+                        .orElseThrow(() -> new BadRequestException("Provider callback dedupe state could not be resolved.")));
         if (!"RECEIVED".equals(callback.processingStatus())) {
             return callback;
         }
         Long latest = providerStore.latestAppliedSequence(workspaceId, referenceType, referenceId);
         if (latest != null && callback.providerSequence() != null && callback.providerSequence() <= latest) {
-            return providerStore.markIgnoredOutOfOrder(workspaceId, callback.id());
+            ProviderCallback ignored = providerStore.markIgnoredOutOfOrder(workspaceId, callback.id());
+            reindex(workspaceId, referenceType, referenceId, callback.id());
+            return ignored;
         }
         try {
             applyTruth(workspaceId, callbackType, referenceId, amount(command), command.providerEventId());
-            return providerStore.markApplied(workspaceId, callback.id());
+            ProviderCallback applied = providerStore.markApplied(workspaceId, callback.id());
+            reindex(workspaceId, referenceType, referenceId, callback.id());
+            return applied;
         } catch (RuntimeException exception) {
-            return providerStore.markFailed(workspaceId, callback.id(), exception.getMessage());
+            providerStore.markFailed(workspaceId, callback.id(), exception.getMessage());
+            reindex(workspaceId, referenceType, referenceId, callback.id());
+            throw new ProviderCallbackApplyException("Provider callback application failed; retry is required.", exception);
+        }
+    }
+
+    private void reindex(UUID workspaceId, String referenceType, UUID referenceId, UUID callbackId) {
+        try {
+            investigationIndexingService.indexReference(workspaceId, referenceType, referenceId);
+            investigationIndexingService.indexReference(workspaceId, "PROVIDER_CALLBACK", callbackId);
+        } catch (RuntimeException ignored) {
+            // Operator search is an index target; callback truth stays durable in PostgreSQL.
         }
     }
 
@@ -144,22 +185,51 @@ public class ProviderCallbackService {
         accessPolicy.requireScope(context, AccessScope.PAYMENT_READ);
     }
 
-    private String payloadJson(ProviderCallbackCommand command) {
+    private ProviderCallbackCommand payload(byte[] rawPayload) {
         try {
-            return objectMapper.writeValueAsString(command);
-        } catch (JsonProcessingException exception) {
-            throw new BadRequestException("Provider callback payload could not be serialized.");
+            return objectMapper.readValue(rawPayload, ProviderCallbackCommand.class);
+        } catch (IOException exception) {
+            throw new BadRequestException("Provider callback payload could not be parsed.");
         }
     }
 
-    private static String sign(String secret, String payload) {
+    private static String sign(String secret, byte[] payload) {
         try {
             Mac mac = Mac.getInstance("HmacSHA256");
             mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
-            return HexFormat.of().formatHex(mac.doFinal(payload.getBytes(StandardCharsets.UTF_8)));
+            return HexFormat.of().formatHex(mac.doFinal(payload));
         } catch (Exception exception) {
             throw new BadRequestException("Provider signature could not be verified.");
         }
+    }
+
+    private static boolean validSignature(String secret, byte[] rawPayload, ProviderCallbackCommand command, String actual) {
+        return constantTimeEquals(sign(secret, rawPayload), actual)
+                || constantTimeEquals(sign(secret, canonicalPayload(command).getBytes(StandardCharsets.UTF_8)), actual);
+    }
+
+    private static String canonicalPayload(ProviderCallbackCommand command) {
+        return "{\"providerEventId\":\"" + requireText(command.providerEventId(), "providerEventId")
+                + "\",\"providerSequence\":" + command.providerSequence()
+                + ",\"callbackType\":\"" + requireText(command.callbackType(), "callbackType")
+                + "\",\"businessReferenceId\":\"" + requireId(command.businessReferenceId(), "businessReferenceId")
+                + "\",\"amountMinor\":" + amount(command)
+                + ",\"metadata\":null}";
+    }
+
+    private static boolean constantTimeEquals(String expected, String actual) {
+        return MessageDigest.isEqual(
+                expected.getBytes(StandardCharsets.UTF_8),
+                actual.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static String callbackToken(String requested) {
+        if (requested != null && !requested.isBlank()) {
+            return requested.trim();
+        }
+        byte[] token = new byte[32];
+        SECURE_RANDOM.nextBytes(token);
+        return HexFormat.of().formatHex(token);
     }
 
     private static String referenceType(String callbackType) {
@@ -198,7 +268,13 @@ public class ProviderCallbackService {
         return required;
     }
 
-    public record CreateProviderConfigCommand(String providerKey, String displayName, String signingSecret) {
+    public static class ProviderCallbackApplyException extends RuntimeException {
+        public ProviderCallbackApplyException(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
+
+    public record CreateProviderConfigCommand(String providerKey, String displayName, String signingSecret, String callbackToken) {
     }
 
     public record ProviderCallbackCommand(String providerEventId, Long providerSequence, String callbackType, UUID businessReferenceId, Long amountMinor, Map<String, Object> metadata) {

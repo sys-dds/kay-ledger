@@ -42,3 +42,14 @@ kay-ledger:
       batch-size: ${KAY_LEDGER_OUTBOX_RELAY_BATCH_SIZE:25}
       max-attempts: ${KAY_LEDGER_OUTBOX_MAX_ATTEMPTS:3}
       backoff-seconds: ${KAY_LEDGER_OUTBOX_BACKOFF_SECONDS:30}
+  search:
+    opensearch:
+      endpoint: ${KAY_LEDGER_OPENSEARCH_ENDPOINT:http://localhost:9200}
+      investigation-index: ${KAY_LEDGER_OPENSEARCH_INVESTIGATION_INDEX:kay-ledger-investigation}
+  object-storage:
+    endpoint: ${KAY_LEDGER_OBJECT_STORAGE_ENDPOINT:http://localhost:9000}
+    region: ${KAY_LEDGER_OBJECT_STORAGE_REGION:us-east-1}
+    bucket: ${KAY_LEDGER_OBJECT_STORAGE_BUCKET:kay-ledger-exports}
+    access-key: ${KAY_LEDGER_OBJECT_STORAGE_ACCESS_KEY:kay_ledger}
+    secret-key: ${KAY_LEDGER_OBJECT_STORAGE_SECRET_KEY:kay_ledger_secret}
+    path-style-access-enabled: ${KAY_LEDGER_OBJECT_STORAGE_PATH_STYLE:true}

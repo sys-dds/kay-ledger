@@ -1,6 +1,8 @@
 package com.kayledger.api.provider.api;
 
 import java.util.List;
+import java.util.Map;
+import java.util.UUID;
 
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -15,7 +17,6 @@ import com.kayledger.api.access.application.AccessContext;
 import com.kayledger.api.access.application.AccessContextResolver;
 import com.kayledger.api.provider.application.ProviderCallbackService;
 import com.kayledger.api.provider.application.ProviderCallbackService.CreateProviderConfigCommand;
-import com.kayledger.api.provider.application.ProviderCallbackService.ProviderCallbackCommand;
 import com.kayledger.api.provider.model.ProviderCallback;
 import com.kayledger.api.provider.model.ProviderConfig;
 import com.kayledger.api.shared.idempotency.IdempotencyService;
@@ -54,13 +55,23 @@ public class ProviderCallbacksController {
                 () -> providerCallbackService.createConfig(context, request));
     }
 
-    @PostMapping("/{providerKey}/callbacks")
+    @PostMapping("/callbacks/{callbackToken}")
     ProviderCallback ingest(
+            @RequestHeader(value = "X-Provider-Signature", required = false) String signature,
+            @PathVariable String callbackToken,
+            @RequestBody byte[] rawPayload) {
+        return providerCallbackService.ingestExternal(callbackToken, signature, rawPayload);
+    }
+
+    @PostMapping("/{providerKey}/callbacks")
+    ProviderCallback ingestWorkspaceScoped(
             @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
             @RequestHeader(value = "X-Provider-Signature", required = false) String signature,
             @PathVariable String providerKey,
-            @RequestBody ProviderCallbackCommand request) {
-        return providerCallbackService.ingestExternal(workspaceSlug, providerKey, signature, request);
+            @RequestBody byte[] rawPayload) {
+        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
+        return providerCallbackService.ingestWorkspaceScoped(context, providerKey, signature, rawPayload);
     }
 
     @GetMapping("/callbacks")
@@ -69,5 +80,14 @@ public class ProviderCallbacksController {
             @RequestHeader(value = "X-Actor-Key", required = false) String actorKey) {
         AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
         return providerCallbackService.listCallbacks(context);
+    }
+
+    @GetMapping("/callbacks/{callbackId}/investigation")
+    Map<String, Object> callbackInvestigation(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @PathVariable UUID callbackId) {
+        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
+        return providerCallbackService.investigationReference(context, callbackId);
     }
 }

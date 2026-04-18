@@ -457,7 +457,7 @@ public class PaymentStore {
                     WHERE r.workspace_id = ?
                       AND pi.provider_profile_id = ?
                       AND pi.currency_code = ?
-                      AND r.status = 'SUCCEEDED'
+                      AND r.journal_entry_id IS NOT NULL
                 ),
                 frozen AS (
                     SELECT COALESCE(SUM(amount_minor), 0) AS amount
@@ -538,7 +538,7 @@ public class PaymentStore {
                            WHERE r.workspace_id = pc.workspace_id
                              AND pi.provider_profile_id = pc.provider_profile_id
                              AND pi.currency_code = pc.currency_code
-                             AND r.status = 'SUCCEEDED'), 0) AS refunded_amount_minor,
+                             AND r.journal_entry_id IS NOT NULL), 0) AS refunded_amount_minor,
                        COALESCE((SELECT SUM(amount_minor)
                            FROM frozen_funds ff
                            WHERE ff.workspace_id = pc.workspace_id
@@ -565,7 +565,7 @@ public class PaymentStore {
                                WHERE r.workspace_id = pc.workspace_id
                                  AND pi.provider_profile_id = pc.provider_profile_id
                                  AND pi.currency_code = pc.currency_code
-                                 AND r.status = 'SUCCEEDED'), 0)
+                                 AND r.journal_entry_id IS NOT NULL), 0)
                            - COALESCE((SELECT SUM(amount_minor)
                                FROM frozen_funds ff
                                WHERE ff.workspace_id = pc.workspace_id
@@ -735,6 +735,17 @@ public class PaymentStore {
                 """, REFUND_MAPPER, workspaceId, paymentIntentId, bookingId, refundType, amountMinor, payableReductionAmountMinor);
     }
 
+    public RefundRecord markRefundProcessing(UUID workspaceId, UUID refundId) {
+        return jdbcTemplate.queryForObject("""
+                UPDATE refunds
+                SET status = 'PROCESSING'
+                WHERE workspace_id = ?
+                  AND id = ?
+                  AND status = 'FAILED'
+                RETURNING *
+                """, REFUND_MAPPER, workspaceId, refundId);
+    }
+
     public void attachRefundJournal(UUID workspaceId, UUID refundId, UUID journalEntryId) {
         jdbcTemplate.update("""
                 UPDATE refunds
@@ -783,7 +794,7 @@ public class PaymentStore {
                 SET status = 'FAILED'
                 WHERE workspace_id = ?
                   AND id = ?
-                  AND status = 'SUCCEEDED'
+                  AND status IN ('REQUESTED', 'PROCESSING', 'SUCCEEDED')
                 RETURNING *
                 """, REFUND_MAPPER, workspaceId, refundId);
     }
@@ -794,7 +805,7 @@ public class PaymentStore {
                 SET status = 'SUCCEEDED'
                 WHERE workspace_id = ?
                   AND id = ?
-                  AND status = 'FAILED'
+                  AND status IN ('REQUESTED', 'PROCESSING', 'FAILED')
                 RETURNING *
                 """, REFUND_MAPPER, workspaceId, refundId);
     }
@@ -805,7 +816,7 @@ public class PaymentStore {
                 FROM refunds
                 WHERE workspace_id = ?
                   AND payment_intent_id = ?
-                  AND status = 'SUCCEEDED'
+                  AND status IN ('REQUESTED', 'PROCESSING', 'SUCCEEDED')
                 """, Long.class, workspaceId, paymentIntentId);
         return value == null ? 0 : value;
     }
@@ -816,7 +827,7 @@ public class PaymentStore {
                 FROM refunds
                 WHERE workspace_id = ?
                   AND payment_intent_id = ?
-                  AND status = 'SUCCEEDED'
+                  AND status IN ('REQUESTED', 'PROCESSING', 'SUCCEEDED')
                 """, Long.class, workspaceId, paymentIntentId);
         return value == null ? 0 : value;
     }

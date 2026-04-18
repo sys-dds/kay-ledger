@@ -1,6 +1,7 @@
 package com.kayledger.api.reconciliation.api;
 
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import org.springframework.http.ResponseEntity;
@@ -69,6 +70,15 @@ public class ReconciliationController {
             @RequestHeader(value = "X-Actor-Key", required = false) String actorKey) {
         AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
         return reconciliationService.listMismatches(context);
+    }
+
+    @GetMapping("/mismatches/{mismatchId}/investigation")
+    Map<String, Object> mismatchInvestigation(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @PathVariable UUID mismatchId) {
+        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
+        return reconciliationService.investigationReference(context, mismatchId);
     }
 
     @PostMapping("/mismatches/{mismatchId}/mark-repair")

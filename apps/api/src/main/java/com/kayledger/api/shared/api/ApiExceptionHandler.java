@@ -8,6 +8,8 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
+import com.kayledger.api.provider.application.ProviderCallbackService.ProviderCallbackApplyException;
+
 @RestControllerAdvice
 public class ApiExceptionHandler {
 
@@ -29,6 +31,16 @@ public class ApiExceptionHandler {
     @ExceptionHandler(DataIntegrityViolationException.class)
     ResponseEntity<ApiError> conflict(DataIntegrityViolationException exception) {
         return error(HttpStatus.CONFLICT, "Request conflicts with existing data or tenant boundaries.");
+    }
+
+    @ExceptionHandler(ProviderCallbackApplyException.class)
+    ResponseEntity<ApiError> providerCallbackApplyFailure(ProviderCallbackApplyException exception) {
+        return error(HttpStatus.INTERNAL_SERVER_ERROR, exception.getMessage());
+    }
+
+    @ExceptionHandler(InternalFailureException.class)
+    ResponseEntity<ApiError> internalFailure(InternalFailureException exception) {
+        return error(HttpStatus.INTERNAL_SERVER_ERROR, exception.getMessage());
     }
 
     private static ResponseEntity<ApiError> error(HttpStatus status, String message) {
