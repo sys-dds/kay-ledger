@@ -264,7 +264,10 @@ public class PaymentService {
             throw new BadRequestException("Payout request body is required.");
         }
         UUID providerProfileId = requireId(command.providerProfileId(), "providerProfileId");
-        riskService.requireNotBlocked(context.workspaceId(), "PROVIDER_PROFILE", providerProfileId);
+        riskService.requireAllowed(
+                context.workspaceId(),
+                RiskService.MUTATION_PAYOUT_REQUEST,
+                new RiskService.EnforcementReference("PROVIDER_PROFILE", providerProfileId));
         String currencyCode = requireCurrency(command.currencyCode());
         long amountMinor = requirePositive(command.amountMinor(), "amountMinor");
         ProviderBalanceSummary summary = paymentStore.balanceSummary(context.workspaceId(), providerProfileId, currencyCode);
@@ -293,7 +296,7 @@ public class PaymentService {
     public PayoutRequest markPayoutSucceeded(AccessContext context, UUID payoutRequestId, PayoutMutationCommand command) {
         requirePaymentWrite(context);
         PayoutRequest payout = payout(context, payoutRequestId);
-        requirePayoutOperatorMutationAllowed(context.workspaceId(), payout);
+        requirePayoutOperatorMutationAllowed(context.workspaceId(), payout, RiskService.MUTATION_PAYOUT_OPERATOR_SUCCEED);
         return markPayoutSucceededInternal(context.workspaceId(), payout, externalReference(command));
     }
 
@@ -308,7 +311,7 @@ public class PaymentService {
     public PayoutRequest retryPayout(AccessContext context, UUID payoutRequestId, PayoutMutationCommand command) {
         requirePaymentWrite(context);
         PayoutRequest payout = payout(context, payoutRequestId);
-        requirePayoutOperatorMutationAllowed(context.workspaceId(), payout);
+        requirePayoutOperatorMutationAllowed(context.workspaceId(), payout, RiskService.MUTATION_PAYOUT_RETRY);
         return retryPayoutInternal(context.workspaceId(), payout, externalReference(command));
     }
 
@@ -676,9 +679,12 @@ public class PaymentService {
         outboxService.append(workspaceId, "PAYMENT", intent.id(), eventType, eventType + ":" + intent.id() + ":" + intent.status(), paymentData(intent, transitionSource));
     }
 
-    private void requirePayoutOperatorMutationAllowed(UUID workspaceId, PayoutRequest payout) {
-        riskService.requireNotBlocked(workspaceId, "PROVIDER_PROFILE", payout.providerProfileId());
-        riskService.requireNotBlocked(workspaceId, "PAYOUT_REQUEST", payout.id());
+    private void requirePayoutOperatorMutationAllowed(UUID workspaceId, PayoutRequest payout, String mutationScope) {
+        riskService.requireAllowed(
+                workspaceId,
+                mutationScope,
+                new RiskService.EnforcementReference("PROVIDER_PROFILE", payout.providerProfileId()),
+                new RiskService.EnforcementReference("PAYOUT_REQUEST", payout.id()));
     }
 
     private void appendPayoutEvent(UUID workspaceId, PayoutRequest payout, String eventType) {

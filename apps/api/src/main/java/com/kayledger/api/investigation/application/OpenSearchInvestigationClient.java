@@ -85,7 +85,7 @@ public class OpenSearchInvestigationClient {
         ensureIndex();
         try {
             String body = objectMapper.writeValueAsString(document);
-            HttpRequest request = HttpRequest.newBuilder(indexUri("_doc/" + encode(document.documentId()) + "?refresh=true"))
+            HttpRequest request = HttpRequest.newBuilder(indexUri("_doc/" + encode(document.documentId())))
                     .timeout(Duration.ofSeconds(10))
                     .PUT(HttpRequest.BodyPublishers.ofString(body))
                     .header("Content-Type", "application/json")
@@ -96,6 +96,22 @@ public class OpenSearchInvestigationClient {
             }
         } catch (Exception exception) {
             throw new IllegalStateException("Investigation document could not be indexed.", exception);
+        }
+    }
+
+    public void refresh() {
+        ensureIndex();
+        try {
+            HttpRequest request = HttpRequest.newBuilder(indexUri("_refresh"))
+                    .timeout(Duration.ofSeconds(10))
+                    .POST(HttpRequest.BodyPublishers.noBody())
+                    .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() >= 300) {
+                throw new IllegalStateException("OpenSearch refresh failed with status " + response.statusCode());
+            }
+        } catch (Exception exception) {
+            throw new IllegalStateException("Investigation index could not be refreshed.", exception);
         }
     }
 

@@ -8,6 +8,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.beans.factory.ObjectProvider;
 
 import com.kayledger.api.access.application.AccessContext;
 import com.kayledger.api.access.application.AccessPolicy;
@@ -26,7 +27,15 @@ import com.kayledger.api.reconciliation.model.ReconciliationRun;
 import com.kayledger.api.reconciliation.store.ReconciliationStore;
 import com.kayledger.api.risk.application.RiskService;
 import com.kayledger.api.shared.api.BadRequestException;
+import com.kayledger.api.shared.api.InternalFailureException;
 import com.kayledger.api.shared.api.NotFoundException;
+import com.kayledger.api.temporal.application.OperatorWorkflowRecord;
+import com.kayledger.api.temporal.application.OperatorWorkflowService;
+import com.kayledger.api.temporal.application.OperatorWorkflowStarter;
+import com.kayledger.api.temporal.workflow.OperatorWorkflowInput;
+import com.kayledger.api.temporal.workflow.ReconciliationOperatorWorkflow;
+
+import io.temporal.client.WorkflowClient;
 
 @Service
 public class ReconciliationService {
@@ -44,8 +53,20 @@ public class ReconciliationService {
     private final ObjectMapper objectMapper;
     private final InvestigationIndexingService investigationIndexingService;
     private final RiskService riskService;
+    private final ObjectProvider<OperatorWorkflowStarter> operatorWorkflowStarter;
+    private final OperatorWorkflowService operatorWorkflowService;
 
-    public ReconciliationService(ReconciliationStore reconciliationStore, ProviderStore providerStore, PaymentStore paymentStore, PaymentService paymentService, AccessPolicy accessPolicy, ObjectMapper objectMapper, InvestigationIndexingService investigationIndexingService, RiskService riskService) {
+    public ReconciliationService(
+            ReconciliationStore reconciliationStore,
+            ProviderStore providerStore,
+            PaymentStore paymentStore,
+            PaymentService paymentService,
+            AccessPolicy accessPolicy,
+            ObjectMapper objectMapper,
+            InvestigationIndexingService investigationIndexingService,
+            RiskService riskService,
+            ObjectProvider<OperatorWorkflowStarter> operatorWorkflowStarter,
+            OperatorWorkflowService operatorWorkflowService) {
         this.reconciliationStore = reconciliationStore;
         this.providerStore = providerStore;
         this.paymentStore = paymentStore;
@@ -54,23 +75,67 @@ public class ReconciliationService {
         this.objectMapper = objectMapper;
         this.investigationIndexingService = investigationIndexingService;
         this.riskService = riskService;
+        this.operatorWorkflowStarter = operatorWorkflowStarter;
+        this.operatorWorkflowService = operatorWorkflowService;
     }
 
     @Transactional
+    public ReconciliationRun startRun(AccessContext context, RunReconciliationCommand command) {
+        requireWrite(context);
+        OperatorWorkflowStarter workflowStarter = operatorWorkflowStarter.getIfAvailable();
+        if (workflowStarter == null) {
+            throw new InternalFailureException("Temporal reconciliation orchestration is not available.", new IllegalStateException("Temporal workflow starter bean is missing."));
+        }
+        String runType = command == null || command.runType() == null ? "FULL" : command.runType();
+        ReconciliationRun run = reconciliationStore.createRequestedRun(context.workspaceId(), runType);
+        try {
+            OperatorWorkflowRecord workflow = operatorWorkflowService.createRequested(
+                    context.workspaceId(),
+                    OperatorWorkflowService.RECONCILIATION,
+                    OperatorWorkflowService.RECONCILIATION_RUN,
+                    run.id(),
+                    OperatorWorkflowService.API,
+                    context.actorId(),
+                    1,
+                    "Reconciliation requested.");
+            String temporalRunId = workflowStarter.start(workflow.workflowId(), (client, options) -> {
+                ReconciliationOperatorWorkflow reconciliationWorkflow = client.newWorkflowStub(ReconciliationOperatorWorkflow.class, options);
+                return WorkflowClient.start(reconciliationWorkflow::run, new OperatorWorkflowInput(context.workspaceId(), run.id(), workflow.workflowId()));
+            });
+            operatorWorkflowService.attachRun(context.workspaceId(), workflow.workflowId(), temporalRunId);
+            return reconciliationStore.attachWorkflow(context.workspaceId(), run.id(), workflow.workflowId(), temporalRunId);
+        } catch (Exception exception) {
+            reconciliationStore.markFailed(context.workspaceId(), run.id(), exception.getMessage());
+            throw new InternalFailureException("Reconciliation orchestration could not be started.", exception);
+        }
+    }
+
+    @Transactional(noRollbackFor = InternalFailureException.class)
     public ReconciliationRun run(AccessContext context, RunReconciliationCommand command) {
         requireWrite(context);
         String runType = command == null || command.runType() == null ? "FULL" : command.runType();
         ReconciliationRun run = reconciliationStore.createRun(context.workspaceId(), runType);
-        for (ProviderCallback callback : providerStore.listCallbacks(context.workspaceId())) {
+        return executeRun(context.workspaceId(), run.id());
+    }
+
+    @Transactional(noRollbackFor = InternalFailureException.class)
+    public ReconciliationRun executeRunForWorkflow(UUID workspaceId, UUID runId) {
+        return executeRun(workspaceId, runId);
+    }
+
+    private ReconciliationRun executeRun(UUID workspaceId, UUID runId) {
+        ReconciliationRun run = reconciliationStore.markRunning(workspaceId, runId);
+        try {
+        for (ProviderCallback callback : providerStore.listCallbacks(workspaceId)) {
             if (!"APPLIED".equals(callback.processingStatus())) {
                 continue;
             }
             String providerState = providerState(callback.callbackType());
-            String internalState = internalState(context.workspaceId(), callback);
+            String internalState = internalState(workspaceId, callback);
             if (!providerState.equals(internalState)) {
                 String driftCategory = driftCategory(internalState);
                 reconciliationStore.createMismatch(
-                        context.workspaceId(),
+                        workspaceId,
                         run.id(),
                         callback.id(),
                         callback.businessReferenceType(),
@@ -82,10 +147,10 @@ public class ReconciliationService {
                 continue;
             }
             Long providerAmount = providerAmount(callback);
-            Long internalAmount = internalAmount(context.workspaceId(), callback);
+            Long internalAmount = internalAmount(workspaceId, callback);
             if (providerAmount != null && internalAmount != null && !providerAmount.equals(internalAmount)) {
                 reconciliationStore.createMismatch(
-                        context.workspaceId(),
+                        workspaceId,
                         run.id(),
                         callback.id(),
                         callback.businessReferenceType(),
@@ -96,11 +161,16 @@ public class ReconciliationService {
                         MANUAL_REVIEW);
             }
         }
-        reconciliationStore.createEntityCentricMismatches(context.workspaceId(), run.id());
-        riskService.evaluateMismatchBurst(context.workspaceId());
-        ReconciliationRun completed = reconciliationStore.completeRun(context.workspaceId(), run.id());
-        reindexRun(context.workspaceId(), completed.id());
+        reconciliationStore.createEntityCentricMismatches(workspaceId, run.id());
+        riskService.evaluateMismatchBurst(workspaceId);
+        int mismatchCount = reconciliationStore.countMismatches(workspaceId, run.id());
+        ReconciliationRun completed = reconciliationStore.completeRun(workspaceId, run.id(), mismatchCount);
+        reindexRun(workspaceId, completed.id());
         return completed;
+        } catch (RuntimeException exception) {
+            reconciliationStore.markFailed(workspaceId, run.id(), exception.getMessage());
+            throw new InternalFailureException("Reconciliation run failed; operator review is required.", exception);
+        }
     }
 
     public List<ReconciliationRun> listRuns(AccessContext context) {

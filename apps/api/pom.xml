@@ -21,6 +21,7 @@
         <java.version>21</java.version>
         <testcontainers.version>1.20.4</testcontainers.version>
         <aws.sdk.version>2.29.52</aws.sdk.version>
+        <temporal.version>1.34.0</temporal.version>
     </properties>
 
     <dependencies>
@@ -44,6 +45,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>s3</artifactId>
             <version>${aws.sdk.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.temporal</groupId>
+            <artifactId>temporal-sdk</artifactId>
+            <version>${temporal.version}</version>
         </dependency>
         <dependency>
             <groupId>org.flywaydb</groupId>
@@ -81,6 +87,12 @@
         <dependency>
             <groupId>org.testcontainers</groupId>
             <artifactId>kafka</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.temporal</groupId>
+            <artifactId>temporal-testing</artifactId>
+            <version>${temporal.version}</version>
             <scope>test</scope>
         </dependency>
     </dependencies>

@@ -21,6 +21,9 @@ import com.kayledger.api.reconciliation.application.ReconciliationService.RunRec
 import com.kayledger.api.reconciliation.model.ReconciliationMismatch;
 import com.kayledger.api.reconciliation.model.ReconciliationRun;
 import com.kayledger.api.shared.idempotency.IdempotencyService;
+import com.kayledger.api.temporal.application.OperatorWorkflowQueryService;
+import com.kayledger.api.temporal.application.OperatorWorkflowService;
+import com.kayledger.api.temporal.model.OperatorWorkflowStatus;
 
 @RestController
 @RequestMapping("/api/reconciliation")
@@ -29,14 +32,17 @@ public class ReconciliationController {
     private final AccessContextResolver accessContextResolver;
     private final ReconciliationService reconciliationService;
     private final IdempotencyService idempotencyService;
+    private final OperatorWorkflowQueryService operatorWorkflowQueryService;
 
     public ReconciliationController(
             AccessContextResolver accessContextResolver,
             ReconciliationService reconciliationService,
-            IdempotencyService idempotencyService) {
+            IdempotencyService idempotencyService,
+            OperatorWorkflowQueryService operatorWorkflowQueryService) {
         this.accessContextResolver = accessContextResolver;
         this.reconciliationService = reconciliationService;
         this.idempotencyService = idempotencyService;
+        this.operatorWorkflowQueryService = operatorWorkflowQueryService;
     }
 
     @PostMapping("/runs")
@@ -53,7 +59,7 @@ public class ReconciliationController {
                 context.actorId(),
                 "POST /api/reconciliation/runs",
                 IdempotencyService.fingerprint(workspaceSlug, actorKey, request),
-                () -> reconciliationService.run(context, request));
+                () -> reconciliationService.startRun(context, request));
     }
 
     @GetMapping("/runs")
@@ -62,6 +68,19 @@ public class ReconciliationController {
             @RequestHeader(value = "X-Actor-Key", required = false) String actorKey) {
         AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
         return reconciliationService.listRuns(context);
+    }
+
+    @GetMapping("/runs/{runId}/workflow")
+    OperatorWorkflowStatus runWorkflow(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @PathVariable UUID runId) {
+        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
+        return operatorWorkflowQueryService.findByReference(
+                context,
+                OperatorWorkflowService.RECONCILIATION,
+                OperatorWorkflowService.RECONCILIATION_RUN,
+                runId);
     }
 
     @GetMapping("/mismatches")
