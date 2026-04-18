@@ -1,18 +1,24 @@
 package com.kayledger.api.temporal.workflow;
 
 import io.temporal.workflow.Workflow;
+import io.temporal.activity.ActivityOptions;
 
 import com.kayledger.api.temporal.activity.ExportWorkflowActivities;
 import com.kayledger.api.temporal.activity.OperatorWorkflowStatusActivities;
 
 public class ExportOperatorWorkflowImpl implements ExportOperatorWorkflow {
 
-    private final OperatorWorkflowStatusActivities statusActivities = Workflow.newActivityStub(
-            OperatorWorkflowStatusActivities.class,
-            OperatorWorkflowDefaults.activityOptions());
-    private final ExportWorkflowActivities exportActivities = Workflow.newActivityStub(
-            ExportWorkflowActivities.class,
-            OperatorWorkflowDefaults.activityOptions());
+    private final OperatorWorkflowStatusActivities statusActivities;
+    private final ExportWorkflowActivities exportActivities;
+
+    public ExportOperatorWorkflowImpl(ActivityOptions operatorActivityOptions) {
+        this.statusActivities = Workflow.newActivityStub(
+                OperatorWorkflowStatusActivities.class,
+                operatorActivityOptions);
+        this.exportActivities = Workflow.newActivityStub(
+                ExportWorkflowActivities.class,
+                operatorActivityOptions);
+    }
 
     @Override
     public void run(OperatorWorkflowInput input) {

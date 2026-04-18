@@ -68,6 +68,10 @@ public class TemporalProperties {
 
     public static class Workflow {
         private int startToCloseTimeoutSeconds = 3600;
+        private int activityStartToCloseTimeoutSeconds = 300;
+        private int retryInitialIntervalSeconds = 2;
+        private int retryMaximumIntervalSeconds = 30;
+        private int retryMaximumAttempts = 5;
 
         public int getStartToCloseTimeoutSeconds() {
             return startToCloseTimeoutSeconds;
@@ -75,6 +79,38 @@ public class TemporalProperties {
 
         public void setStartToCloseTimeoutSeconds(int startToCloseTimeoutSeconds) {
             this.startToCloseTimeoutSeconds = startToCloseTimeoutSeconds;
+        }
+
+        public int getActivityStartToCloseTimeoutSeconds() {
+            return activityStartToCloseTimeoutSeconds;
+        }
+
+        public void setActivityStartToCloseTimeoutSeconds(int activityStartToCloseTimeoutSeconds) {
+            this.activityStartToCloseTimeoutSeconds = activityStartToCloseTimeoutSeconds;
+        }
+
+        public int getRetryInitialIntervalSeconds() {
+            return retryInitialIntervalSeconds;
+        }
+
+        public void setRetryInitialIntervalSeconds(int retryInitialIntervalSeconds) {
+            this.retryInitialIntervalSeconds = retryInitialIntervalSeconds;
+        }
+
+        public int getRetryMaximumIntervalSeconds() {
+            return retryMaximumIntervalSeconds;
+        }
+
+        public void setRetryMaximumIntervalSeconds(int retryMaximumIntervalSeconds) {
+            this.retryMaximumIntervalSeconds = retryMaximumIntervalSeconds;
+        }
+
+        public int getRetryMaximumAttempts() {
+            return retryMaximumAttempts;
+        }
+
+        public void setRetryMaximumAttempts(int retryMaximumAttempts) {
+            this.retryMaximumAttempts = retryMaximumAttempts;
         }
     }
 }

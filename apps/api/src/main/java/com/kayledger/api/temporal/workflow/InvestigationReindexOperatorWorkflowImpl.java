@@ -1,18 +1,24 @@
 package com.kayledger.api.temporal.workflow;
 
 import io.temporal.workflow.Workflow;
+import io.temporal.activity.ActivityOptions;
 
 import com.kayledger.api.temporal.activity.InvestigationReindexWorkflowActivities;
 import com.kayledger.api.temporal.activity.OperatorWorkflowStatusActivities;
 
 public class InvestigationReindexOperatorWorkflowImpl implements InvestigationReindexOperatorWorkflow {
 
-    private final OperatorWorkflowStatusActivities statusActivities = Workflow.newActivityStub(
-            OperatorWorkflowStatusActivities.class,
-            OperatorWorkflowDefaults.activityOptions());
-    private final InvestigationReindexWorkflowActivities reindexActivities = Workflow.newActivityStub(
-            InvestigationReindexWorkflowActivities.class,
-            OperatorWorkflowDefaults.activityOptions());
+    private final OperatorWorkflowStatusActivities statusActivities;
+    private final InvestigationReindexWorkflowActivities reindexActivities;
+
+    public InvestigationReindexOperatorWorkflowImpl(ActivityOptions operatorActivityOptions) {
+        this.statusActivities = Workflow.newActivityStub(
+                OperatorWorkflowStatusActivities.class,
+                operatorActivityOptions);
+        this.reindexActivities = Workflow.newActivityStub(
+                InvestigationReindexWorkflowActivities.class,
+                operatorActivityOptions);
+    }
 
     @Override
     public void run(OperatorWorkflowInput input) {

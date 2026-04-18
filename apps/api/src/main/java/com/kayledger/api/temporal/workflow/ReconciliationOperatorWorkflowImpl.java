@@ -1,18 +1,24 @@
 package com.kayledger.api.temporal.workflow;
 
 import io.temporal.workflow.Workflow;
+import io.temporal.activity.ActivityOptions;
 
 import com.kayledger.api.temporal.activity.OperatorWorkflowStatusActivities;
 import com.kayledger.api.temporal.activity.ReconciliationWorkflowActivities;
 
 public class ReconciliationOperatorWorkflowImpl implements ReconciliationOperatorWorkflow {
 
-    private final OperatorWorkflowStatusActivities statusActivities = Workflow.newActivityStub(
-            OperatorWorkflowStatusActivities.class,
-            OperatorWorkflowDefaults.activityOptions());
-    private final ReconciliationWorkflowActivities reconciliationActivities = Workflow.newActivityStub(
-            ReconciliationWorkflowActivities.class,
-            OperatorWorkflowDefaults.activityOptions());
+    private final OperatorWorkflowStatusActivities statusActivities;
+    private final ReconciliationWorkflowActivities reconciliationActivities;
+
+    public ReconciliationOperatorWorkflowImpl(ActivityOptions operatorActivityOptions) {
+        this.statusActivities = Workflow.newActivityStub(
+                OperatorWorkflowStatusActivities.class,
+                operatorActivityOptions);
+        this.reconciliationActivities = Workflow.newActivityStub(
+                ReconciliationWorkflowActivities.class,
+                operatorActivityOptions);
+    }
 
     @Override
     public void run(OperatorWorkflowInput input) {

@@ -46,3 +46,7 @@ kay-ledger:
       operator-workflows: kay-ledger-test-operator-workflows
     workflow:
       start-to-close-timeout-seconds: 60
+      activity-start-to-close-timeout-seconds: 30
+      retry-initial-interval-seconds: 1
+      retry-maximum-interval-seconds: 2
+      retry-maximum-attempts: 2
