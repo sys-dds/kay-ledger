@@ -29,6 +29,8 @@ public class PaymentStore {
             rs.getObject("id", UUID.class),
             rs.getObject("workspace_id", UUID.class),
             rs.getObject("booking_id", UUID.class),
+            rs.getObject("subscription_id", UUID.class),
+            rs.getObject("subscription_cycle_id", UUID.class),
             rs.getObject("provider_profile_id", UUID.class),
             rs.getString("status"),
             rs.getString("currency_code"),
@@ -177,6 +179,36 @@ public class PaymentStore {
                 """, INTENT_MAPPER, workspaceId, bookingId, providerProfileId, currencyCode, grossAmountMinor, feeAmountMinor, netAmountMinor, externalReference);
     }
 
+    public PaymentIntent createSubscriptionIntent(
+            UUID workspaceId,
+            UUID subscriptionId,
+            UUID subscriptionCycleId,
+            UUID providerProfileId,
+            String currencyCode,
+            long grossAmountMinor,
+            long feeAmountMinor,
+            long netAmountMinor,
+            String externalReference) {
+        return jdbcTemplate.queryForObject("""
+                INSERT INTO payment_intents (
+                    workspace_id,
+                    booking_id,
+                    provider_profile_id,
+                    currency_code,
+                    gross_amount_minor,
+                    fee_amount_minor,
+                    net_amount_minor,
+                    external_reference,
+                    subscription_id,
+                    subscription_cycle_id
+                )
+                VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (workspace_id, subscription_cycle_id) WHERE subscription_cycle_id IS NOT NULL DO UPDATE
+                SET external_reference = COALESCE(payment_intents.external_reference, EXCLUDED.external_reference)
+                RETURNING *
+                """, INTENT_MAPPER, workspaceId, providerProfileId, currencyCode, grossAmountMinor, feeAmountMinor, netAmountMinor, externalReference, subscriptionId, subscriptionCycleId);
+    }
+
     public Optional<PaymentIntent> find(UUID workspaceId, UUID paymentIntentId) {
         return jdbcTemplate.query("""
                 SELECT *
@@ -202,6 +234,26 @@ public class PaymentStore {
                 WHERE workspace_id = ?
                 ORDER BY created_at, id
                 """, INTENT_MAPPER, workspaceId);
+    }
+
+    public List<PaymentIntent> listBySubscription(UUID workspaceId, UUID subscriptionId) {
+        return jdbcTemplate.query("""
+                SELECT *
+                FROM payment_intents
+                WHERE workspace_id = ?
+                  AND subscription_id = ?
+                ORDER BY created_at, id
+                """, INTENT_MAPPER, workspaceId, subscriptionId);
+    }
+
+    public List<PaymentIntent> listBySubscriptionCycle(UUID workspaceId, UUID subscriptionCycleId) {
+        return jdbcTemplate.query("""
+                SELECT *
+                FROM payment_intents
+                WHERE workspace_id = ?
+                  AND subscription_cycle_id = ?
+                ORDER BY created_at, id
+                """, INTENT_MAPPER, workspaceId, subscriptionCycleId);
     }
 
     public PaymentIntent authorize(UUID workspaceId, UUID paymentIntentId, long amountMinor) {

@@ -1,23 +1,24 @@
-package com.kayledger.api.payment.model;
+package com.kayledger.api.subscription.model;
 
 import java.time.Instant;
 import java.util.UUID;
 
-public record PaymentIntent(
+public record SubscriptionCycle(
         UUID id,
         UUID workspaceId,
-        UUID bookingId,
         UUID subscriptionId,
-        UUID subscriptionCycleId,
+        int cycleNumber,
+        UUID planId,
         UUID providerProfileId,
+        UUID customerProfileId,
+        Instant cycleStartAt,
+        Instant cycleEndAt,
         String status,
+        UUID paymentIntentId,
         String currencyCode,
         long grossAmountMinor,
         long feeAmountMinor,
         long netAmountMinor,
-        long authorizedAmountMinor,
-        long capturedAmountMinor,
-        long settledAmountMinor,
         String externalReference,
         Instant createdAt,
         Instant updatedAt) {

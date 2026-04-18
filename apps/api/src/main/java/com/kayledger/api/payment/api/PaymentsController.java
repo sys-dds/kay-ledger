@@ -82,6 +82,24 @@ public class PaymentsController {
         return paymentService.findByBooking(context, bookingId);
     }
 
+    @GetMapping("/intents/by-subscription/{subscriptionId}")
+    List<PaymentIntent> bySubscription(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @PathVariable UUID subscriptionId) {
+        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
+        return paymentService.listBySubscription(context, subscriptionId);
+    }
+
+    @GetMapping("/intents/by-subscription-cycle/{subscriptionCycleId}")
+    List<PaymentIntent> bySubscriptionCycle(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @PathVariable UUID subscriptionCycleId) {
+        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
+        return paymentService.listBySubscriptionCycle(context, subscriptionCycleId);
+    }
+
     @PostMapping("/intents/{paymentIntentId}/authorize")
     ResponseEntity<Object> authorize(
             @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
