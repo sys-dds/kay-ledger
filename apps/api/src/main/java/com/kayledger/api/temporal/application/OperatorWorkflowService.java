@@ -1,11 +1,18 @@
 package com.kayledger.api.temporal.application;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+
+import com.kayledger.api.access.model.AccessScope;
+import com.kayledger.api.shared.api.BadRequestException;
+
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 
 @Service
 public class OperatorWorkflowService {
@@ -18,10 +25,17 @@ public class OperatorWorkflowService {
     public static final String INVESTIGATION_REINDEX_JOB = "INVESTIGATION_REINDEX_JOB";
     public static final String API = "API";
 
-    private final OperatorWorkflowStore operatorWorkflowStore;
+    private static final Map<String, WorkflowTypePolicy> WORKFLOW_POLICIES = Map.of(
+            EXPORT, new WorkflowTypePolicy(EXPORT, EXPORT_JOB, AccessScope.FINANCE_READ),
+            RECONCILIATION, new WorkflowTypePolicy(RECONCILIATION, RECONCILIATION_RUN, AccessScope.PAYMENT_READ),
+            INVESTIGATION_REINDEX, new WorkflowTypePolicy(INVESTIGATION_REINDEX, INVESTIGATION_REINDEX_JOB, AccessScope.PAYMENT_READ));
 
-    public OperatorWorkflowService(OperatorWorkflowStore operatorWorkflowStore) {
+    private final OperatorWorkflowStore operatorWorkflowStore;
+    private final MeterRegistry meterRegistry;
+
+    public OperatorWorkflowService(OperatorWorkflowStore operatorWorkflowStore, MeterRegistry meterRegistry) {
         this.operatorWorkflowStore = operatorWorkflowStore;
+        this.meterRegistry = meterRegistry;
     }
 
     @Transactional
@@ -63,12 +77,16 @@ public class OperatorWorkflowService {
 
     @Transactional
     public OperatorWorkflowRecord markSucceeded(UUID workspaceId, String workflowId, int progressCurrent, int progressTotal, String progressMessage) {
-        return operatorWorkflowStore.markSucceeded(workspaceId, workflowId, progressCurrent, progressTotal, progressMessage);
+        OperatorWorkflowRecord record = operatorWorkflowStore.markSucceeded(workspaceId, workflowId, progressCurrent, progressTotal, progressMessage);
+        recordOutcome(record, "SUCCEEDED");
+        return record;
     }
 
     @Transactional
     public OperatorWorkflowRecord markFailed(UUID workspaceId, String workflowId, String failureReason) {
-        return operatorWorkflowStore.markFailed(workspaceId, workflowId, failureReason);
+        OperatorWorkflowRecord record = operatorWorkflowStore.markFailed(workspaceId, workflowId, failureReason);
+        recordOutcome(record, "FAILED");
+        return record;
     }
 
     public Optional<OperatorWorkflowRecord> find(UUID workspaceId, String workflowId) {
@@ -85,5 +103,25 @@ public class OperatorWorkflowService {
 
     public static String workflowId(UUID workspaceId, String workflowType, String businessReferenceType, UUID businessReferenceId) {
         return "kay-ledger:" + workspaceId + ":" + workflowType.toLowerCase() + ":" + businessReferenceType.toLowerCase() + ":" + businessReferenceId;
+    }
+
+    public WorkflowTypePolicy policy(String workflowType) {
+        WorkflowTypePolicy policy = WORKFLOW_POLICIES.get(workflowType);
+        if (policy == null) {
+            throw new BadRequestException("Workflow type is unsupported.");
+        }
+        return policy;
+    }
+
+    public record WorkflowTypePolicy(String workflowType, String businessReferenceType, String readScope) {
+    }
+
+    private void recordOutcome(OperatorWorkflowRecord record, String outcome) {
+        Counter.builder("kayledger.operator_workflows.outcomes")
+                .description("Operator workflow terminal outcomes")
+                .tag("workflow.type", record.workflowType())
+                .tag("outcome", outcome)
+                .register(meterRegistry)
+                .increment();
     }
 }

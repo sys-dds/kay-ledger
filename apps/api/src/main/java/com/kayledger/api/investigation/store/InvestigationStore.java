@@ -149,6 +149,7 @@ public class InvestigationStore {
         return jdbcTemplate.queryForObject("""
                 UPDATE investigation_reindex_jobs
                 SET status = 'RUNNING',
+                    started_at = COALESCE(started_at, now()),
                     failure_reason = NULL
                 WHERE workspace_id = ?
                   AND id = ?
@@ -161,6 +162,7 @@ public class InvestigationStore {
         return jdbcTemplate.queryForObject("""
                 UPDATE investigation_reindex_jobs
                 SET status = 'SUCCEEDED',
+                    started_at = COALESCE(started_at, now()),
                     indexed_count = ?,
                     failed_count = ?,
                     completed_at = now(),
@@ -317,6 +319,7 @@ public class InvestigationStore {
                 rs.getInt("indexed_count"),
                 rs.getInt("failed_count"),
                 rs.getString("failure_reason"),
+                instant(rs, "requested_at"),
                 instant(rs, "started_at"),
                 instant(rs, "completed_at"),
                 instant(rs, "created_at"),
@@ -334,6 +337,7 @@ public class InvestigationStore {
             int indexedCount,
             int failedCount,
             String failureReason,
+            Instant requestedAt,
             Instant startedAt,
             Instant completedAt,
             Instant createdAt,

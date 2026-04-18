@@ -16,6 +16,8 @@ public record OperatorWorkflowStatus(
         int progressCurrent,
         int progressTotal,
         String progressMessage,
+        int progressUpdateCount,
+        Instant requestedAt,
         Instant startedAt,
         Instant completedAt,
         String failureReason) {

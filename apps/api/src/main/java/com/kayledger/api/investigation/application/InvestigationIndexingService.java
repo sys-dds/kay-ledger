@@ -44,16 +44,13 @@ public class InvestigationIndexingService {
         this.operatorWorkflowService = operatorWorkflowService;
     }
 
-    @Transactional
+    @Transactional(noRollbackFor = InternalFailureException.class)
     public ReindexJob startReindex(AccessContext context) {
         requireRead(context);
-        OperatorWorkflowStarter workflowStarter = operatorWorkflowStarter.getIfAvailable();
-        if (workflowStarter == null) {
-            throw new InternalFailureException("Temporal investigation reindex orchestration is not available.", new IllegalStateException("Temporal workflow starter bean is missing."));
-        }
         ReindexJob job = investigationStore.createReindexJob(context.workspaceId(), context.actorId());
+        OperatorWorkflowRecord workflow = null;
         try {
-            OperatorWorkflowRecord workflow = operatorWorkflowService.createRequested(
+            workflow = operatorWorkflowService.createRequested(
                     context.workspaceId(),
                     OperatorWorkflowService.INVESTIGATION_REINDEX,
                     OperatorWorkflowService.INVESTIGATION_REINDEX_JOB,
@@ -62,23 +59,34 @@ public class InvestigationIndexingService {
                     context.actorId(),
                     1,
                     "Investigation reindex requested.");
+            OperatorWorkflowStarter workflowStarter = operatorWorkflowStarter.getIfAvailable();
+            if (workflowStarter == null) {
+                throw new IllegalStateException("Temporal workflow starter bean is missing.");
+            }
+            ReindexJob requestedJob = job;
+            OperatorWorkflowRecord requestedWorkflow = workflow;
             String temporalRunId = workflowStarter.start(workflow.workflowId(), (client, options) -> {
                 InvestigationReindexOperatorWorkflow reindexWorkflow = client.newWorkflowStub(InvestigationReindexOperatorWorkflow.class, options);
-                return WorkflowClient.start(reindexWorkflow::run, new OperatorWorkflowInput(context.workspaceId(), job.id(), workflow.workflowId()));
+                return WorkflowClient.start(reindexWorkflow::run, new OperatorWorkflowInput(context.workspaceId(), requestedJob.id(), requestedWorkflow.workflowId()));
             });
             operatorWorkflowService.attachRun(context.workspaceId(), workflow.workflowId(), temporalRunId);
             return investigationStore.attachReindexWorkflow(context.workspaceId(), job.id(), workflow.workflowId(), temporalRunId);
         } catch (Exception exception) {
             investigationStore.markReindexFailed(context.workspaceId(), job.id(), 0, 0, exception.getMessage());
+            if (workflow != null) {
+                operatorWorkflowService.markFailed(context.workspaceId(), workflow.workflowId(), exception.getMessage());
+            }
             throw new InternalFailureException("Investigation reindex orchestration could not be started.", exception);
         }
     }
 
     @Transactional(noRollbackFor = InternalFailureException.class)
     public ReindexJob executeReindexForWorkflow(UUID workspaceId, UUID reindexJobId) {
-        investigationStore.markReindexRunning(workspaceId, reindexJobId);
+        ReindexJob job = investigationStore.markReindexRunning(workspaceId, reindexJobId);
         try {
+            markWorkflowProgress(workspaceId, job, 2, 3, "Loading source-of-truth investigation documents.");
             ReindexResult result = reindexWorkspace(workspaceId);
+            markWorkflowProgress(workspaceId, job, 3, 3, "Persisting investigation index state.");
             if (result.failed() > 0) {
                 investigationStore.markReindexFailed(workspaceId, reindexJobId, result.indexed(), result.failed(), "One or more documents failed to index.");
                 throw new InternalFailureException("Investigation reindex completed with failed documents.", new IllegalStateException("failed documents: " + result.failed()));
@@ -122,6 +130,12 @@ public class InvestigationIndexingService {
     private void requireRead(AccessContext context) {
         accessPolicy.requireWorkspaceRole(context, WorkspaceRole.OWNER, WorkspaceRole.ADMIN);
         accessPolicy.requireScope(context, AccessScope.PAYMENT_READ);
+    }
+
+    private void markWorkflowProgress(UUID workspaceId, ReindexJob job, int current, int total, String message) {
+        if (job.temporalWorkflowId() != null) {
+            operatorWorkflowService.markProgress(workspaceId, job.temporalWorkflowId(), current, total, message);
+        }
     }
 
     public record ReindexResult(int indexed, int failed) {

@@ -28,8 +28,10 @@ public class OperatorWorkflowStore {
             rs.getInt("progress_current"),
             rs.getInt("progress_total"),
             rs.getString("progress_message"),
+            rs.getInt("progress_update_count"),
             rs.getObject("requested_by_actor_id", UUID.class),
-            instant(rs, "started_at"),
+            instant(rs, "requested_at"),
+            nullableInstant(rs, "started_at"),
             nullableInstant(rs, "completed_at"),
             rs.getString("failure_reason"),
             instant(rs, "created_at"),
@@ -76,6 +78,7 @@ public class OperatorWorkflowStore {
         return jdbcTemplate.queryForObject("""
                 UPDATE operator_workflows
                 SET status = 'RUNNING',
+                    started_at = COALESCE(started_at, now()),
                     progress_message = ?,
                     failure_reason = NULL
                 WHERE workspace_id = ?
@@ -90,10 +93,11 @@ public class OperatorWorkflowStore {
                 UPDATE operator_workflows
                 SET progress_current = ?,
                     progress_total = GREATEST(progress_total, ?),
-                    progress_message = ?
+                    progress_message = ?,
+                    progress_update_count = progress_update_count + 1
                 WHERE workspace_id = ?
                   AND workflow_id = ?
-                  AND status IN ('REQUESTED', 'RUNNING')
+                  AND status = 'RUNNING'
                 RETURNING *
                 """, MAPPER, progressCurrent, progressTotal, progressMessage, workspaceId, workflowId);
     }
@@ -102,6 +106,7 @@ public class OperatorWorkflowStore {
         return jdbcTemplate.queryForObject("""
                 UPDATE operator_workflows
                 SET status = 'SUCCEEDED',
+                    started_at = COALESCE(started_at, now()),
                     progress_current = ?,
                     progress_total = ?,
                     progress_message = ?,
@@ -141,7 +146,7 @@ public class OperatorWorkflowStore {
                 WHERE workspace_id = ?
                   AND business_reference_type = ?
                   AND business_reference_id = ?
-                ORDER BY started_at DESC, id DESC
+                ORDER BY COALESCE(started_at, requested_at) DESC, id DESC
                 LIMIT 1
                 """, MAPPER, workspaceId, referenceType, referenceId).stream().findFirst();
     }
@@ -152,7 +157,7 @@ public class OperatorWorkflowStore {
                 FROM operator_workflows
                 WHERE workspace_id = ?
                   AND workflow_type = ?
-                ORDER BY started_at DESC, id DESC
+                ORDER BY COALESCE(started_at, requested_at) DESC, id DESC
                 """, MAPPER, workspaceId, workflowType);
     }
 

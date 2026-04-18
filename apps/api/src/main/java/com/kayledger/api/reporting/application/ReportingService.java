@@ -74,21 +74,19 @@ public class ReportingService {
         return reportingStore.listProviderSummaries(context.workspaceId());
     }
 
-    @Transactional
+    @Transactional(noRollbackFor = InternalFailureException.class)
     public ExportJob startExport(AccessContext context, ExportRequestCommand command) {
         requireWrite(context);
-        OperatorWorkflowStarter workflowStarter = operatorWorkflowStarter.getIfAvailable();
-        if (workflowStarter == null) {
-            throw new InternalFailureException("Temporal export orchestration is not available.", new IllegalStateException("Temporal workflow starter bean is missing."));
-        }
         String exportType = command == null || command.exportType() == null ? PROVIDER_STATEMENT : command.exportType();
         if (!PROVIDER_STATEMENT.equals(exportType)) {
             throw new BadRequestException("Only provider statement export is supported in this slice.");
         }
+        ExportJob job = null;
+        OperatorWorkflowRecord workflow = null;
         try {
             String parametersJson = objectMapper.writeValueAsString(command == null ? new ExportRequestCommand(PROVIDER_STATEMENT) : command);
-            ExportJob job = reportingStore.createAsyncExportJob(context.workspaceId(), exportType, context.actorId(), parametersJson);
-            OperatorWorkflowRecord workflow = operatorWorkflowService.createRequested(
+            job = reportingStore.createAsyncExportJob(context.workspaceId(), exportType, context.actorId(), parametersJson);
+            workflow = operatorWorkflowService.createRequested(
                     context.workspaceId(),
                     OperatorWorkflowService.EXPORT,
                     OperatorWorkflowService.EXPORT_JOB,
@@ -97,9 +95,15 @@ public class ReportingService {
                     context.actorId(),
                     1,
                     "Export requested.");
+            OperatorWorkflowStarter workflowStarter = operatorWorkflowStarter.getIfAvailable();
+            if (workflowStarter == null) {
+                throw new IllegalStateException("Temporal workflow starter bean is missing.");
+            }
+            ExportJob workflowJob = job;
+            OperatorWorkflowRecord requestedWorkflow = workflow;
             String runId = workflowStarter.start(workflow.workflowId(), (client, options) -> {
                 ExportOperatorWorkflow exportWorkflow = client.newWorkflowStub(ExportOperatorWorkflow.class, options);
-                return WorkflowClient.start(exportWorkflow::run, new OperatorWorkflowInput(context.workspaceId(), job.id(), workflow.workflowId()));
+                return WorkflowClient.start(exportWorkflow::run, new OperatorWorkflowInput(context.workspaceId(), workflowJob.id(), requestedWorkflow.workflowId()));
             });
             operatorWorkflowService.attachRun(context.workspaceId(), workflow.workflowId(), runId);
             ExportJob tracked = reportingStore.attachWorkflow(context.workspaceId(), job.id(), workflow.workflowId(), runId);
@@ -108,6 +112,13 @@ public class ReportingService {
         } catch (BadRequestException exception) {
             throw exception;
         } catch (Exception exception) {
+            if (job != null) {
+                reportingStore.markFailed(context.workspaceId(), job.id(), exception.getMessage());
+                indexReference(context.workspaceId(), "EXPORT_JOB", job.id());
+            }
+            if (workflow != null) {
+                operatorWorkflowService.markFailed(context.workspaceId(), workflow.workflowId(), exception.getMessage());
+            }
             throw new InternalFailureException("Export orchestration could not be started.", exception);
         }
     }
@@ -141,12 +152,15 @@ public class ReportingService {
     private ExportJob generateExportJob(UUID workspaceId, UUID jobId) {
         ExportJob job = reportingStore.findJob(workspaceId, jobId);
         try {
-            reportingStore.markRunning(workspaceId, job.id());
+            job = reportingStore.markRunning(workspaceId, job.id());
+            markWorkflowProgress(workspaceId, job, 2, 4, "Refreshing provider financial summaries.");
             reportingStore.refreshProviderSummaries(workspaceId);
             List<ProviderFinancialSummary> summaries = reportingStore.listProviderSummaries(workspaceId);
+            markWorkflowProgress(workspaceId, job, 3, 4, "Writing export artifact to object storage.");
             byte[] content = providerStatementCsv(summaries).getBytes(StandardCharsets.UTF_8);
             String storageKey = "exports/" + workspaceId + "/" + job.id() + "/provider-statement.csv";
             objectStorageService.put(storageKey, CSV, content);
+            markWorkflowProgress(workspaceId, job, 4, 4, "Persisting export artifact metadata.");
             ExportArtifact artifact = reportingStore.createArtifact(workspaceId, job.id(), storageKey, CSV, content.length, summaries.size(), sha256(content));
             ExportJob succeeded = reportingStore.markSucceeded(workspaceId, job.id(), summaries.size(), storageKey, CSV);
             indexReference(workspaceId, "EXPORT_JOB", succeeded.id());
@@ -194,6 +208,12 @@ public class ReportingService {
             investigationIndexingService.indexReference(workspaceId, referenceType, referenceId);
         } catch (RuntimeException ignored) {
             // Export metadata is durable in PostgreSQL; operator search can be repaired by reindex.
+        }
+    }
+
+    private void markWorkflowProgress(UUID workspaceId, ExportJob job, int current, int total, String message) {
+        if (job.temporalWorkflowId() != null) {
+            operatorWorkflowService.markProgress(workspaceId, job.temporalWorkflowId(), current, total, message);
         }
     }
 

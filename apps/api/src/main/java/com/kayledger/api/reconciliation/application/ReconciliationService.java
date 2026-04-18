@@ -79,17 +79,14 @@ public class ReconciliationService {
         this.operatorWorkflowService = operatorWorkflowService;
     }
 
-    @Transactional
+    @Transactional(noRollbackFor = InternalFailureException.class)
     public ReconciliationRun startRun(AccessContext context, RunReconciliationCommand command) {
         requireWrite(context);
-        OperatorWorkflowStarter workflowStarter = operatorWorkflowStarter.getIfAvailable();
-        if (workflowStarter == null) {
-            throw new InternalFailureException("Temporal reconciliation orchestration is not available.", new IllegalStateException("Temporal workflow starter bean is missing."));
-        }
         String runType = command == null || command.runType() == null ? "FULL" : command.runType();
         ReconciliationRun run = reconciliationStore.createRequestedRun(context.workspaceId(), runType);
+        OperatorWorkflowRecord workflow = null;
         try {
-            OperatorWorkflowRecord workflow = operatorWorkflowService.createRequested(
+            workflow = operatorWorkflowService.createRequested(
                     context.workspaceId(),
                     OperatorWorkflowService.RECONCILIATION,
                     OperatorWorkflowService.RECONCILIATION_RUN,
@@ -98,14 +95,23 @@ public class ReconciliationService {
                     context.actorId(),
                     1,
                     "Reconciliation requested.");
+            OperatorWorkflowStarter workflowStarter = operatorWorkflowStarter.getIfAvailable();
+            if (workflowStarter == null) {
+                throw new IllegalStateException("Temporal workflow starter bean is missing.");
+            }
+            ReconciliationRun requestedRun = run;
+            OperatorWorkflowRecord requestedWorkflow = workflow;
             String temporalRunId = workflowStarter.start(workflow.workflowId(), (client, options) -> {
                 ReconciliationOperatorWorkflow reconciliationWorkflow = client.newWorkflowStub(ReconciliationOperatorWorkflow.class, options);
-                return WorkflowClient.start(reconciliationWorkflow::run, new OperatorWorkflowInput(context.workspaceId(), run.id(), workflow.workflowId()));
+                return WorkflowClient.start(reconciliationWorkflow::run, new OperatorWorkflowInput(context.workspaceId(), requestedRun.id(), requestedWorkflow.workflowId()));
             });
             operatorWorkflowService.attachRun(context.workspaceId(), workflow.workflowId(), temporalRunId);
             return reconciliationStore.attachWorkflow(context.workspaceId(), run.id(), workflow.workflowId(), temporalRunId);
         } catch (Exception exception) {
             reconciliationStore.markFailed(context.workspaceId(), run.id(), exception.getMessage());
+            if (workflow != null) {
+                operatorWorkflowService.markFailed(context.workspaceId(), workflow.workflowId(), exception.getMessage());
+            }
             throw new InternalFailureException("Reconciliation orchestration could not be started.", exception);
         }
     }
@@ -126,6 +132,7 @@ public class ReconciliationService {
     private ReconciliationRun executeRun(UUID workspaceId, UUID runId) {
         ReconciliationRun run = reconciliationStore.markRunning(workspaceId, runId);
         try {
+        markWorkflowProgress(workspaceId, run, 2, 4, "Scanning applied provider callbacks.");
         for (ProviderCallback callback : providerStore.listCallbacks(workspaceId)) {
             if (!"APPLIED".equals(callback.processingStatus())) {
                 continue;
@@ -161,7 +168,9 @@ public class ReconciliationService {
                         MANUAL_REVIEW);
             }
         }
+        markWorkflowProgress(workspaceId, run, 3, 4, "Creating projection and journal drift mismatches.");
         reconciliationStore.createEntityCentricMismatches(workspaceId, run.id());
+        markWorkflowProgress(workspaceId, run, 4, 4, "Evaluating risk follow-up for reconciliation mismatches.");
         riskService.evaluateMismatchBurst(workspaceId);
         int mismatchCount = reconciliationStore.countMismatches(workspaceId, run.id());
         ReconciliationRun completed = reconciliationStore.completeRun(workspaceId, run.id(), mismatchCount);
@@ -231,6 +240,12 @@ public class ReconciliationService {
             investigationIndexingService.indexReference(workspaceId, mismatch.businessReferenceType(), mismatch.businessReferenceId());
         } catch (RuntimeException ignored) {
             // Search indexing can be safely re-driven; reconciliation truth remains in PostgreSQL.
+        }
+    }
+
+    private void markWorkflowProgress(UUID workspaceId, ReconciliationRun run, int current, int total, String message) {
+        if (run.temporalWorkflowId() != null) {
+            operatorWorkflowService.markProgress(workspaceId, run.temporalWorkflowId(), current, total, message);
         }
     }
 

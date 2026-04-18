@@ -152,8 +152,7 @@ public class ReportingStore {
         return jdbcTemplate.queryForObject("""
                 UPDATE export_jobs
                 SET temporal_workflow_id = ?,
-                    temporal_run_id = ?,
-                    orchestration_started_at = COALESCE(orchestration_started_at, now())
+                    temporal_run_id = ?
                 WHERE workspace_id = ?
                   AND id = ?
                 RETURNING *
@@ -176,6 +175,7 @@ public class ReportingStore {
         return jdbcTemplate.queryForObject("""
                 UPDATE export_jobs
                 SET status = 'SUCCEEDED',
+                    orchestration_started_at = COALESCE(orchestration_started_at, now()),
                     row_count = ?,
                     storage_key = ?,
                     content_type = ?,

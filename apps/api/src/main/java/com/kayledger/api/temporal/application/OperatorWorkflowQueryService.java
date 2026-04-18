@@ -7,7 +7,6 @@ import org.springframework.stereotype.Service;
 
 import com.kayledger.api.access.application.AccessContext;
 import com.kayledger.api.access.application.AccessPolicy;
-import com.kayledger.api.access.model.AccessScope;
 import com.kayledger.api.access.model.WorkspaceRole;
 import com.kayledger.api.shared.api.NotFoundException;
 import com.kayledger.api.temporal.model.OperatorWorkflowStatus;
@@ -24,7 +23,10 @@ public class OperatorWorkflowQueryService {
     }
 
     public OperatorWorkflowStatus findByReference(AccessContext context, String workflowType, String referenceType, UUID referenceId) {
-        requireRead(context);
+        OperatorWorkflowService.WorkflowTypePolicy policy = requireRead(context, workflowType);
+        if (!policy.businessReferenceType().equals(referenceType)) {
+            throw new NotFoundException("Operator workflow was not found.");
+        }
         OperatorWorkflowRecord record = operatorWorkflowService.findByReference(context.workspaceId(), referenceType, referenceId)
                 .filter(candidate -> workflowType.equals(candidate.workflowType()))
                 .orElseThrow(() -> new NotFoundException("Operator workflow was not found."));
@@ -32,7 +34,7 @@ public class OperatorWorkflowQueryService {
     }
 
     public List<OperatorWorkflowStatus> list(AccessContext context, String workflowType) {
-        requireRead(context);
+        requireRead(context, workflowType);
         return operatorWorkflowService.list(context.workspaceId(), workflowType).stream()
                 .map(this::toStatus)
                 .toList();
@@ -52,13 +54,17 @@ public class OperatorWorkflowQueryService {
                 record.progressCurrent(),
                 record.progressTotal(),
                 record.progressMessage(),
+                record.progressUpdateCount(),
+                record.requestedAt(),
                 record.startedAt(),
                 record.completedAt(),
                 record.failureReason());
     }
 
-    private void requireRead(AccessContext context) {
+    private OperatorWorkflowService.WorkflowTypePolicy requireRead(AccessContext context, String workflowType) {
+        OperatorWorkflowService.WorkflowTypePolicy policy = operatorWorkflowService.policy(workflowType);
         accessPolicy.requireWorkspaceRole(context, WorkspaceRole.OWNER, WorkspaceRole.ADMIN);
-        accessPolicy.requireScope(context, AccessScope.PAYMENT_READ);
+        accessPolicy.requireScope(context, policy.readScope());
+        return policy;
     }
 }

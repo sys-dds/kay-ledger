@@ -29,7 +29,8 @@ public class ReconciliationStore {
             rs.getString("trigger_mode"),
             rs.getString("failure_reason"),
             rs.getInt("mismatch_count"),
-            instant(rs, "started_at"),
+            instant(rs, "requested_at"),
+            nullableInstant(rs, "started_at"),
             nullableInstant(rs, "completed_at"),
             instant(rs, "created_at"),
             instant(rs, "updated_at"));
@@ -59,8 +60,8 @@ public class ReconciliationStore {
 
     public ReconciliationRun createRun(UUID workspaceId, String runType) {
         return jdbcTemplate.queryForObject("""
-                INSERT INTO reconciliation_runs (workspace_id, run_type)
-                VALUES (?, ?)
+                INSERT INTO reconciliation_runs (workspace_id, run_type, started_at)
+                VALUES (?, ?, now())
                 RETURNING *
                 """, RUN_MAPPER, workspaceId, runType);
     }
@@ -88,6 +89,7 @@ public class ReconciliationStore {
         return jdbcTemplate.queryForObject("""
                 UPDATE reconciliation_runs
                 SET status = 'RUNNING',
+                    started_at = COALESCE(started_at, now()),
                     failure_reason = NULL
                 WHERE workspace_id = ?
                   AND id = ?
@@ -100,6 +102,7 @@ public class ReconciliationStore {
         return jdbcTemplate.queryForObject("""
                 UPDATE reconciliation_runs
                 SET status = 'COMPLETED',
+                    started_at = COALESCE(started_at, now()),
                     completed_at = now(),
                     mismatch_count = ?,
                     failure_reason = NULL
@@ -139,7 +142,7 @@ public class ReconciliationStore {
                 SELECT *
                 FROM reconciliation_runs
                 WHERE workspace_id = ?
-                ORDER BY started_at DESC, id
+                ORDER BY COALESCE(started_at, requested_at) DESC, id
                 """, RUN_MAPPER, workspaceId);
     }
 

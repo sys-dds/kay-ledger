@@ -4,6 +4,8 @@ import java.net.URI;
 
 import org.springframework.stereotype.Service;
 
+import com.kayledger.api.shared.api.InternalFailureException;
+
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.core.sync.RequestBody;
@@ -32,13 +34,17 @@ public class ObjectStorageService {
     }
 
     public void put(String storageKey, String contentType, byte[] content) {
-        ensureBucket();
-        s3Client.putObject(PutObjectRequest.builder()
-                .bucket(properties.getBucket())
-                .key(storageKey)
-                .contentType(contentType)
-                .contentLength((long) content.length)
-                .build(), RequestBody.fromBytes(content));
+        try {
+            ensureBucket();
+            s3Client.putObject(PutObjectRequest.builder()
+                    .bucket(properties.getBucket())
+                    .key(storageKey)
+                    .contentType(contentType)
+                    .contentLength((long) content.length)
+                    .build(), RequestBody.fromBytes(content));
+        } catch (RuntimeException exception) {
+            throw new InternalFailureException("Object storage write failed; export artifact was not stored.", exception);
+        }
     }
 
     private void ensureBucket() {

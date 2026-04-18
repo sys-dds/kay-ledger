@@ -14,6 +14,7 @@ public record ReconciliationRun(
         String triggerMode,
         String failureReason,
         int mismatchCount,
+        Instant requestedAt,
         Instant startedAt,
         Instant completedAt,
         Instant createdAt,
