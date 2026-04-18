@@ -43,16 +43,31 @@ public class ObjectStorageService {
 
     private void ensureBucket() {
         try {
-            s3Client.headBucket(HeadBucketRequest.builder().bucket(properties.getBucket()).build());
+            headBucket();
         } catch (NoSuchBucketException exception) {
-            s3Client.createBucket(CreateBucketRequest.builder().bucket(properties.getBucket()).build());
+            createBucket();
         } catch (S3Exception exception) {
             if (isMissingBucket(exception)) {
-                s3Client.createBucket(CreateBucketRequest.builder().bucket(properties.getBucket()).build());
+                createBucket();
                 return;
             }
             throw exception;
         }
+    }
+
+    private void headBucket() {
+        s3Client.headBucket(HeadBucketRequest.builder().bucket(properties.getBucket()).build());
+    }
+
+    private void createBucket() {
+        try {
+            s3Client.createBucket(CreateBucketRequest.builder().bucket(properties.getBucket()).build());
+        } catch (S3Exception exception) {
+            if (!bucketAlreadyAvailable(exception)) {
+                throw exception;
+            }
+        }
+        headBucket();
     }
 
     private static boolean isMissingBucket(S3Exception exception) {
@@ -60,5 +75,12 @@ public class ObjectStorageService {
         return exception.statusCode() == 404
                 || "NoSuchBucket".equals(errorCode)
                 || "NotFound".equals(errorCode);
+    }
+
+    private static boolean bucketAlreadyAvailable(S3Exception exception) {
+        String errorCode = exception.awsErrorDetails() == null ? null : exception.awsErrorDetails().errorCode();
+        return exception.statusCode() == 409
+                || "BucketAlreadyOwnedByYou".equals(errorCode)
+                || "BucketAlreadyExists".equals(errorCode);
     }
 }

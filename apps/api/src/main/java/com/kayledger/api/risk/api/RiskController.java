@@ -16,6 +16,7 @@ import com.kayledger.api.access.application.AccessContext;
 import com.kayledger.api.access.application.AccessContextResolver;
 import com.kayledger.api.risk.application.RiskService;
 import com.kayledger.api.risk.application.RiskService.DecisionCommand;
+import com.kayledger.api.risk.application.RiskService.EnforcementScope;
 import com.kayledger.api.risk.model.RiskDecision;
 import com.kayledger.api.risk.model.RiskFlag;
 import com.kayledger.api.risk.model.RiskReview;
@@ -69,5 +70,10 @@ public class RiskController {
     @GetMapping("/decisions")
     List<RiskDecision> decisions(@RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug, @RequestHeader(value = "X-Actor-Key", required = false) String actorKey) {
         return riskService.listDecisions(accessContextResolver.resolveWorkspace(workspaceSlug, actorKey));
+    }
+
+    @GetMapping("/enforcement-scope")
+    EnforcementScope enforcementScope(@RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug, @RequestHeader(value = "X-Actor-Key", required = false) String actorKey) {
+        return riskService.enforcementScope(accessContextResolver.resolveWorkspace(workspaceSlug, actorKey));
     }
 }

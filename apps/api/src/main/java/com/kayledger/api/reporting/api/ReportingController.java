@@ -48,13 +48,13 @@ public class ReportingController {
     }
 
     @PostMapping("/exports")
-    ResponseEntity<Object> requestExport(
+    ResponseEntity<Object> generateSynchronousExport(
             @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
             @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
             @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
             @RequestBody(required = false) ExportRequestCommand request) {
         AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
-        return idempotencyService.run(idempotencyKey, "WORKSPACE", context.workspaceId(), context.actorId(), "POST /api/reporting/exports", IdempotencyService.fingerprint(workspaceSlug, actorKey, request), () -> reportingService.requestExport(context, request));
+        return idempotencyService.run(idempotencyKey, "WORKSPACE", context.workspaceId(), context.actorId(), "POST /api/reporting/exports", IdempotencyService.fingerprint(workspaceSlug, actorKey, request), () -> reportingService.generateSynchronousExport(context, request));
     }
 
     @GetMapping("/exports/jobs")

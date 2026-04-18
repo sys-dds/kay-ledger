@@ -59,8 +59,25 @@ public class OpenSearchInvestigationClient {
             if (response.statusCode() >= 400 && !indexAlreadyExists(response)) {
                 throw new IllegalStateException("OpenSearch index creation failed with status " + response.statusCode());
             }
+            ensureMapping();
         } catch (Exception exception) {
             throw new IllegalStateException("OpenSearch index could not be ensured.", exception);
+        }
+    }
+
+    private void ensureMapping() {
+        try {
+            HttpRequest request = HttpRequest.newBuilder(indexUri("_mapping"))
+                    .timeout(Duration.ofSeconds(10))
+                    .PUT(HttpRequest.BodyPublishers.ofString(mappingDefinition()))
+                    .header("Content-Type", "application/json")
+                    .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() >= 300) {
+                throw new IllegalStateException("OpenSearch mapping update failed with status " + response.statusCode());
+            }
+        } catch (Exception exception) {
+            throw new IllegalStateException("OpenSearch investigation mapping could not be verified.", exception);
         }
     }
 
@@ -68,7 +85,7 @@ public class OpenSearchInvestigationClient {
         ensureIndex();
         try {
             String body = objectMapper.writeValueAsString(document);
-            HttpRequest request = HttpRequest.newBuilder(indexUri("_doc/" + encode(document.documentId())))
+            HttpRequest request = HttpRequest.newBuilder(indexUri("_doc/" + encode(document.documentId()) + "?refresh=true"))
                     .timeout(Duration.ofSeconds(10))
                     .PUT(HttpRequest.BodyPublishers.ofString(body))
                     .header("Content-Type", "application/json")
@@ -103,30 +120,36 @@ public class OpenSearchInvestigationClient {
                       }
                     }
                   },
-                  "mappings": {
-                    "dynamic": false,
-                    "properties": {
-                      "documentId": {"type": "keyword"},
-                      "workspaceId": {"type": "keyword"},
-                      "documentType": {"type": "keyword"},
-                      "referenceType": {"type": "keyword"},
-                      "referenceId": {"type": "keyword"},
-                      "providerProfileId": {"type": "keyword"},
-                      "paymentIntentId": {"type": "keyword"},
-                      "refundId": {"type": "keyword"},
-                      "payoutRequestId": {"type": "keyword"},
-                      "disputeId": {"type": "keyword"},
-                      "subscriptionId": {"type": "keyword"},
-                      "providerEventId": {"type": "keyword"},
-                      "externalReference": {"type": "keyword"},
-                      "businessReferenceType": {"type": "keyword"},
-                      "businessReferenceId": {"type": "keyword"},
-                      "status": {"type": "keyword"},
-                      "currencyCode": {"type": "keyword"},
-                      "amountMinor": {"type": "long"},
-                      "occurredAt": {"type": "date"},
-                      "data": {"type": "object", "enabled": false}
-                    }
+                  "mappings": %s
+                }
+                """.formatted(mappingDefinition());
+    }
+
+    private static String mappingDefinition() {
+        return """
+                {
+                  "dynamic": "strict",
+                  "properties": {
+                    "documentId": {"type": "keyword", "ignore_above": 256},
+                    "workspaceId": {"type": "keyword", "ignore_above": 256},
+                    "documentType": {"type": "keyword", "ignore_above": 128},
+                    "referenceType": {"type": "keyword", "ignore_above": 128},
+                    "referenceId": {"type": "keyword", "ignore_above": 256},
+                    "providerProfileId": {"type": "keyword", "ignore_above": 256},
+                    "paymentIntentId": {"type": "keyword", "ignore_above": 256},
+                    "refundId": {"type": "keyword", "ignore_above": 256},
+                    "payoutRequestId": {"type": "keyword", "ignore_above": 256},
+                    "disputeId": {"type": "keyword", "ignore_above": 256},
+                    "subscriptionId": {"type": "keyword", "ignore_above": 256},
+                    "providerEventId": {"type": "keyword", "ignore_above": 512},
+                    "externalReference": {"type": "keyword", "ignore_above": 512},
+                    "businessReferenceType": {"type": "keyword", "ignore_above": 128},
+                    "businessReferenceId": {"type": "keyword", "ignore_above": 256},
+                    "status": {"type": "keyword", "ignore_above": 128},
+                    "currencyCode": {"type": "keyword", "ignore_above": 16},
+                    "amountMinor": {"type": "long"},
+                    "occurredAt": {"type": "date"},
+                    "data": {"type": "object", "enabled": false}
                   }
                 }
                 """;
