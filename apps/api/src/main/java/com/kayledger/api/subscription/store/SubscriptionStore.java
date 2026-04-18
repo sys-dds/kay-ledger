@@ -305,6 +305,17 @@ public class SubscriptionStore {
                 """, CYCLE_MAPPER, workspaceId, cycleId);
     }
 
+    public SubscriptionCycle markCycleFailed(UUID workspaceId, UUID cycleId) {
+        return jdbcTemplate.queryForObject("""
+                UPDATE subscription_cycles
+                SET status = 'FAILED'
+                WHERE workspace_id = ?
+                  AND id = ?
+                  AND status = 'PENDING_PAYMENT'
+                RETURNING *
+                """, CYCLE_MAPPER, workspaceId, cycleId);
+    }
+
     public SubscriptionPlanChange schedulePlanChange(UUID workspaceId, UUID subscriptionId, UUID targetPlanId, int effectiveCycleNumber) {
         return jdbcTemplate.queryForObject("""
                 INSERT INTO subscription_plan_changes (

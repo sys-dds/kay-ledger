@@ -1,6 +1,8 @@
 package com.kayledger.api.payment.application;
 
 import java.util.ArrayList;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -235,6 +237,7 @@ public class PaymentService {
         try {
             PaymentIntent failed = paymentStore.fail(context.workspaceId(), existing.id());
             paymentStore.createAttempt(context.workspaceId(), failed.id(), "AUTHORIZE", "FAILED", 0, externalReference(command), null);
+            failSubscriptionCycleIfPresent(context.workspaceId(), failed);
             appendPaymentEvent(context.workspaceId(), failed, "payment.failed");
             return details(context.workspaceId(), failed);
         } catch (EmptyResultDataAccessException exception) {
@@ -574,6 +577,28 @@ public class PaymentService {
         data.put("entitlementStatus", "ACTIVE");
         data.put("nextRenewalBoundary", paid.cycleEndAt());
         outboxService.append(workspaceId, "SUBSCRIPTION", paid.subscriptionId(), "subscription.renewal.succeeded", "subscription.renewal.succeeded:" + paid.subscriptionId() + ":" + paid.id(), data);
+    }
+
+    private void failSubscriptionCycleIfPresent(UUID workspaceId, PaymentIntent failed) {
+        if (failed.subscriptionCycleId() == null) {
+            return;
+        }
+        SubscriptionCycle cycle = subscriptionStore.findCycleByPaymentIntent(workspaceId, failed.id())
+                .orElseThrow(() -> new BadRequestException("Failed subscription payment intent is not linked to a subscription cycle."));
+        SubscriptionCycle failedCycle = subscriptionStore.markCycleFailed(workspaceId, cycle.id());
+        var subscription = subscriptionStore.findSubscription(workspaceId, failedCycle.subscriptionId())
+                .orElseThrow(() -> new BadRequestException("Subscription was not found for failed cycle."));
+        var grace = subscriptionStore.moveToGrace(workspaceId, subscription.id(), Instant.now().plus(7, ChronoUnit.DAYS));
+        subscriptionStore.upsertEntitlement(workspaceId, grace.id(), grace.customerProfileId(), "GRACE", grace.currentPeriodStartAt(), grace.graceExpiresAt());
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("subscriptionId", grace.id());
+        data.put("subscriptionCycleId", failedCycle.id());
+        data.put("cycleNumber", failedCycle.cycleNumber());
+        data.put("status", grace.status());
+        data.put("entitlementStatus", "GRACE");
+        data.put("lastRenewalOutcome", "FAILED");
+        data.put("graceExpiresAt", grace.graceExpiresAt());
+        outboxService.append(workspaceId, "SUBSCRIPTION", grace.id(), "subscription.renewal.failed_to_grace", "subscription.renewal.failed_to_grace:" + grace.id() + ":" + failedCycle.id(), data);
     }
 
     private void attachJournal(UUID workspaceId, PaymentIntent intent, PaymentAttempt attempt, String description, List<PostingCommand> postings) {

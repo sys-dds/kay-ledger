@@ -57,8 +57,10 @@ public class OutboxStore {
                 WITH due AS (
                     SELECT id
                     FROM outbox_events
-                    WHERE status = 'PENDING'
-                      AND available_at <= now()
+                    WHERE (
+                        (status = 'PENDING' AND available_at <= now())
+                        OR (status = 'CLAIMED' AND updated_at <= now() - interval '5 minutes')
+                      )
                     ORDER BY available_at, created_at
                     LIMIT ?
                     FOR UPDATE SKIP LOCKED
@@ -123,7 +125,7 @@ public class OutboxStore {
                 """, MAPPER, workspaceId, workspaceId, limit);
     }
 
-    public OutboxEvent replay(UUID eventId) {
+    public OutboxEvent replay(UUID workspaceId, UUID eventId) {
         return jdbcTemplate.queryForObject("""
                 UPDATE outbox_events
                 SET status = 'PENDING',
@@ -131,9 +133,10 @@ public class OutboxStore {
                     parked_at = NULL,
                     last_error = NULL
                 WHERE id = ?
+                  AND workspace_id = ?
                   AND status = 'PARKED'
                 RETURNING *
-                """, MAPPER, eventId);
+                """, MAPPER, eventId, workspaceId);
     }
 
     private static String truncate(String error) {

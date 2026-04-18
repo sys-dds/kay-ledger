@@ -1,0 +1,155 @@
+package com.kayledger.api.reconciliation.store;
+
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowMapper;
+import org.springframework.stereotype.Repository;
+
+import com.kayledger.api.reconciliation.model.ReconciliationMismatch;
+import com.kayledger.api.reconciliation.model.ReconciliationRun;
+
+@Repository
+public class ReconciliationStore {
+
+    private static final RowMapper<ReconciliationRun> RUN_MAPPER = (rs, rowNum) -> new ReconciliationRun(
+            rs.getObject("id", UUID.class),
+            rs.getObject("workspace_id", UUID.class),
+            rs.getObject("provider_config_id", UUID.class),
+            rs.getString("run_type"),
+            rs.getString("status"),
+            instant(rs, "started_at"),
+            nullableInstant(rs, "completed_at"),
+            instant(rs, "created_at"),
+            instant(rs, "updated_at"));
+
+    private static final RowMapper<ReconciliationMismatch> MISMATCH_MAPPER = (rs, rowNum) -> new ReconciliationMismatch(
+            rs.getObject("id", UUID.class),
+            rs.getObject("workspace_id", UUID.class),
+            rs.getObject("reconciliation_run_id", UUID.class),
+            rs.getObject("provider_callback_id", UUID.class),
+            rs.getString("business_reference_type"),
+            rs.getObject("business_reference_id", UUID.class),
+            rs.getString("drift_category"),
+            rs.getString("internal_state"),
+            rs.getString("provider_state"),
+            rs.getString("suggested_action"),
+            rs.getString("repair_status"),
+            rs.getString("repair_note"),
+            nullableInstant(rs, "repaired_at"),
+            instant(rs, "created_at"),
+            instant(rs, "updated_at"));
+
+    private final JdbcTemplate jdbcTemplate;
+
+    public ReconciliationStore(JdbcTemplate jdbcTemplate) {
+        this.jdbcTemplate = jdbcTemplate;
+    }
+
+    public ReconciliationRun createRun(UUID workspaceId, String runType) {
+        return jdbcTemplate.queryForObject("""
+                INSERT INTO reconciliation_runs (workspace_id, run_type)
+                VALUES (?, ?)
+                RETURNING *
+                """, RUN_MAPPER, workspaceId, runType);
+    }
+
+    public ReconciliationRun completeRun(UUID workspaceId, UUID runId) {
+        return jdbcTemplate.queryForObject("""
+                UPDATE reconciliation_runs
+                SET status = 'COMPLETED',
+                    completed_at = now()
+                WHERE workspace_id = ?
+                  AND id = ?
+                RETURNING *
+                """, RUN_MAPPER, workspaceId, runId);
+    }
+
+    public List<ReconciliationRun> listRuns(UUID workspaceId) {
+        return jdbcTemplate.query("""
+                SELECT *
+                FROM reconciliation_runs
+                WHERE workspace_id = ?
+                ORDER BY started_at DESC, id
+                """, RUN_MAPPER, workspaceId);
+    }
+
+    public ReconciliationMismatch createMismatch(
+            UUID workspaceId,
+            UUID runId,
+            UUID providerCallbackId,
+            String referenceType,
+            UUID referenceId,
+            String driftCategory,
+            String internalState,
+            String providerState,
+            String suggestedAction) {
+        return jdbcTemplate.queryForObject("""
+                INSERT INTO reconciliation_mismatches (
+                    workspace_id, reconciliation_run_id, provider_callback_id,
+                    business_reference_type, business_reference_id, drift_category,
+                    internal_state, provider_state, suggested_action
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                RETURNING *
+                """, MISMATCH_MAPPER, workspaceId, runId, providerCallbackId, referenceType, referenceId, driftCategory, internalState, providerState, suggestedAction);
+    }
+
+    public List<ReconciliationMismatch> listMismatches(UUID workspaceId) {
+        return jdbcTemplate.query("""
+                SELECT *
+                FROM reconciliation_mismatches
+                WHERE workspace_id = ?
+                ORDER BY created_at DESC, id
+                """, MISMATCH_MAPPER, workspaceId);
+    }
+
+    public Optional<ReconciliationMismatch> findMismatch(UUID workspaceId, UUID mismatchId) {
+        return jdbcTemplate.query("""
+                SELECT *
+                FROM reconciliation_mismatches
+                WHERE workspace_id = ?
+                  AND id = ?
+                """, MISMATCH_MAPPER, workspaceId, mismatchId).stream().findFirst();
+    }
+
+    public ReconciliationMismatch markRepair(UUID workspaceId, UUID mismatchId, String note) {
+        return jdbcTemplate.queryForObject("""
+                UPDATE reconciliation_mismatches
+                SET repair_status = 'MARKED',
+                    repair_note = ?
+                WHERE workspace_id = ?
+                  AND id = ?
+                  AND repair_status = 'OPEN'
+                RETURNING *
+                """, MISMATCH_MAPPER, note, workspaceId, mismatchId);
+    }
+
+    public ReconciliationMismatch markApplied(UUID workspaceId, UUID mismatchId, String note) {
+        return jdbcTemplate.queryForObject("""
+                UPDATE reconciliation_mismatches
+                SET repair_status = 'APPLIED',
+                    repair_note = ?,
+                    repaired_at = now()
+                WHERE workspace_id = ?
+                  AND id = ?
+                  AND repair_status IN ('OPEN', 'MARKED')
+                RETURNING *
+                """, MISMATCH_MAPPER, note, workspaceId, mismatchId);
+    }
+
+    private static Instant instant(ResultSet rs, String column) throws SQLException {
+        return rs.getTimestamp(column).toInstant();
+    }
+
+    private static Instant nullableInstant(ResultSet rs, String column) throws SQLException {
+        Timestamp timestamp = rs.getTimestamp(column);
+        return timestamp == null ? null : timestamp.toInstant();
+    }
+}
