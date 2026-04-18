@@ -15,7 +15,7 @@ public interface OperatorWorkflowStatusActivities {
     void markProgress(UUID workspaceId, String workflowId, int progressCurrent, int progressTotal, String progressMessage);
 
     @ActivityMethod
-    void markSucceeded(UUID workspaceId, String workflowId, int progressCurrent, int progressTotal, String progressMessage);
+    void markSucceeded(UUID workspaceId, String workflowId, String progressMessage);
 
     @ActivityMethod
     void markFailed(UUID workspaceId, String workflowId, String failureReason);

@@ -141,7 +141,7 @@ class FinalBackendHardeningIntegrationTest {
                 1,
                 "Metrics proof requested.");
         operatorWorkflowService.markRunning(fixture.workspaceId(), workflow.workflowId(), "Metrics proof running.");
-        operatorWorkflowService.markSucceeded(fixture.workspaceId(), workflow.workflowId(), 1, 1, "Metrics proof completed.");
+        operatorWorkflowService.markSucceeded(fixture.workspaceId(), workflow.workflowId(), "Metrics proof completed.");
         String metricsBody = restTemplate.getForObject("/actuator/metrics/kayledger.operator_workflows.outcomes", String.class);
         assertThat(metricsBody).contains("kayledger.operator_workflows.outcomes");
         assertThat(java.util.Arrays.stream(com.kayledger.api.temporal.application.OperatorWorkflowQueryService.class.getDeclaredMethods()).map(java.lang.reflect.Method::getName))

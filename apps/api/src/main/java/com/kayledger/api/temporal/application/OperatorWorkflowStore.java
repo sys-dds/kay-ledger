@@ -102,20 +102,18 @@ public class OperatorWorkflowStore {
                 """, MAPPER, progressCurrent, progressTotal, progressMessage, workspaceId, workflowId);
     }
 
-    public OperatorWorkflowRecord markSucceeded(UUID workspaceId, String workflowId, int progressCurrent, int progressTotal, String progressMessage) {
+    public OperatorWorkflowRecord markSucceeded(UUID workspaceId, String workflowId, String progressMessage) {
         return jdbcTemplate.queryForObject("""
                 UPDATE operator_workflows
                 SET status = 'SUCCEEDED',
                     started_at = COALESCE(started_at, now()),
-                    progress_current = ?,
-                    progress_total = ?,
                     progress_message = ?,
                     completed_at = now(),
                     failure_reason = NULL
                 WHERE workspace_id = ?
                   AND workflow_id = ?
                 RETURNING *
-                """, MAPPER, progressCurrent, progressTotal, progressMessage, workspaceId, workflowId);
+                """, MAPPER, progressMessage, workspaceId, workflowId);
     }
 
     public OperatorWorkflowRecord markFailed(UUID workspaceId, String workflowId, String failureReason) {

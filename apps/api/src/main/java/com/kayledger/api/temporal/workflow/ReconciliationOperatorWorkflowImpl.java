@@ -19,8 +19,8 @@ public class ReconciliationOperatorWorkflowImpl implements ReconciliationOperato
         try {
             statusActivities.markRunning(input.workspaceId(), input.workflowId(), "Reconciliation run started.");
             statusActivities.markProgress(input.workspaceId(), input.workflowId(), 1, 4, "Dispatching reconciliation scan activity.");
-            ReconciliationWorkflowActivities.ReconciliationWorkflowResult result = reconciliationActivities.runReconciliation(input.workspaceId(), input.referenceId());
-            statusActivities.markSucceeded(input.workspaceId(), input.workflowId(), result.mismatchCount(), result.mismatchCount(), "Reconciliation run completed.");
+            reconciliationActivities.runReconciliation(input.workspaceId(), input.referenceId());
+            statusActivities.markSucceeded(input.workspaceId(), input.workflowId(), "Reconciliation run completed.");
         } catch (RuntimeException exception) {
             statusActivities.markFailed(input.workspaceId(), input.workflowId(), exception.getMessage());
             throw exception;

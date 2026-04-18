@@ -62,7 +62,3 @@ kay-ledger:
       operator-workflows: ${KAY_LEDGER_TEMPORAL_OPERATOR_TASK_QUEUE:kay-ledger-operator-workflows}
     workflow:
       start-to-close-timeout-seconds: ${KAY_LEDGER_TEMPORAL_WORKFLOW_TIMEOUT_SECONDS:3600}
-      activity-start-to-close-timeout-seconds: ${KAY_LEDGER_TEMPORAL_ACTIVITY_TIMEOUT_SECONDS:300}
-      retry-initial-interval-seconds: ${KAY_LEDGER_TEMPORAL_RETRY_INITIAL_SECONDS:2}
-      retry-maximum-interval-seconds: ${KAY_LEDGER_TEMPORAL_RETRY_MAX_SECONDS:30}
-      retry-maximum-attempts: ${KAY_LEDGER_TEMPORAL_RETRY_MAX_ATTEMPTS:5}

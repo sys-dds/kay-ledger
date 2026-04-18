@@ -19,8 +19,8 @@ public class ExportOperatorWorkflowImpl implements ExportOperatorWorkflow {
         try {
             statusActivities.markRunning(input.workspaceId(), input.workflowId(), "Export generation started.");
             statusActivities.markProgress(input.workspaceId(), input.workflowId(), 1, 4, "Dispatching export generation activity.");
-            ExportWorkflowActivities.ExportWorkflowResult result = exportActivities.generateExport(input.workspaceId(), input.referenceId());
-            statusActivities.markSucceeded(input.workspaceId(), input.workflowId(), result.rowCount(), result.rowCount(), "Export generation completed.");
+            exportActivities.generateExport(input.workspaceId(), input.referenceId());
+            statusActivities.markSucceeded(input.workspaceId(), input.workflowId(), "Export generation completed.");
         } catch (RuntimeException exception) {
             statusActivities.markFailed(input.workspaceId(), input.workflowId(), exception.getMessage());
             throw exception;
