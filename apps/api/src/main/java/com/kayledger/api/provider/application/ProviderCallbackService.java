@@ -108,7 +108,7 @@ public class ProviderCallbackService {
     private ProviderCallback ingest(ProviderConfig config, String signatureHeader, byte[] rawPayload) {
         UUID workspaceId = config.workspaceId();
         ProviderCallbackCommand command = payload(rawPayload);
-        if (!validSignature(config.signingSecret(), rawPayload, command, requireText(signatureHeader, "X-Provider-Signature"))) {
+        if (!validSignature(config.signingSecret(), rawPayload, requireText(signatureHeader, "X-Provider-Signature"))) {
             throw new ForbiddenException("Provider callback signature is invalid.");
         }
         String payloadJson = new String(rawPayload, StandardCharsets.UTF_8);
@@ -203,18 +203,8 @@ public class ProviderCallbackService {
         }
     }
 
-    private static boolean validSignature(String secret, byte[] rawPayload, ProviderCallbackCommand command, String actual) {
-        return constantTimeEquals(sign(secret, rawPayload), actual)
-                || constantTimeEquals(sign(secret, canonicalPayload(command).getBytes(StandardCharsets.UTF_8)), actual);
-    }
-
-    private static String canonicalPayload(ProviderCallbackCommand command) {
-        return "{\"providerEventId\":\"" + requireText(command.providerEventId(), "providerEventId")
-                + "\",\"providerSequence\":" + command.providerSequence()
-                + ",\"callbackType\":\"" + requireText(command.callbackType(), "callbackType")
-                + "\",\"businessReferenceId\":\"" + requireId(command.businessReferenceId(), "businessReferenceId")
-                + "\",\"amountMinor\":" + amount(command)
-                + ",\"metadata\":null}";
+    private static boolean validSignature(String secret, byte[] rawPayload, String actual) {
+        return constantTimeEquals(sign(secret, rawPayload), actual);
     }
 
     private static boolean constantTimeEquals(String expected, String actual) {

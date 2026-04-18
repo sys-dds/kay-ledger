@@ -1,6 +1,7 @@
 package com.kayledger.api.investigation.api;
 
 import java.util.List;
+import java.util.UUID;
 
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -18,6 +19,9 @@ import com.kayledger.api.investigation.application.InvestigationSearchService;
 import com.kayledger.api.investigation.application.InvestigationSearchService.SearchCommand;
 import com.kayledger.api.investigation.model.InvestigationSearchHit;
 import com.kayledger.api.shared.idempotency.IdempotencyService;
+import com.kayledger.api.temporal.application.OperatorWorkflowQueryService;
+import com.kayledger.api.temporal.application.OperatorWorkflowService;
+import com.kayledger.api.temporal.model.OperatorWorkflowStatus;
 
 @RestController
 @RequestMapping("/api/investigation")
@@ -25,11 +29,15 @@ public class InvestigationController {
 
     private final AccessContextResolver accessContextResolver;
     private final InvestigationSearchService investigationSearchService;
+    private final InvestigationIndexingService investigationIndexingService;
+    private final OperatorWorkflowQueryService operatorWorkflowQueryService;
     private final IdempotencyService idempotencyService;
 
-    public InvestigationController(AccessContextResolver accessContextResolver, InvestigationSearchService investigationSearchService, IdempotencyService idempotencyService) {
+    public InvestigationController(AccessContextResolver accessContextResolver, InvestigationSearchService investigationSearchService, InvestigationIndexingService investigationIndexingService, OperatorWorkflowQueryService operatorWorkflowQueryService, IdempotencyService idempotencyService) {
         this.accessContextResolver = accessContextResolver;
         this.investigationSearchService = investigationSearchService;
+        this.investigationIndexingService = investigationIndexingService;
+        this.operatorWorkflowQueryService = operatorWorkflowQueryService;
         this.idempotencyService = idempotencyService;
     }
 
@@ -88,6 +96,27 @@ public class InvestigationController {
                 context.actorId(),
                 "POST /api/investigation/reindex",
                 IdempotencyService.fingerprint(workspaceSlug, actorKey, "reindex"),
-                () -> investigationSearchService.reindex(context));
+                () -> investigationIndexingService.startReindex(context));
+    }
+
+    @GetMapping("/reindex/workflows")
+    List<OperatorWorkflowStatus> reindexWorkflows(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey) {
+        return operatorWorkflowQueryService.list(
+                accessContextResolver.resolveWorkspace(workspaceSlug, actorKey),
+                OperatorWorkflowService.INVESTIGATION_REINDEX);
+    }
+
+    @GetMapping("/reindex/jobs/{jobId}/workflow")
+    OperatorWorkflowStatus reindexWorkflow(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @PathVariable UUID jobId) {
+        return operatorWorkflowQueryService.findByReference(
+                accessContextResolver.resolveWorkspace(workspaceSlug, actorKey),
+                OperatorWorkflowService.INVESTIGATION_REINDEX,
+                OperatorWorkflowService.INVESTIGATION_REINDEX_JOB,
+                jobId);
     }
 }

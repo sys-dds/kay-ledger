@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.nio.charset.StandardCharsets;
 import java.util.HexFormat;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -16,8 +17,11 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.boot.test.web.server.LocalServerPort;
+import org.springframework.context.SmartLifecycle;
+import org.springframework.context.annotation.Bean;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -36,6 +40,13 @@ import org.testcontainers.utility.DockerImageName;
 import com.kayledger.api.shared.messaging.application.InboxService;
 import com.kayledger.api.shared.messaging.application.ProjectionConsumer;
 import com.kayledger.api.shared.messaging.store.OutboxStore;
+import com.kayledger.api.temporal.config.TemporalProperties;
+import com.kayledger.api.temporal.config.TemporalWorkerCustomizer;
+
+import io.temporal.client.WorkflowClient;
+import io.temporal.testing.TestWorkflowEnvironment;
+import io.temporal.worker.Worker;
+import io.temporal.worker.WorkerFactory;
 
 @Testcontainers
 @ActiveProfiles("test")
@@ -58,6 +69,7 @@ class Kay009HardeningKay010Kay011ProviderReconciliationIntegrationTest {
         registry.add("spring.datasource.password", POSTGRES::getPassword);
         registry.add("spring.kafka.bootstrap-servers", KAFKA::getBootstrapServers);
         registry.add("kay-ledger.async.kafka.topic", () -> "kay-ledger.kay010.test.events");
+        registry.add("kay-ledger.temporal.task-queues.operator-workflows", () -> "kay-ledger-kay009-legacy");
         registry.add("kay-ledger.async.relay.max-attempts", () -> "2");
         registry.add("kay-ledger.async.relay.backoff-seconds", () -> "1");
     }
@@ -154,6 +166,7 @@ class Kay009HardeningKay010Kay011ProviderReconciliationIntegrationTest {
 
         jdbcTemplate.update("UPDATE payment_intents SET status = 'CREATED' WHERE id = ?::uuid", firstPaymentId);
         post("/api/reconciliation/runs", workspaceHeaders("k10-recon", "k10-alpha", "k10-owner"), Map.of("runType", "PAYMENT"));
+        awaitLatestRunCompleted();
         List<?> mismatches = getList("/api/reconciliation/mismatches", ownerHeaders, HttpStatus.OK);
         assertThat(mismatches).isNotEmpty();
         Map<?, ?> mismatch = (Map<?, ?>) mismatches.get(0);
@@ -203,7 +216,14 @@ class Kay009HardeningKay010Kay011ProviderReconciliationIntegrationTest {
     }
 
     private Map<String, Object> callback(String eventId, long sequence, String type, String referenceId, long amountMinor) {
-        return Map.of("providerEventId", eventId, "providerSequence", sequence, "callbackType", type, "businessReferenceId", referenceId, "amountMinor", amountMinor);
+        Map<String, Object> callback = new LinkedHashMap<>();
+        callback.put("providerEventId", eventId);
+        callback.put("providerSequence", sequence);
+        callback.put("callbackType", type);
+        callback.put("businessReferenceId", referenceId);
+        callback.put("amountMinor", amountMinor);
+        callback.put("metadata", null);
+        return callback;
     }
 
     private String signature(String secret, Map<String, Object> callback) {
@@ -245,6 +265,29 @@ class Kay009HardeningKay010Kay011ProviderReconciliationIntegrationTest {
         return response.getBody();
     }
 
+    private void awaitLatestRunCompleted() {
+        long deadline = System.currentTimeMillis() + 20_000;
+        String status = null;
+        while (System.currentTimeMillis() < deadline) {
+            status = jdbcTemplate.queryForObject("""
+                    SELECT status FROM reconciliation_runs
+                    WHERE workspace_id = ?::uuid
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """, String.class, workspaceId("k10-alpha"));
+            if ("COMPLETED".equals(status)) {
+                return;
+            }
+            try {
+                Thread.sleep(200);
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(exception);
+            }
+        }
+        assertThat(status).isEqualTo("COMPLETED");
+    }
+
     private HttpHeaders headers(String idempotencyKey) {
         HttpHeaders headers = new HttpHeaders();
         headers.add("Idempotency-Key", idempotencyKey);
@@ -267,5 +310,55 @@ class Kay009HardeningKay010Kay011ProviderReconciliationIntegrationTest {
 
     private <T> ResponseEntity<T> exchange(String path, HttpMethod method, HttpHeaders headers, Object body, Class<T> responseType) {
         return restTemplate.exchange("http://localhost:" + port + path, method, new HttpEntity<>(body, headers), responseType);
+    }
+
+    @TestConfiguration
+    static class TemporalTestConfiguration {
+
+        @Bean(destroyMethod = "")
+        TestWorkflowEnvironment testWorkflowEnvironment() {
+            return TestWorkflowEnvironment.newInstance();
+        }
+
+        @Bean
+        WorkflowClient workflowClient(TestWorkflowEnvironment environment) {
+            return environment.getWorkflowClient();
+        }
+
+        @Bean
+        WorkerFactory workerFactory(TestWorkflowEnvironment environment) {
+            return environment.getWorkerFactory();
+        }
+
+        @Bean
+        Worker testOperatorWorker(WorkerFactory workerFactory, TemporalProperties properties, List<TemporalWorkerCustomizer> customizers) {
+            Worker worker = workerFactory.newWorker(properties.getTaskQueues().getOperatorWorkflows());
+            customizers.forEach(customizer -> customizer.customize(worker));
+            return worker;
+        }
+
+        @Bean
+        SmartLifecycle temporalTestLifecycle(TestWorkflowEnvironment environment) {
+            return new SmartLifecycle() {
+                private boolean running;
+
+                @Override
+                public void start() {
+                    environment.start();
+                    running = true;
+                }
+
+                @Override
+                public void stop() {
+                    environment.close();
+                    running = false;
+                }
+
+                @Override
+                public boolean isRunning() {
+                    return running;
+                }
+            };
+        }
     }
 }

@@ -53,3 +53,16 @@ kay-ledger:
     access-key: ${KAY_LEDGER_OBJECT_STORAGE_ACCESS_KEY:kay_ledger}
     secret-key: ${KAY_LEDGER_OBJECT_STORAGE_SECRET_KEY:kay_ledger_secret}
     path-style-access-enabled: ${KAY_LEDGER_OBJECT_STORAGE_PATH_STYLE:true}
+  temporal:
+    enabled: ${KAY_LEDGER_TEMPORAL_ENABLED:true}
+    target: ${KAY_LEDGER_TEMPORAL_TARGET:localhost:7233}
+    namespace: ${KAY_LEDGER_TEMPORAL_NAMESPACE:default}
+    worker-enabled: ${KAY_LEDGER_TEMPORAL_WORKER_ENABLED:true}
+    task-queues:
+      operator-workflows: ${KAY_LEDGER_TEMPORAL_OPERATOR_TASK_QUEUE:kay-ledger-operator-workflows}
+    workflow:
+      start-to-close-timeout-seconds: ${KAY_LEDGER_TEMPORAL_WORKFLOW_TIMEOUT_SECONDS:3600}
+      activity-start-to-close-timeout-seconds: ${KAY_LEDGER_TEMPORAL_ACTIVITY_TIMEOUT_SECONDS:300}
+      retry-initial-interval-seconds: ${KAY_LEDGER_TEMPORAL_RETRY_INITIAL_SECONDS:2}
+      retry-maximum-interval-seconds: ${KAY_LEDGER_TEMPORAL_RETRY_MAX_SECONDS:30}
+      retry-maximum-attempts: ${KAY_LEDGER_TEMPORAL_RETRY_MAX_ATTEMPTS:5}

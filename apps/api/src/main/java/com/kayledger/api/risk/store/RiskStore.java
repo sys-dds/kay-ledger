@@ -130,6 +130,10 @@ public class RiskStore {
                     JOIN risk_flags rf ON rf.workspace_id = rr.workspace_id AND rf.id = rr.risk_flag_id
                     WHERE rr.workspace_id = ?
                       AND rr.id = ?
+                      AND (
+                          (? = 'ALLOW' AND rr.status IN ('OPEN', 'IN_REVIEW', 'BLOCKED'))
+                          OR (? IN ('REVIEW', 'BLOCK') AND rr.status IN ('OPEN', 'IN_REVIEW'))
+                      )
                 ), inserted AS (
                     INSERT INTO risk_decisions (
                         workspace_id, risk_flag_id, review_id, reference_type, reference_id,
@@ -161,7 +165,7 @@ public class RiskStore {
                 WHERE rf.workspace_id = i.workspace_id
                   AND rf.id = i.risk_flag_id
                 RETURNING i.*
-                """, DECISION_MAPPER, workspaceId, reviewId, outcome, reason, actorId, outcome, outcome, outcome, outcome, outcome);
+                """, DECISION_MAPPER, workspaceId, reviewId, outcome, outcome, outcome, reason, actorId, outcome, outcome, outcome, outcome, outcome);
     }
 
     public List<RiskDecision> listDecisions(UUID workspaceId) {

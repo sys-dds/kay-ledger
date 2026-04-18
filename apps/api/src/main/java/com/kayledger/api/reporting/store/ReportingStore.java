@@ -37,7 +37,10 @@ public class ReportingStore {
             rs.getObject("workspace_id", UUID.class),
             rs.getString("export_type"),
             rs.getString("status"),
-            "SYNCHRONOUS",
+            rs.getString("generation_mode"),
+            rs.getString("temporal_workflow_id"),
+            rs.getString("temporal_run_id"),
+            rs.getString("trigger_mode"),
             rs.getObject("requested_by_actor_id", UUID.class),
             rs.getString("parameters_json"),
             rs.getInt("row_count"),
@@ -45,6 +48,8 @@ public class ReportingStore {
             rs.getString("content_type"),
             rs.getString("failure_reason"),
             instant(rs, "requested_at"),
+            nullableInstant(rs, "orchestration_started_at"),
+            nullableInstant(rs, "orchestration_completed_at"),
             nullableInstant(rs, "completed_at"),
             instant(rs, "created_at"),
             instant(rs, "updated_at"));
@@ -135,10 +140,30 @@ public class ReportingStore {
                 """, JOB_MAPPER, workspaceId, exportType, requestedByActorId, parametersJson);
     }
 
+    public ExportJob createAsyncExportJob(UUID workspaceId, String exportType, UUID requestedByActorId, String parametersJson) {
+        return jdbcTemplate.queryForObject("""
+                INSERT INTO export_jobs (workspace_id, export_type, requested_by_actor_id, parameters_json, generation_mode)
+                VALUES (?, ?, ?, ?::jsonb, 'TEMPORAL_ASYNC')
+                RETURNING *
+                """, JOB_MAPPER, workspaceId, exportType, requestedByActorId, parametersJson);
+    }
+
+    public ExportJob attachWorkflow(UUID workspaceId, UUID jobId, String workflowId, String runId) {
+        return jdbcTemplate.queryForObject("""
+                UPDATE export_jobs
+                SET temporal_workflow_id = ?,
+                    temporal_run_id = ?
+                WHERE workspace_id = ?
+                  AND id = ?
+                RETURNING *
+                """, JOB_MAPPER, workflowId, runId, workspaceId, jobId);
+    }
+
     public ExportJob markRunning(UUID workspaceId, UUID jobId) {
         return jdbcTemplate.queryForObject("""
                 UPDATE export_jobs
                 SET status = 'RUNNING'
+                    , orchestration_started_at = COALESCE(orchestration_started_at, now())
                 WHERE workspace_id = ?
                   AND id = ?
                   AND status = 'REQUESTED'
@@ -150,10 +175,12 @@ public class ReportingStore {
         return jdbcTemplate.queryForObject("""
                 UPDATE export_jobs
                 SET status = 'SUCCEEDED',
+                    orchestration_started_at = COALESCE(orchestration_started_at, now()),
                     row_count = ?,
                     storage_key = ?,
                     content_type = ?,
                     completed_at = now(),
+                    orchestration_completed_at = now(),
                     failure_reason = NULL
                 WHERE workspace_id = ?
                   AND id = ?
@@ -166,7 +193,8 @@ public class ReportingStore {
                 UPDATE export_jobs
                 SET status = 'FAILED',
                     failure_reason = ?,
-                    completed_at = now()
+                    completed_at = now(),
+                    orchestration_completed_at = now()
                 WHERE workspace_id = ?
                   AND id = ?
                 RETURNING *
@@ -190,6 +218,15 @@ public class ReportingStore {
                 WHERE workspace_id = ?
                 ORDER BY created_at DESC, id
                 """, JOB_MAPPER, workspaceId);
+    }
+
+    public ExportJob findJob(UUID workspaceId, UUID jobId) {
+        return jdbcTemplate.queryForObject("""
+                SELECT *
+                FROM export_jobs
+                WHERE workspace_id = ?
+                  AND id = ?
+                """, JOB_MAPPER, workspaceId, jobId);
     }
 
     public List<ExportArtifact> listArtifacts(UUID workspaceId) {

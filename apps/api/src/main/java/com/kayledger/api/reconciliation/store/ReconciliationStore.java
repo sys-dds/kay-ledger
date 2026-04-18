@@ -24,7 +24,13 @@ public class ReconciliationStore {
             rs.getObject("provider_config_id", UUID.class),
             rs.getString("run_type"),
             rs.getString("status"),
-            instant(rs, "started_at"),
+            rs.getString("temporal_workflow_id"),
+            rs.getString("temporal_run_id"),
+            rs.getString("trigger_mode"),
+            rs.getString("failure_reason"),
+            rs.getInt("mismatch_count"),
+            instant(rs, "requested_at"),
+            nullableInstant(rs, "started_at"),
             nullableInstant(rs, "completed_at"),
             instant(rs, "created_at"),
             instant(rs, "updated_at"));
@@ -54,20 +60,80 @@ public class ReconciliationStore {
 
     public ReconciliationRun createRun(UUID workspaceId, String runType) {
         return jdbcTemplate.queryForObject("""
-                INSERT INTO reconciliation_runs (workspace_id, run_type)
-                VALUES (?, ?)
+                INSERT INTO reconciliation_runs (workspace_id, run_type, started_at)
+                VALUES (?, ?, now())
                 RETURNING *
                 """, RUN_MAPPER, workspaceId, runType);
     }
 
-    public ReconciliationRun completeRun(UUID workspaceId, UUID runId) {
+    public ReconciliationRun createRequestedRun(UUID workspaceId, String runType) {
+        return jdbcTemplate.queryForObject("""
+                INSERT INTO reconciliation_runs (workspace_id, run_type, status)
+                VALUES (?, ?, 'REQUESTED')
+                RETURNING *
+                """, RUN_MAPPER, workspaceId, runType);
+    }
+
+    public ReconciliationRun attachWorkflow(UUID workspaceId, UUID runId, String workflowId, String temporalRunId) {
         return jdbcTemplate.queryForObject("""
                 UPDATE reconciliation_runs
-                SET status = 'COMPLETED',
-                    completed_at = now()
+                SET temporal_workflow_id = ?,
+                    temporal_run_id = ?
                 WHERE workspace_id = ?
                   AND id = ?
                 RETURNING *
+                """, RUN_MAPPER, workflowId, temporalRunId, workspaceId, runId);
+    }
+
+    public ReconciliationRun markRunning(UUID workspaceId, UUID runId) {
+        return jdbcTemplate.queryForObject("""
+                UPDATE reconciliation_runs
+                SET status = 'RUNNING',
+                    started_at = COALESCE(started_at, now()),
+                    failure_reason = NULL
+                WHERE workspace_id = ?
+                  AND id = ?
+                  AND status IN ('REQUESTED', 'RUNNING')
+                RETURNING *
+                """, RUN_MAPPER, workspaceId, runId);
+    }
+
+    public ReconciliationRun completeRun(UUID workspaceId, UUID runId, int mismatchCount) {
+        return jdbcTemplate.queryForObject("""
+                UPDATE reconciliation_runs
+                SET status = 'COMPLETED',
+                    started_at = COALESCE(started_at, now()),
+                    completed_at = now(),
+                    mismatch_count = ?,
+                    failure_reason = NULL
+                WHERE workspace_id = ?
+                  AND id = ?
+                RETURNING *
+                """, RUN_MAPPER, mismatchCount, workspaceId, runId);
+    }
+
+    public ReconciliationRun completeRun(UUID workspaceId, UUID runId) {
+        return completeRun(workspaceId, runId, countMismatches(workspaceId, runId));
+    }
+
+    public ReconciliationRun markFailed(UUID workspaceId, UUID runId, String failureReason) {
+        return jdbcTemplate.queryForObject("""
+                UPDATE reconciliation_runs
+                SET status = 'FAILED',
+                    completed_at = now(),
+                    failure_reason = ?
+                WHERE workspace_id = ?
+                  AND id = ?
+                RETURNING *
+                """, RUN_MAPPER, truncate(failureReason), workspaceId, runId);
+    }
+
+    public ReconciliationRun findRun(UUID workspaceId, UUID runId) {
+        return jdbcTemplate.queryForObject("""
+                SELECT *
+                FROM reconciliation_runs
+                WHERE workspace_id = ?
+                  AND id = ?
                 """, RUN_MAPPER, workspaceId, runId);
     }
 
@@ -76,7 +142,7 @@ public class ReconciliationStore {
                 SELECT *
                 FROM reconciliation_runs
                 WHERE workspace_id = ?
-                ORDER BY started_at DESC, id
+                ORDER BY COALESCE(started_at, requested_at) DESC, id
                 """, RUN_MAPPER, workspaceId);
     }
 
@@ -194,6 +260,16 @@ public class ReconciliationStore {
                 """, MISMATCH_MAPPER, workspaceId);
     }
 
+    public int countMismatches(UUID workspaceId, UUID runId) {
+        Integer value = jdbcTemplate.queryForObject("""
+                SELECT count(*)
+                FROM reconciliation_mismatches
+                WHERE workspace_id = ?
+                  AND reconciliation_run_id = ?
+                """, Integer.class, workspaceId, runId);
+        return count(value);
+    }
+
     public Optional<ReconciliationMismatch> findMismatch(UUID workspaceId, UUID mismatchId) {
         return jdbcTemplate.query("""
                 SELECT *
@@ -239,5 +315,12 @@ public class ReconciliationStore {
 
     private static int count(Integer value) {
         return value == null ? 0 : value;
+    }
+
+    private static String truncate(String value) {
+        if (value == null) {
+            return null;
+        }
+        return value.length() <= 1000 ? value : value.substring(0, 1000);
     }
 }

@@ -126,6 +126,67 @@ public class InvestigationStore {
         this.jdbcTemplate = jdbcTemplate;
     }
 
+    public ReindexJob createReindexJob(UUID workspaceId, UUID requestedByActorId) {
+        return jdbcTemplate.queryForObject("""
+                INSERT INTO investigation_reindex_jobs (workspace_id, requested_by_actor_id)
+                VALUES (?, ?)
+                RETURNING *
+                """, this::mapReindexJob, workspaceId, requestedByActorId);
+    }
+
+    public ReindexJob attachReindexWorkflow(UUID workspaceId, UUID jobId, String workflowId, String runId) {
+        return jdbcTemplate.queryForObject("""
+                UPDATE investigation_reindex_jobs
+                SET temporal_workflow_id = ?,
+                    temporal_run_id = ?
+                WHERE workspace_id = ?
+                  AND id = ?
+                RETURNING *
+                """, this::mapReindexJob, workflowId, runId, workspaceId, jobId);
+    }
+
+    public ReindexJob markReindexRunning(UUID workspaceId, UUID jobId) {
+        return jdbcTemplate.queryForObject("""
+                UPDATE investigation_reindex_jobs
+                SET status = 'RUNNING',
+                    started_at = COALESCE(started_at, now()),
+                    failure_reason = NULL
+                WHERE workspace_id = ?
+                  AND id = ?
+                  AND status IN ('REQUESTED', 'RUNNING')
+                RETURNING *
+                """, this::mapReindexJob, workspaceId, jobId);
+    }
+
+    public ReindexJob markReindexSucceeded(UUID workspaceId, UUID jobId, int indexed, int failed) {
+        return jdbcTemplate.queryForObject("""
+                UPDATE investigation_reindex_jobs
+                SET status = 'SUCCEEDED',
+                    started_at = COALESCE(started_at, now()),
+                    indexed_count = ?,
+                    failed_count = ?,
+                    completed_at = now(),
+                    failure_reason = NULL
+                WHERE workspace_id = ?
+                  AND id = ?
+                RETURNING *
+                """, this::mapReindexJob, indexed, failed, workspaceId, jobId);
+    }
+
+    public ReindexJob markReindexFailed(UUID workspaceId, UUID jobId, int indexed, int failed, String failureReason) {
+        return jdbcTemplate.queryForObject("""
+                UPDATE investigation_reindex_jobs
+                SET status = 'FAILED',
+                    indexed_count = ?,
+                    failed_count = ?,
+                    completed_at = now(),
+                    failure_reason = ?
+                WHERE workspace_id = ?
+                  AND id = ?
+                RETURNING *
+                """, this::mapReindexJob, indexed, failed, truncate(failureReason), workspaceId, jobId);
+    }
+
     public List<InvestigationDocument> documentsForWorkspace(UUID workspaceId) {
         return jdbcTemplate.query("""
                 SELECT *
@@ -244,6 +305,43 @@ public class InvestigationStore {
                 nullableLong(rs, "amount_minor"),
                 occurredAt,
                 data);
+    }
+
+    private ReindexJob mapReindexJob(ResultSet rs, int rowNum) throws SQLException {
+        return new ReindexJob(
+                rs.getObject("id", UUID.class),
+                rs.getObject("workspace_id", UUID.class),
+                rs.getString("status"),
+                rs.getString("trigger_mode"),
+                rs.getString("temporal_workflow_id"),
+                rs.getString("temporal_run_id"),
+                rs.getObject("requested_by_actor_id", UUID.class),
+                rs.getInt("indexed_count"),
+                rs.getInt("failed_count"),
+                rs.getString("failure_reason"),
+                instant(rs, "requested_at"),
+                instant(rs, "started_at"),
+                instant(rs, "completed_at"),
+                instant(rs, "created_at"),
+                instant(rs, "updated_at"));
+    }
+
+    public record ReindexJob(
+            UUID id,
+            UUID workspaceId,
+            String status,
+            String triggerMode,
+            String temporalWorkflowId,
+            String temporalRunId,
+            UUID requestedByActorId,
+            int indexedCount,
+            int failedCount,
+            String failureReason,
+            Instant requestedAt,
+            Instant startedAt,
+            Instant completedAt,
+            Instant createdAt,
+            Instant updatedAt) {
     }
 
     private static Long nullableLong(ResultSet rs, String column) throws SQLException {

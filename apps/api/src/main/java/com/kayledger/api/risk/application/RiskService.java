@@ -4,6 +4,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -22,6 +23,12 @@ import com.kayledger.api.shared.api.BadRequestException;
 public class RiskService {
 
     private static final long SUSPICIOUS_PAYOUT_THRESHOLD_MINOR = 100_000L;
+    public static final String MUTATION_PAYOUT_REQUEST = "payment.payout.request";
+    public static final String MUTATION_PAYOUT_RETRY = "payment.payout.retry";
+    public static final String MUTATION_PAYOUT_OPERATOR_SUCCEED = "payment.payout.operator_succeed";
+    private static final Map<String, List<String>> ENFORCEMENT_SCOPE = Map.of(
+            "PROVIDER_PROFILE", List.of(MUTATION_PAYOUT_REQUEST, MUTATION_PAYOUT_RETRY, MUTATION_PAYOUT_OPERATOR_SUCCEED),
+            "PAYOUT_REQUEST", List.of(MUTATION_PAYOUT_RETRY, MUTATION_PAYOUT_OPERATOR_SUCCEED));
 
     private final RiskStore riskStore;
     private final AccessPolicy accessPolicy;
@@ -75,11 +82,17 @@ public class RiskService {
                 });
     }
 
+    public void requireAllowed(UUID workspaceId, String mutationScope, EnforcementReference... references) {
+        for (EnforcementReference reference : references) {
+            if (ENFORCEMENT_SCOPE.getOrDefault(reference.referenceType(), List.of()).contains(mutationScope)) {
+                requireNotBlocked(workspaceId, reference.referenceType(), reference.referenceId());
+            }
+        }
+    }
+
     public EnforcementScope enforcementScope(AccessContext context) {
         requireRead(context);
-        return new EnforcementScope(Map.of(
-                "PROVIDER_PROFILE", List.of("payment.payout.request", "payment.payout.retry", "payment.payout.operator_succeed"),
-                "PAYOUT_REQUEST", List.of("payment.payout.retry", "payment.payout.operator_succeed")));
+        return new EnforcementScope(ENFORCEMENT_SCOPE);
     }
 
     public List<RiskFlag> listFlags(AccessContext context) {
@@ -106,7 +119,12 @@ public class RiskService {
         requireWrite(context);
         String outcome = requireOutcome(command == null ? null : command.outcome());
         String reason = requireText(command == null ? null : command.reason(), "reason");
-        RiskDecision decision = riskStore.decide(context.workspaceId(), reviewId, outcome, reason, context.actorId());
+        RiskDecision decision;
+        try {
+            decision = riskStore.decide(context.workspaceId(), reviewId, outcome, reason, context.actorId());
+        } catch (EmptyResultDataAccessException exception) {
+            throw new BadRequestException("Risk decision transition is not supported.");
+        }
         indexReference(context.workspaceId(), "RISK_DECISION", decision.id());
         indexReference(context.workspaceId(), "RISK_FLAG", decision.riskFlagId());
         return decision;
@@ -159,6 +177,9 @@ public class RiskService {
     }
 
     public record DecisionCommand(String outcome, String reason) {
+    }
+
+    public record EnforcementReference(String referenceType, UUID referenceId) {
     }
 
     public record EnforcementScope(Map<String, List<String>> blockedMutationScopes) {

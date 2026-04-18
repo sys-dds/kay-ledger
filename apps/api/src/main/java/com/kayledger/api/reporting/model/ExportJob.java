@@ -9,6 +9,9 @@ public record ExportJob(
         String exportType,
         String status,
         String generationMode,
+        String temporalWorkflowId,
+        String temporalRunId,
+        String triggerMode,
         UUID requestedByActorId,
         String parametersJson,
         int rowCount,
@@ -16,6 +19,8 @@ public record ExportJob(
         String contentType,
         String failureReason,
         Instant requestedAt,
+        Instant orchestrationStartedAt,
+        Instant orchestrationCompletedAt,
         Instant completedAt,
         Instant createdAt,
         Instant updatedAt) {
