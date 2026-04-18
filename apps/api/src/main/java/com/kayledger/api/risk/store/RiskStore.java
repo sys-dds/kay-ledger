@@ -105,7 +105,7 @@ public class RiskStore {
                 SELECT *
                 FROM risk_reviews
                 WHERE workspace_id = ?
-                  AND status IN ('OPEN', 'IN_REVIEW')
+                  AND status IN ('OPEN', 'IN_REVIEW', 'BLOCKED')
                 ORDER BY updated_at DESC, id
                 """, REVIEW_MAPPER, workspaceId);
     }
@@ -140,8 +140,12 @@ public class RiskStore {
                     RETURNING *
                 ), review_update AS (
                     UPDATE risk_reviews rr
-                    SET status = CASE WHEN ? = 'REVIEW' THEN 'IN_REVIEW' ELSE 'RESOLVED' END,
-                        closed_at = CASE WHEN ? = 'REVIEW' THEN NULL ELSE now() END
+                    SET status = CASE
+                            WHEN ? = 'REVIEW' THEN 'IN_REVIEW'
+                            WHEN ? = 'BLOCK' THEN 'BLOCKED'
+                            ELSE 'RESOLVED'
+                        END,
+                        closed_at = CASE WHEN ? IN ('REVIEW', 'BLOCK') THEN NULL ELSE now() END
                     FROM inserted i
                     WHERE rr.workspace_id = i.workspace_id
                       AND rr.id = i.review_id
@@ -157,7 +161,7 @@ public class RiskStore {
                 WHERE rf.workspace_id = i.workspace_id
                   AND rf.id = i.risk_flag_id
                 RETURNING i.*
-                """, DECISION_MAPPER, workspaceId, reviewId, outcome, reason, actorId, outcome, outcome, outcome, outcome);
+                """, DECISION_MAPPER, workspaceId, reviewId, outcome, reason, actorId, outcome, outcome, outcome, outcome, outcome);
     }
 
     public List<RiskDecision> listDecisions(UUID workspaceId) {
@@ -176,10 +180,11 @@ public class RiskStore {
                 WHERE workspace_id = ?
                   AND reference_type = ?
                   AND reference_id = ?
-                  AND outcome = 'BLOCK'
                 ORDER BY decided_at DESC, id DESC
                 LIMIT 1
-                """, DECISION_MAPPER, workspaceId, referenceType, referenceId).stream().findFirst();
+                """, DECISION_MAPPER, workspaceId, referenceType, referenceId).stream()
+                .filter(decision -> "BLOCK".equals(decision.outcome()))
+                .findFirst();
     }
 
     public int failedPaymentCountForProvider(UUID workspaceId, UUID providerProfileId) {

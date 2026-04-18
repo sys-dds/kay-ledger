@@ -1,6 +1,7 @@
 package com.kayledger.api.risk.application;
 
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import org.springframework.stereotype.Service;
@@ -72,6 +73,13 @@ public class RiskService {
                 .ifPresent(decision -> {
                     throw new BadRequestException(referenceType + " is blocked by a risk decision.");
                 });
+    }
+
+    public EnforcementScope enforcementScope(AccessContext context) {
+        requireRead(context);
+        return new EnforcementScope(Map.of(
+                "PROVIDER_PROFILE", List.of("payment.payout.request", "payment.payout.retry", "payment.payout.operator_succeed"),
+                "PAYOUT_REQUEST", List.of("payment.payout.retry", "payment.payout.operator_succeed")));
     }
 
     public List<RiskFlag> listFlags(AccessContext context) {
@@ -151,5 +159,8 @@ public class RiskService {
     }
 
     public record DecisionCommand(String outcome, String reason) {
+    }
+
+    public record EnforcementScope(Map<String, List<String>> blockedMutationScopes) {
     }
 }

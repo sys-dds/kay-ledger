@@ -31,6 +31,11 @@ import com.kayledger.api.shared.api.NotFoundException;
 @Service
 public class ReconciliationService {
 
+    private static final String STATE_MISMATCH = "STATE_MISMATCH";
+    private static final String MISSING_INTERNAL_REFERENCE = "MISSING_INTERNAL_REFERENCE";
+    private static final String APPLY_PROVIDER_STATE = "APPLY_PROVIDER_STATE";
+    private static final String MANUAL_REVIEW = "MANUAL_REVIEW";
+
     private final ReconciliationStore reconciliationStore;
     private final ProviderStore providerStore;
     private final PaymentStore paymentStore;
@@ -63,16 +68,17 @@ public class ReconciliationService {
             String providerState = providerState(callback.callbackType());
             String internalState = internalState(context.workspaceId(), callback);
             if (!providerState.equals(internalState)) {
+                String driftCategory = driftCategory(internalState);
                 reconciliationStore.createMismatch(
                         context.workspaceId(),
                         run.id(),
                         callback.id(),
                         callback.businessReferenceType(),
                         callback.businessReferenceId(),
-                        "MISSING".equals(internalState) ? "MISSING_INTERNAL_REFERENCE" : "STATE_MISMATCH",
+                        driftCategory,
                         internalState,
                         providerState,
-                        "APPLY_PROVIDER_STATE");
+                        suggestedAction(driftCategory, callback.businessReferenceType()));
                 continue;
             }
             Long providerAmount = providerAmount(callback);
@@ -87,7 +93,7 @@ public class ReconciliationService {
                         "AMOUNT_MISMATCH",
                         internalState + ":" + internalAmount,
                         providerState + ":" + providerAmount,
-                        "MANUAL_REVIEW");
+                        MANUAL_REVIEW);
             }
         }
         reconciliationStore.createEntityCentricMismatches(context.workspaceId(), run.id());
@@ -130,7 +136,7 @@ public class ReconciliationService {
         requireWrite(context);
         ReconciliationMismatch mismatch = reconciliationStore.findMismatch(context.workspaceId(), mismatchId)
                 .orElseThrow(() -> new NotFoundException("Reconciliation mismatch was not found."));
-        if (!"APPLY_PROVIDER_STATE".equals(mismatch.suggestedAction())) {
+        if (!STATE_MISMATCH.equals(mismatch.driftCategory()) || !APPLY_PROVIDER_STATE.equals(mismatch.suggestedAction())) {
             throw new BadRequestException("Mismatch does not have a safe automatic repair action.");
         }
         applyProviderState(context.workspaceId(), mismatch);
@@ -165,6 +171,20 @@ public class ReconciliationService {
             case "REFUND" -> paymentService.applyProviderRefundTruth(workspaceId, mismatch.businessReferenceId(), mismatch.providerState(), "reconciliation:" + mismatch.id(), "reconciliation provider-state repair");
             default -> throw new BadRequestException("Unsupported mismatch reference type.");
         }
+    }
+
+    private static String driftCategory(String internalState) {
+        return "MISSING".equals(internalState) ? MISSING_INTERNAL_REFERENCE : STATE_MISMATCH;
+    }
+
+    private static String suggestedAction(String driftCategory, String referenceType) {
+        if (!STATE_MISMATCH.equals(driftCategory)) {
+            return MANUAL_REVIEW;
+        }
+        return switch (referenceType) {
+            case "PAYMENT_INTENT", "PAYOUT_REQUEST", "REFUND" -> APPLY_PROVIDER_STATE;
+            default -> MANUAL_REVIEW;
+        };
     }
 
     private String internalState(UUID workspaceId, ProviderCallback callback) {

@@ -293,6 +293,7 @@ public class PaymentService {
     public PayoutRequest markPayoutSucceeded(AccessContext context, UUID payoutRequestId, PayoutMutationCommand command) {
         requirePaymentWrite(context);
         PayoutRequest payout = payout(context, payoutRequestId);
+        requirePayoutOperatorMutationAllowed(context.workspaceId(), payout);
         return markPayoutSucceededInternal(context.workspaceId(), payout, externalReference(command));
     }
 
@@ -307,6 +308,7 @@ public class PaymentService {
     public PayoutRequest retryPayout(AccessContext context, UUID payoutRequestId, PayoutMutationCommand command) {
         requirePaymentWrite(context);
         PayoutRequest payout = payout(context, payoutRequestId);
+        requirePayoutOperatorMutationAllowed(context.workspaceId(), payout);
         return retryPayoutInternal(context.workspaceId(), payout, externalReference(command));
     }
 
@@ -672,6 +674,11 @@ public class PaymentService {
 
     private void appendPaymentEvent(UUID workspaceId, PaymentIntent intent, String eventType, String transitionSource) {
         outboxService.append(workspaceId, "PAYMENT", intent.id(), eventType, eventType + ":" + intent.id() + ":" + intent.status(), paymentData(intent, transitionSource));
+    }
+
+    private void requirePayoutOperatorMutationAllowed(UUID workspaceId, PayoutRequest payout) {
+        riskService.requireNotBlocked(workspaceId, "PROVIDER_PROFILE", payout.providerProfileId());
+        riskService.requireNotBlocked(workspaceId, "PAYOUT_REQUEST", payout.id());
     }
 
     private void appendPayoutEvent(UUID workspaceId, PayoutRequest payout, String eventType) {

@@ -25,11 +25,11 @@ public class ReportingStore {
             rs.getLong("settled_gross_amount_minor"),
             rs.getLong("fee_amount_minor"),
             rs.getLong("net_earnings_amount_minor"),
-            rs.getLong("payout_requested_amount_minor"),
+            rs.getLong("current_payout_requested_amount_minor"),
             rs.getLong("payout_succeeded_amount_minor"),
             rs.getLong("refund_amount_minor"),
-            rs.getLong("dispute_amount_minor"),
-            rs.getLong("subscription_revenue_amount_minor"),
+            rs.getLong("active_dispute_exposure_amount_minor"),
+            rs.getLong("settled_subscription_net_revenue_amount_minor"),
             instant(rs, "refreshed_at"));
 
     private static final RowMapper<ExportJob> JOB_MAPPER = (rs, rowNum) -> new ExportJob(
@@ -37,6 +37,7 @@ public class ReportingStore {
             rs.getObject("workspace_id", UUID.class),
             rs.getString("export_type"),
             rs.getString("status"),
+            "SYNCHRONOUS",
             rs.getObject("requested_by_actor_id", UUID.class),
             rs.getString("parameters_json"),
             rs.getInt("row_count"),
@@ -72,8 +73,8 @@ public class ReportingStore {
                 INSERT INTO financial_provider_summaries (
                     workspace_id, provider_profile_id, currency_code,
                     settled_gross_amount_minor, fee_amount_minor, net_earnings_amount_minor,
-                    payout_requested_amount_minor, payout_succeeded_amount_minor,
-                    refund_amount_minor, dispute_amount_minor, subscription_revenue_amount_minor
+                    current_payout_requested_amount_minor, payout_succeeded_amount_minor,
+                    refund_amount_minor, active_dispute_exposure_amount_minor, settled_subscription_net_revenue_amount_minor
                 )
                 WITH provider_currency AS (
                     SELECT DISTINCT workspace_id, provider_profile_id, currency_code

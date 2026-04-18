@@ -10,10 +10,10 @@ public record ProviderFinancialSummary(
         long settledGrossAmountMinor,
         long feeAmountMinor,
         long netEarningsAmountMinor,
-        long payoutRequestedAmountMinor,
+        long currentPayoutRequestedAmountMinor,
         long payoutSucceededAmountMinor,
         long refundAmountMinor,
-        long disputeAmountMinor,
-        long subscriptionRevenueAmountMinor,
+        long activeDisputeExposureAmountMinor,
+        long settledSubscriptionNetRevenueAmountMinor,
         Instant refreshedAt) {
 }

@@ -56,7 +56,7 @@ public class ReportingService {
     }
 
     @Transactional(noRollbackFor = InternalFailureException.class)
-    public ExportJob requestExport(AccessContext context, ExportRequestCommand command) {
+    public ExportJob generateSynchronousExport(AccessContext context, ExportRequestCommand command) {
         requireWrite(context);
         String exportType = command == null || command.exportType() == null ? PROVIDER_STATEMENT : command.exportType();
         if (!PROVIDER_STATEMENT.equals(exportType)) {
@@ -98,18 +98,18 @@ public class ReportingService {
 
     private static String providerStatementCsv(List<ProviderFinancialSummary> summaries) {
         StringBuilder builder = new StringBuilder();
-        builder.append("provider_profile_id,currency_code,settled_gross,fees,net_earnings,pending_payout_requested,payout_succeeded,settled_refunds,open_dispute_exposure,subscription_net_revenue,refreshed_at\n");
+        builder.append("provider_profile_id,currency_code,settled_gross,fees,net_earnings,current_payout_requested,payout_succeeded,settled_refunds,active_dispute_exposure,settled_subscription_net_revenue,refreshed_at\n");
         for (ProviderFinancialSummary summary : summaries) {
             builder.append(summary.providerProfileId()).append(',')
                     .append(summary.currencyCode()).append(',')
                     .append(summary.settledGrossAmountMinor()).append(',')
                     .append(summary.feeAmountMinor()).append(',')
                     .append(summary.netEarningsAmountMinor()).append(',')
-                    .append(summary.payoutRequestedAmountMinor()).append(',')
+                    .append(summary.currentPayoutRequestedAmountMinor()).append(',')
                     .append(summary.payoutSucceededAmountMinor()).append(',')
                     .append(summary.refundAmountMinor()).append(',')
-                    .append(summary.disputeAmountMinor()).append(',')
-                    .append(summary.subscriptionRevenueAmountMinor()).append(',')
+                    .append(summary.activeDisputeExposureAmountMinor()).append(',')
+                    .append(summary.settledSubscriptionNetRevenueAmountMinor()).append(',')
                     .append(summary.refreshedAt() == null ? Instant.EPOCH : summary.refreshedAt())
                     .append('\n');
         }

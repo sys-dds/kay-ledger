@@ -8,6 +8,7 @@ public record ExportJob(
         UUID workspaceId,
         String exportType,
         String status,
+        String generationMode,
         UUID requestedByActorId,
         String parametersJson,
         int rowCount,
