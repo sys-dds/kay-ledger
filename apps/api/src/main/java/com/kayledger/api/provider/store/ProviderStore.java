@@ -77,6 +77,17 @@ public class ProviderStore {
                 """, CONFIG_MAPPER, workspaceId, providerKey).stream().findFirst();
     }
 
+    public Optional<ProviderConfig> findConfigByWorkspaceSlug(String workspaceSlug, String providerKey) {
+        return jdbcTemplate.query("""
+                SELECT pc.*
+                FROM provider_configs pc
+                JOIN workspaces w ON w.id = pc.workspace_id
+                WHERE w.slug = ?
+                  AND pc.provider_key = ?
+                  AND pc.status = 'ACTIVE'
+                """, CONFIG_MAPPER, workspaceSlug, providerKey).stream().findFirst();
+    }
+
     public List<ProviderCallback> listCallbacks(UUID workspaceId) {
         return jdbcTemplate.query("""
                 SELECT *

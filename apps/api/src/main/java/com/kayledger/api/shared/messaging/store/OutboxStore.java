@@ -73,6 +73,28 @@ public class OutboxStore {
                 """, MAPPER, batchSize);
     }
 
+    public List<OutboxEvent> claimDue(UUID workspaceId, int batchSize) {
+        return jdbcTemplate.query("""
+                WITH due AS (
+                    SELECT id
+                    FROM outbox_events
+                    WHERE workspace_id = ?
+                      AND (
+                        (status = 'PENDING' AND available_at <= now())
+                        OR (status = 'CLAIMED' AND updated_at <= now() - interval '5 minutes')
+                      )
+                    ORDER BY available_at, created_at
+                    LIMIT ?
+                    FOR UPDATE SKIP LOCKED
+                )
+                UPDATE outbox_events o
+                SET status = 'CLAIMED'
+                FROM due
+                WHERE o.id = due.id
+                RETURNING o.*
+                """, MAPPER, workspaceId, batchSize);
+    }
+
     public OutboxEvent markPublished(UUID eventId) {
         return jdbcTemplate.queryForObject("""
                 UPDATE outbox_events

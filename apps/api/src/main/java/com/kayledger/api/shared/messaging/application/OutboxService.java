@@ -47,6 +47,10 @@ public class OutboxService {
         return outboxStore.claimDue(properties.getRelay().getBatchSize());
     }
 
+    public List<OutboxEvent> claimDueBatch(UUID workspaceId) {
+        return outboxStore.claimDue(workspaceId, properties.getRelay().getBatchSize());
+    }
+
     public OutboxEvent markPublished(UUID eventId) {
         return outboxStore.markPublished(eventId);
     }

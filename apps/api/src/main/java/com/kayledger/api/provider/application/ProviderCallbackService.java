@@ -19,7 +19,7 @@ import com.kayledger.api.access.application.AccessContext;
 import com.kayledger.api.access.application.AccessPolicy;
 import com.kayledger.api.access.model.AccessScope;
 import com.kayledger.api.access.model.WorkspaceRole;
-import com.kayledger.api.payment.store.PaymentStore;
+import com.kayledger.api.payment.application.PaymentService;
 import com.kayledger.api.provider.model.ProviderCallback;
 import com.kayledger.api.provider.model.ProviderConfig;
 import com.kayledger.api.provider.store.ProviderStore;
@@ -41,13 +41,13 @@ public class ProviderCallbackService {
             "PAYOUT_FAILED");
 
     private final ProviderStore providerStore;
-    private final PaymentStore paymentStore;
+    private final PaymentService paymentService;
     private final AccessPolicy accessPolicy;
     private final ObjectMapper objectMapper;
 
-    public ProviderCallbackService(ProviderStore providerStore, PaymentStore paymentStore, AccessPolicy accessPolicy, ObjectMapper objectMapper) {
+    public ProviderCallbackService(ProviderStore providerStore, PaymentService paymentService, AccessPolicy accessPolicy, ObjectMapper objectMapper) {
         this.providerStore = providerStore;
-        this.paymentStore = paymentStore;
+        this.paymentService = paymentService;
         this.accessPolicy = accessPolicy;
         this.objectMapper = objectMapper;
     }
@@ -71,8 +71,20 @@ public class ProviderCallbackService {
     public ProviderCallback ingest(UUID workspaceId, String providerKey, String signatureHeader, ProviderCallbackCommand command) {
         ProviderConfig config = providerStore.findConfig(workspaceId, requireText(providerKey, "providerKey"))
                 .orElseThrow(() -> new NotFoundException("Provider config was not found."));
+        return ingest(config, signatureHeader, command);
+    }
+
+    @Transactional
+    public ProviderCallback ingestExternal(String workspaceSlug, String providerKey, String signatureHeader, ProviderCallbackCommand command) {
+        ProviderConfig config = providerStore.findConfigByWorkspaceSlug(requireText(workspaceSlug, "X-Workspace-Slug"), requireText(providerKey, "providerKey"))
+                .orElseThrow(() -> new NotFoundException("Provider config was not found."));
+        return ingest(config, signatureHeader, command);
+    }
+
+    private ProviderCallback ingest(ProviderConfig config, String signatureHeader, ProviderCallbackCommand command) {
+        UUID workspaceId = config.workspaceId();
         String payload = payloadJson(command);
-        String expected = sign(config.signingSecret(), signingPayload(command));
+        String expected = sign(config.signingSecret(), payload);
         if (!expected.equals(requireText(signatureHeader, "X-Provider-Signature"))) {
             throw new ForbiddenException("Provider callback signature is invalid.");
         }
@@ -101,23 +113,23 @@ public class ProviderCallbackService {
             return providerStore.markIgnoredOutOfOrder(workspaceId, callback.id());
         }
         try {
-            applyTruth(workspaceId, callbackType, referenceId, amount(command));
+            applyTruth(workspaceId, callbackType, referenceId, amount(command), command.providerEventId());
             return providerStore.markApplied(workspaceId, callback.id());
         } catch (RuntimeException exception) {
             return providerStore.markFailed(workspaceId, callback.id(), exception.getMessage());
         }
     }
 
-    private void applyTruth(UUID workspaceId, String callbackType, UUID referenceId, long amountMinor) {
+    private void applyTruth(UUID workspaceId, String callbackType, UUID referenceId, long amountMinor, String externalReference) {
         switch (callbackType) {
-            case "PAYMENT_AUTHORIZED" -> paymentStore.applyProviderPaymentStatus(workspaceId, referenceId, "AUTHORIZED", amountMinor);
-            case "PAYMENT_CAPTURED" -> paymentStore.applyProviderPaymentStatus(workspaceId, referenceId, "CAPTURED", amountMinor);
-            case "PAYMENT_SETTLED" -> paymentStore.applyProviderPaymentStatus(workspaceId, referenceId, "SETTLED", amountMinor);
-            case "PAYMENT_FAILED" -> paymentStore.applyProviderPaymentStatus(workspaceId, referenceId, "FAILED", amountMinor);
-            case "REFUND_SUCCEEDED" -> paymentStore.applyProviderRefundStatus(workspaceId, referenceId, "SUCCEEDED");
-            case "REFUND_FAILED" -> paymentStore.applyProviderRefundStatus(workspaceId, referenceId, "FAILED");
-            case "PAYOUT_SUCCEEDED" -> paymentStore.applyProviderPayoutStatus(workspaceId, referenceId, "SUCCEEDED", null);
-            case "PAYOUT_FAILED" -> paymentStore.applyProviderPayoutStatus(workspaceId, referenceId, "FAILED", "provider reported failure");
+            case "PAYMENT_AUTHORIZED" -> paymentService.applyProviderPaymentTruth(workspaceId, referenceId, "AUTHORIZED", amountMinor, externalReference);
+            case "PAYMENT_CAPTURED" -> paymentService.applyProviderPaymentTruth(workspaceId, referenceId, "CAPTURED", amountMinor, externalReference);
+            case "PAYMENT_SETTLED" -> paymentService.applyProviderPaymentTruth(workspaceId, referenceId, "SETTLED", amountMinor, externalReference);
+            case "PAYMENT_FAILED" -> paymentService.applyProviderPaymentTruth(workspaceId, referenceId, "FAILED", amountMinor, externalReference);
+            case "REFUND_SUCCEEDED" -> paymentService.applyProviderRefundTruth(workspaceId, referenceId, "SUCCEEDED", externalReference, null);
+            case "REFUND_FAILED" -> paymentService.applyProviderRefundTruth(workspaceId, referenceId, "FAILED", externalReference, "provider reported failure");
+            case "PAYOUT_SUCCEEDED" -> paymentService.applyProviderPayoutTruth(workspaceId, referenceId, "SUCCEEDED", externalReference, null);
+            case "PAYOUT_FAILED" -> paymentService.applyProviderPayoutTruth(workspaceId, referenceId, "FAILED", externalReference, "provider reported failure");
             default -> throw new BadRequestException("callbackType is invalid.");
         }
     }
@@ -138,10 +150,6 @@ public class ProviderCallbackService {
         } catch (JsonProcessingException exception) {
             throw new BadRequestException("Provider callback payload could not be serialized.");
         }
-    }
-
-    private static String signingPayload(ProviderCallbackCommand command) {
-        return command.providerEventId() + ":" + command.callbackType() + ":" + command.businessReferenceId() + ":" + command.amountMinor();
     }
 
     private static String sign(String secret, String payload) {

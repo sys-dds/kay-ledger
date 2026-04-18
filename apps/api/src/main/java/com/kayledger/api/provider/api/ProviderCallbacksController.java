@@ -57,12 +57,10 @@ public class ProviderCallbacksController {
     @PostMapping("/{providerKey}/callbacks")
     ProviderCallback ingest(
             @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
-            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
             @RequestHeader(value = "X-Provider-Signature", required = false) String signature,
             @PathVariable String providerKey,
             @RequestBody ProviderCallbackCommand request) {
-        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
-        return providerCallbackService.ingest(context.workspaceId(), providerKey, signature, request);
+        return providerCallbackService.ingestExternal(workspaceSlug, providerKey, signature, request);
     }
 
     @GetMapping("/callbacks")

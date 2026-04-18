@@ -1,6 +1,7 @@
 package com.kayledger.api.shared.messaging.application;
 
 import java.util.List;
+import java.util.UUID;
 
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
@@ -20,6 +21,15 @@ public class OutboxRelayService {
 
     public RelayResult relayDue() {
         List<OutboxEvent> events = outboxService.claimDueBatch();
+        return publish(events);
+    }
+
+    public RelayResult relayDue(UUID workspaceId) {
+        List<OutboxEvent> events = outboxService.claimDueBatch(workspaceId);
+        return publish(events);
+    }
+
+    private RelayResult publish(List<OutboxEvent> events) {
         int published = 0;
         int failed = 0;
         for (OutboxEvent event : events) {
