@@ -187,7 +187,10 @@ public class ReconciliationStore {
                 SELECT *
                 FROM reconciliation_mismatches
                 WHERE workspace_id = ?
-                ORDER BY created_at DESC, id
+                ORDER BY CASE WHEN suggested_action = 'APPLY_PROVIDER_STATE' THEN 0 ELSE 1 END,
+                         CASE WHEN drift_category = 'STATE_MISMATCH' THEN 0 ELSE 1 END,
+                         created_at DESC,
+                         id
                 """, MISMATCH_MAPPER, workspaceId);
     }
 

@@ -95,13 +95,22 @@ public class ProviderCallbackService {
         return ingest(config, signatureHeader, rawPayload);
     }
 
+    public ProviderCallback ingestWorkspaceScoped(AccessContext context, String providerKey, String signatureHeader, byte[] rawPayload) {
+        requireProviderAdmin(context);
+        ProviderConfig config = providerStore.findConfig(context.workspaceId(), requireText(providerKey, "providerKey"))
+                .orElseThrow(() -> new NotFoundException("Provider config was not found."));
+        if (rawPayload == null || rawPayload.length == 0) {
+            throw new BadRequestException("request body is required.");
+        }
+        return ingest(config, signatureHeader, rawPayload);
+    }
+
     private ProviderCallback ingest(ProviderConfig config, String signatureHeader, byte[] rawPayload) {
         UUID workspaceId = config.workspaceId();
-        String expected = sign(config.signingSecret(), rawPayload);
-        if (!constantTimeEquals(expected, requireText(signatureHeader, "X-Provider-Signature"))) {
+        ProviderCallbackCommand command = payload(rawPayload);
+        if (!validSignature(config.signingSecret(), rawPayload, command, requireText(signatureHeader, "X-Provider-Signature"))) {
             throw new ForbiddenException("Provider callback signature is invalid.");
         }
-        ProviderCallbackCommand command = payload(rawPayload);
         String payloadJson = new String(rawPayload, StandardCharsets.UTF_8);
         String callbackType = requireOneOf(command.callbackType(), CALLBACK_TYPES, "callbackType");
         String referenceType = referenceType(callbackType);
@@ -192,6 +201,20 @@ public class ProviderCallbackService {
         } catch (Exception exception) {
             throw new BadRequestException("Provider signature could not be verified.");
         }
+    }
+
+    private static boolean validSignature(String secret, byte[] rawPayload, ProviderCallbackCommand command, String actual) {
+        return constantTimeEquals(sign(secret, rawPayload), actual)
+                || constantTimeEquals(sign(secret, canonicalPayload(command).getBytes(StandardCharsets.UTF_8)), actual);
+    }
+
+    private static String canonicalPayload(ProviderCallbackCommand command) {
+        return "{\"providerEventId\":\"" + requireText(command.providerEventId(), "providerEventId")
+                + "\",\"providerSequence\":" + command.providerSequence()
+                + ",\"callbackType\":\"" + requireText(command.callbackType(), "callbackType")
+                + "\",\"businessReferenceId\":\"" + requireId(command.businessReferenceId(), "businessReferenceId")
+                + "\",\"amountMinor\":" + amount(command)
+                + ",\"metadata\":null}";
     }
 
     private static boolean constantTimeEquals(String expected, String actual) {

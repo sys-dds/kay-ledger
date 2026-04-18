@@ -424,6 +424,7 @@ public class PaymentService {
         long payableReduction = Math.min(amountMinor, remainingPayableExposure);
         RefundRecord refund = paymentStore.createRefund(context.workspaceId(), intent.id(), intent.bookingId(), refundType, amountMinor, payableReduction);
         paymentStore.createRefundAttempt(context.workspaceId(), refund.id(), "PROCESSING", null, externalReference(command));
+        attachRefundJournal(context.workspaceId(), refund, intent, "Refund request reserves payable and fee effects", refundPostings(context.workspaceId(), intent, refund.refundType(), refund.amountMinor(), refund.payableReductionAmountMinor()));
         riskService.evaluateRefundVelocity(context.workspaceId(), intent.providerProfileId());
         outboxService.append(context.workspaceId(), "REFUND", refund.id(), "refund.requested", "refund.requested:" + refund.id(), refundData(refund, intent));
         return refund;
@@ -629,6 +630,9 @@ public class PaymentService {
             throw new BadRequestException("Only failed refunds can be retried.");
         }
         long alreadyRefunded = paymentStore.refundedAmountForIntent(workspaceId, intent.id());
+        if ("REQUESTED".equals(refund.status()) || "PROCESSING".equals(refund.status())) {
+            alreadyRefunded = Math.max(alreadyRefunded - refund.amountMinor(), 0);
+        }
         long alreadyDisputed = paymentStore.activeDisputeExposureForIntent(workspaceId, intent.id());
         if (refund.amountMinor() > intent.grossAmountMinor() - alreadyRefunded - alreadyDisputed) {
             throw new BadRequestException("Retried refund amount exceeds remaining payment exposure.");
@@ -643,6 +647,9 @@ public class PaymentService {
         PaymentIntent intent = paymentStore.find(workspaceId, refund.paymentIntentId())
                 .orElseThrow(() -> new NotFoundException("Payment intent was not found."));
         long alreadyRefunded = paymentStore.refundedAmountForIntent(workspaceId, intent.id());
+        if ("REQUESTED".equals(refund.status()) || "PROCESSING".equals(refund.status())) {
+            alreadyRefunded = Math.max(alreadyRefunded - refund.amountMinor(), 0);
+        }
         long alreadyDisputed = paymentStore.activeDisputeExposureForIntent(workspaceId, intent.id());
         if (refund.amountMinor() > intent.grossAmountMinor() - alreadyRefunded - alreadyDisputed) {
             throw new BadRequestException("Provider-confirmed refund amount exceeds remaining payment exposure.");
@@ -783,6 +790,9 @@ public class PaymentService {
         }
         SubscriptionCycle cycle = subscriptionStore.findCycleByPaymentIntent(workspaceId, failed.id())
                 .orElseThrow(() -> new BadRequestException("Failed subscription payment intent is not linked to a subscription cycle."));
+        if ("FAILED".equals(cycle.status())) {
+            return;
+        }
         SubscriptionCycle failedCycle = subscriptionStore.markCycleFailed(workspaceId, cycle.id());
         var subscription = subscriptionStore.findSubscription(workspaceId, failedCycle.subscriptionId())
                 .orElseThrow(() -> new BadRequestException("Subscription was not found for failed cycle."));
@@ -843,6 +853,9 @@ public class PaymentService {
     }
 
     private RefundRecord attachRefundJournal(UUID workspaceId, RefundRecord refund, PaymentIntent intent, String description, List<PostingCommand> postings) {
+        if (refund.journalEntryId() != null) {
+            return refund;
+        }
         JournalEntryDetails journal = financeService.createJournalEntryForReference(
                 workspaceId,
                 new CreateJournalEntryCommand(
