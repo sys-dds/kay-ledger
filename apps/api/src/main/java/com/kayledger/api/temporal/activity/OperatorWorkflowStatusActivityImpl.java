@@ -26,8 +26,8 @@ public class OperatorWorkflowStatusActivityImpl implements OperatorWorkflowStatu
     }
 
     @Override
-    public void markSucceeded(UUID workspaceId, String workflowId, int progressCurrent, int progressTotal, String progressMessage) {
-        operatorWorkflowService.markSucceeded(workspaceId, workflowId, progressCurrent, progressTotal, progressMessage);
+    public void markSucceeded(UUID workspaceId, String workflowId, String progressMessage) {
+        operatorWorkflowService.markSucceeded(workspaceId, workflowId, progressMessage);
     }
 
     @Override

@@ -76,8 +76,8 @@ public class OperatorWorkflowService {
     }
 
     @Transactional
-    public OperatorWorkflowRecord markSucceeded(UUID workspaceId, String workflowId, int progressCurrent, int progressTotal, String progressMessage) {
-        OperatorWorkflowRecord record = operatorWorkflowStore.markSucceeded(workspaceId, workflowId, progressCurrent, progressTotal, progressMessage);
+    public OperatorWorkflowRecord markSucceeded(UUID workspaceId, String workflowId, String progressMessage) {
+        OperatorWorkflowRecord record = operatorWorkflowStore.markSucceeded(workspaceId, workflowId, progressMessage);
         recordOutcome(record, "SUCCEEDED");
         return record;
     }

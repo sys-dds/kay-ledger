@@ -1,6 +1,5 @@
 package com.kayledger.api.temporal.config;
 
-import java.time.Duration;
 import java.util.List;
 
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
@@ -15,8 +14,6 @@ import io.temporal.serviceclient.WorkflowServiceStubs;
 import io.temporal.serviceclient.WorkflowServiceStubsOptions;
 import io.temporal.worker.Worker;
 import io.temporal.worker.WorkerFactory;
-import io.temporal.common.RetryOptions;
-import io.temporal.activity.ActivityOptions;
 
 @Configuration
 @ConditionalOnProperty(prefix = "kay-ledger.temporal", name = "enabled", havingValue = "true", matchIfMissing = true)
@@ -42,20 +39,6 @@ public class TemporalConfiguration {
     @ConditionalOnMissingBean
     WorkerFactory workerFactory(WorkflowClient workflowClient) {
         return WorkerFactory.newInstance(workflowClient);
-    }
-
-    @Bean
-    @ConditionalOnMissingBean(name = "operatorActivityOptions")
-    ActivityOptions operatorActivityOptions(TemporalProperties properties) {
-        TemporalProperties.Workflow workflow = properties.getWorkflow();
-        return ActivityOptions.newBuilder()
-                .setStartToCloseTimeout(Duration.ofSeconds(workflow.getActivityStartToCloseTimeoutSeconds()))
-                .setRetryOptions(RetryOptions.newBuilder()
-                        .setInitialInterval(Duration.ofSeconds(workflow.getRetryInitialIntervalSeconds()))
-                        .setMaximumInterval(Duration.ofSeconds(workflow.getRetryMaximumIntervalSeconds()))
-                        .setMaximumAttempts(workflow.getRetryMaximumAttempts())
-                        .build())
-                .build();
     }
 
     @Bean

@@ -46,7 +46,7 @@ public class InvestigationIndexingService {
 
     @Transactional(noRollbackFor = InternalFailureException.class)
     public ReindexJob startReindex(AccessContext context) {
-        requireRead(context);
+        requireReindexStart(context);
         ReindexJob job = investigationStore.createReindexJob(context.workspaceId(), context.actorId());
         OperatorWorkflowRecord workflow = null;
         try {
@@ -127,9 +127,9 @@ public class InvestigationIndexingService {
         return new ReindexResult(indexed, failed);
     }
 
-    private void requireRead(AccessContext context) {
+    private void requireReindexStart(AccessContext context) {
         accessPolicy.requireWorkspaceRole(context, WorkspaceRole.OWNER, WorkspaceRole.ADMIN);
-        accessPolicy.requireScope(context, AccessScope.PAYMENT_READ);
+        accessPolicy.requireScope(context, AccessScope.PAYMENT_WRITE);
     }
 
     private void markWorkflowProgress(UUID workspaceId, ReindexJob job, int current, int total, String message) {

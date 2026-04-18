@@ -123,21 +123,37 @@ class OperatorWorkflowScopeAndProgressIntegrationTest {
         awaitStatus("export_jobs", exportJob.id(), "SUCCEEDED");
         OperatorWorkflowStatus exportStatus = operatorWorkflowQueryService.findByReference(financeRead(alpha), OperatorWorkflowService.EXPORT, OperatorWorkflowService.EXPORT_JOB, exportJob.id());
         assertThat(exportStatus.status()).isEqualTo("SUCCEEDED");
+        assertThat(exportStatus.progressCurrent()).isEqualTo(4);
+        assertThat(exportStatus.progressTotal()).isEqualTo(4);
         assertThat(exportStatus.progressUpdateCount()).isGreaterThanOrEqualTo(2);
+        int exportRowCount = domainInt("SELECT row_count FROM export_jobs WHERE id = ?", exportJob.id());
+        assertThat(exportRowCount).isPositive();
+        assertThat(exportStatus.progressCurrent()).isNotEqualTo(exportRowCount);
         assertThatThrownBy(() -> operatorWorkflowQueryService.findByReference(paymentRead(alpha), OperatorWorkflowService.EXPORT, OperatorWorkflowService.EXPORT_JOB, exportJob.id()))
                 .isInstanceOf(ForbiddenException.class);
 
         var run = reconciliationService.startRun(paymentWrite(alpha), new ReconciliationService.RunReconciliationCommand("FULL"));
         awaitStatus("reconciliation_runs", run.id(), "COMPLETED");
         OperatorWorkflowStatus reconciliationStatus = operatorWorkflowQueryService.findByReference(paymentRead(alpha), OperatorWorkflowService.RECONCILIATION, OperatorWorkflowService.RECONCILIATION_RUN, run.id());
+        assertThat(reconciliationStatus.progressCurrent()).isEqualTo(4);
+        assertThat(reconciliationStatus.progressTotal()).isEqualTo(4);
         assertThat(reconciliationStatus.progressUpdateCount()).isGreaterThanOrEqualTo(2);
+        int mismatchCount = domainInt("SELECT mismatch_count FROM reconciliation_runs WHERE id = ?", run.id());
+        assertThat(mismatchCount).isNotNegative();
+        assertThat(reconciliationStatus.progressCurrent()).isNotEqualTo(mismatchCount);
         assertThatThrownBy(() -> operatorWorkflowQueryService.findByReference(financeRead(alpha), OperatorWorkflowService.RECONCILIATION, OperatorWorkflowService.RECONCILIATION_RUN, run.id()))
                 .isInstanceOf(ForbiddenException.class);
 
+        assertThatThrownBy(() -> investigationIndexingService.startReindex(paymentRead(alpha)))
+                .isInstanceOf(ForbiddenException.class);
         var reindexJob = investigationIndexingService.startReindex(paymentWrite(alpha));
         awaitStatus("investigation_reindex_jobs", reindexJob.id(), "SUCCEEDED");
         OperatorWorkflowStatus reindexStatus = operatorWorkflowQueryService.findByReference(paymentRead(alpha), OperatorWorkflowService.INVESTIGATION_REINDEX, OperatorWorkflowService.INVESTIGATION_REINDEX_JOB, reindexJob.id());
+        assertThat(reindexStatus.progressCurrent()).isEqualTo(3);
+        assertThat(reindexStatus.progressTotal()).isEqualTo(3);
         assertThat(reindexStatus.progressUpdateCount()).isGreaterThanOrEqualTo(2);
+        assertThat(domainInt("SELECT indexed_count FROM investigation_reindex_jobs WHERE id = ?", reindexJob.id())).isPositive();
+        assertThat(domainInt("SELECT failed_count FROM investigation_reindex_jobs WHERE id = ?", reindexJob.id())).isZero();
 
         assertThat(operatorWorkflowQueryService.list(financeRead(beta), OperatorWorkflowService.EXPORT)).isEmpty();
         assertThat(operatorWorkflowQueryService.list(paymentRead(beta), OperatorWorkflowService.RECONCILIATION)).isEmpty();
@@ -155,6 +171,11 @@ class OperatorWorkflowScopeAndProgressIntegrationTest {
             Thread.sleep(200);
         }
         assertThat(status).isEqualTo(expected);
+    }
+
+    private int domainInt(String sql, UUID id) {
+        Integer value = jdbcTemplate.queryForObject(sql, Integer.class, id);
+        return value == null ? 0 : value;
     }
 
     private void seedPayment(Fixture fixture) {
