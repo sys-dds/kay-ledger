@@ -306,16 +306,17 @@ public class SubscriptionService {
 
     private void requireSubscriptionRead(AccessContext context) {
         accessPolicy.requireWorkspaceRole(context, WorkspaceRole.OWNER, WorkspaceRole.ADMIN);
-        accessPolicy.requireScope(context, AccessScope.PAYMENT_READ);
+        accessPolicy.requireScope(context, AccessScope.SUBSCRIPTION_READ);
     }
 
     private void requireSubscriptionWrite(AccessContext context) {
         accessPolicy.requireWorkspaceRole(context, WorkspaceRole.OWNER, WorkspaceRole.ADMIN);
-        accessPolicy.requireScope(context, AccessScope.PAYMENT_WRITE);
+        accessPolicy.requireScope(context, AccessScope.SUBSCRIPTION_WRITE);
     }
 
     private void requireSubscriptionRenew(AccessContext context) {
-        requireSubscriptionWrite(context);
+        accessPolicy.requireWorkspaceRole(context, WorkspaceRole.OWNER, WorkspaceRole.ADMIN);
+        accessPolicy.requireScope(context, AccessScope.SUBSCRIPTION_RENEW);
     }
 
     private static Instant periodEnd(Instant startAt, String billingInterval) {
