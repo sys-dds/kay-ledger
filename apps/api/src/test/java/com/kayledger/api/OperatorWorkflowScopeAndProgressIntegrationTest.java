@@ -123,21 +123,21 @@ class OperatorWorkflowScopeAndProgressIntegrationTest {
         awaitStatus("export_jobs", exportJob.id(), "SUCCEEDED");
         OperatorWorkflowStatus exportStatus = operatorWorkflowQueryService.findByReference(financeRead(alpha), OperatorWorkflowService.EXPORT, OperatorWorkflowService.EXPORT_JOB, exportJob.id());
         assertThat(exportStatus.status()).isEqualTo("SUCCEEDED");
-        assertThat(exportStatus.progressUpdateCount()).isGreaterThan(0);
+        assertThat(exportStatus.progressUpdateCount()).isGreaterThanOrEqualTo(2);
         assertThatThrownBy(() -> operatorWorkflowQueryService.findByReference(paymentRead(alpha), OperatorWorkflowService.EXPORT, OperatorWorkflowService.EXPORT_JOB, exportJob.id()))
                 .isInstanceOf(ForbiddenException.class);
 
         var run = reconciliationService.startRun(paymentWrite(alpha), new ReconciliationService.RunReconciliationCommand("FULL"));
         awaitStatus("reconciliation_runs", run.id(), "COMPLETED");
         OperatorWorkflowStatus reconciliationStatus = operatorWorkflowQueryService.findByReference(paymentRead(alpha), OperatorWorkflowService.RECONCILIATION, OperatorWorkflowService.RECONCILIATION_RUN, run.id());
-        assertThat(reconciliationStatus.progressUpdateCount()).isGreaterThan(0);
+        assertThat(reconciliationStatus.progressUpdateCount()).isGreaterThanOrEqualTo(2);
         assertThatThrownBy(() -> operatorWorkflowQueryService.findByReference(financeRead(alpha), OperatorWorkflowService.RECONCILIATION, OperatorWorkflowService.RECONCILIATION_RUN, run.id()))
                 .isInstanceOf(ForbiddenException.class);
 
         var reindexJob = investigationIndexingService.startReindex(paymentWrite(alpha));
         awaitStatus("investigation_reindex_jobs", reindexJob.id(), "SUCCEEDED");
         OperatorWorkflowStatus reindexStatus = operatorWorkflowQueryService.findByReference(paymentRead(alpha), OperatorWorkflowService.INVESTIGATION_REINDEX, OperatorWorkflowService.INVESTIGATION_REINDEX_JOB, reindexJob.id());
-        assertThat(reindexStatus.progressUpdateCount()).isGreaterThan(0);
+        assertThat(reindexStatus.progressUpdateCount()).isGreaterThanOrEqualTo(2);
 
         assertThat(operatorWorkflowQueryService.list(financeRead(beta), OperatorWorkflowService.EXPORT)).isEmpty();
         assertThat(operatorWorkflowQueryService.list(paymentRead(beta), OperatorWorkflowService.RECONCILIATION)).isEmpty();

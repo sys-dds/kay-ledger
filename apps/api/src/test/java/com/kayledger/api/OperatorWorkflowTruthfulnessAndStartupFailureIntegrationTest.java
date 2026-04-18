@@ -22,6 +22,8 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 import com.kayledger.api.access.application.AccessContext;
+import com.kayledger.api.investigation.application.InvestigationIndexingService;
+import com.kayledger.api.reconciliation.application.ReconciliationService;
 import com.kayledger.api.reporting.application.ReportingService;
 import com.kayledger.api.shared.api.InternalFailureException;
 import com.kayledger.api.temporal.application.OperatorWorkflowRecord;
@@ -63,9 +65,19 @@ class OperatorWorkflowTruthfulnessAndStartupFailureIntegrationTest {
     @Autowired
     ReportingService reportingService;
 
+    @Autowired
+    ReconciliationService reconciliationService;
+
+    @Autowired
+    InvestigationIndexingService investigationIndexingService;
+
     @Test
-    void invariant_requested_rows_are_not_started_and_startup_failure_marks_both_rows_failed() {
+    void invariant_requested_rows_are_not_started_and_all_startup_failures_mark_both_rows_failed() {
         Fixture fixture = fixture("kay016-startup");
+        assertStartedAtHasNoDefault("operator_workflows");
+        assertStartedAtHasNoDefault("investigation_reindex_jobs");
+        assertStartedAtHasNoDefault("reconciliation_runs");
+
         OperatorWorkflowRecord requested = operatorWorkflowService.createRequested(
                 fixture.workspaceId(),
                 OperatorWorkflowService.EXPORT,
@@ -84,23 +96,75 @@ class OperatorWorkflowTruthfulnessAndStartupFailureIntegrationTest {
         assertThatThrownBy(() -> reportingService.startExport(financeContext(fixture), new ReportingService.ExportRequestCommand("PROVIDER_STATEMENT")))
                 .isInstanceOf(InternalFailureException.class)
                 .hasMessageContaining("Export orchestration could not be started");
+        UUID jobId = latestId("export_jobs", fixture.workspaceId(), "requested_at", "generation_mode = 'TEMPORAL_ASYNC'");
+        assertFailedStartup(
+                "export_jobs",
+                jobId,
+                "orchestration_started_at",
+                "orchestration_completed_at",
+                OperatorWorkflowService.EXPORT_JOB);
 
-        UUID jobId = jdbcTemplate.queryForObject("""
-                SELECT id FROM export_jobs
-                WHERE workspace_id = ? AND generation_mode = 'TEMPORAL_ASYNC'
-                ORDER BY requested_at DESC
+        assertThatThrownBy(() -> reconciliationService.startRun(paymentContext(fixture), new ReconciliationService.RunReconciliationCommand("FULL")))
+                .isInstanceOf(InternalFailureException.class)
+                .hasMessageContaining("Reconciliation orchestration could not be started");
+        UUID runId = latestId("reconciliation_runs", fixture.workspaceId(), "requested_at", "status = 'FAILED'");
+        assertFailedStartup(
+                "reconciliation_runs",
+                runId,
+                "started_at",
+                "completed_at",
+                OperatorWorkflowService.RECONCILIATION_RUN);
+
+        assertThatThrownBy(() -> investigationIndexingService.startReindex(paymentContext(fixture)))
+                .isInstanceOf(InternalFailureException.class)
+                .hasMessageContaining("Investigation reindex orchestration could not be started");
+        UUID reindexJobId = latestId("investigation_reindex_jobs", fixture.workspaceId(), "requested_at", "status = 'FAILED'");
+        assertFailedStartup(
+                "investigation_reindex_jobs",
+                reindexJobId,
+                "started_at",
+                "completed_at",
+                OperatorWorkflowService.INVESTIGATION_REINDEX_JOB);
+    }
+
+    private Instant instant(String sql, Object... args) {
+        Timestamp timestamp = jdbcTemplate.queryForObject(sql, Timestamp.class, args);
+        return timestamp == null ? null : timestamp.toInstant();
+    }
+
+    private void assertStartedAtHasNoDefault(String table) {
+        String defaultValue = jdbcTemplate.queryForObject("""
+                SELECT column_default
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = ?
+                  AND column_name = 'started_at'
+                """, String.class, table);
+        assertThat(defaultValue).isNull();
+    }
+
+    private UUID latestId(String table, UUID workspaceId, String orderColumn, String filter) {
+        return jdbcTemplate.queryForObject("""
+                SELECT id FROM %s
+                WHERE workspace_id = ? AND %s
+                ORDER BY %s DESC
                 LIMIT 1
-                """, UUID.class, fixture.workspaceId());
-        String domainStatus = jdbcTemplate.queryForObject("SELECT status FROM export_jobs WHERE id = ?", String.class, jobId);
-        Instant domainStarted = instant("SELECT orchestration_started_at FROM export_jobs WHERE id = ?", jobId);
-        Instant domainCompleted = instant("SELECT orchestration_completed_at FROM export_jobs WHERE id = ?", jobId);
-        String workflowStatus = jdbcTemplate.queryForObject("SELECT status FROM operator_workflows WHERE business_reference_id = ?", String.class, jobId);
-        Instant workflowStarted = instant("SELECT started_at FROM operator_workflows WHERE business_reference_id = ?", jobId);
-        Instant workflowCompleted = instant("SELECT completed_at FROM operator_workflows WHERE business_reference_id = ?", jobId);
+                """.formatted(table, filter, orderColumn), UUID.class, workspaceId);
+    }
+
+    private void assertFailedStartup(String table, UUID domainId, String startedColumn, String completedColumn, String referenceType) {
+        String domainStatus = jdbcTemplate.queryForObject("SELECT status FROM " + table + " WHERE id = ?", String.class, domainId);
+        Instant domainStarted = instant("SELECT " + startedColumn + " FROM " + table + " WHERE id = ?", domainId);
+        Instant domainCompleted = instant("SELECT " + completedColumn + " FROM " + table + " WHERE id = ?", domainId);
+        String workflowStatus = jdbcTemplate.queryForObject("SELECT status FROM operator_workflows WHERE business_reference_type = ? AND business_reference_id = ?", String.class, referenceType, domainId);
+        Instant workflowStarted = instant("SELECT started_at FROM operator_workflows WHERE business_reference_type = ? AND business_reference_id = ?", referenceType, domainId);
+        Instant workflowCompleted = instant("SELECT completed_at FROM operator_workflows WHERE business_reference_type = ? AND business_reference_id = ?", referenceType, domainId);
         Integer staleRequested = jdbcTemplate.queryForObject("""
                 SELECT count(*) FROM operator_workflows
-                WHERE business_reference_id = ? AND status = 'REQUESTED'
-                """, Integer.class, jobId);
+                WHERE business_reference_type = ?
+                  AND business_reference_id = ?
+                  AND status = 'REQUESTED'
+                """, Integer.class, referenceType, domainId);
 
         assertThat(domainStatus).isEqualTo("FAILED");
         assertThat(domainStarted).isNull();
@@ -109,11 +173,6 @@ class OperatorWorkflowTruthfulnessAndStartupFailureIntegrationTest {
         assertThat(workflowStarted).isNull();
         assertThat(workflowCompleted).isNotNull();
         assertThat(staleRequested).isZero();
-    }
-
-    private Instant instant(String sql, UUID id) {
-        Timestamp timestamp = jdbcTemplate.queryForObject(sql, Timestamp.class, id);
-        return timestamp == null ? null : timestamp.toInstant();
     }
 
     private Fixture fixture(String slug) {
@@ -128,6 +187,10 @@ class OperatorWorkflowTruthfulnessAndStartupFailureIntegrationTest {
 
     private AccessContext financeContext(Fixture fixture) {
         return new AccessContext(fixture.workspaceId(), fixture.slug(), fixture.ownerId(), fixture.slug() + "-owner", fixture.membershipId(), "OWNER", Set.of("FINANCE_READ", "FINANCE_WRITE"), Set.of());
+    }
+
+    private AccessContext paymentContext(Fixture fixture) {
+        return new AccessContext(fixture.workspaceId(), fixture.slug(), fixture.ownerId(), fixture.slug() + "-owner", fixture.membershipId(), "OWNER", Set.of("PAYMENT_READ", "PAYMENT_WRITE"), Set.of());
     }
 
     private record Fixture(UUID workspaceId, String slug, UUID ownerId, UUID membershipId) {

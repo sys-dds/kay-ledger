@@ -130,23 +130,23 @@ class Kay015TemporalOperatorWorkflowsIntegrationTest {
         awaitStatus("export_jobs", exportJob.id(), "SUCCEEDED");
         String storageKey = jdbcTemplate.queryForObject("SELECT storage_key FROM export_jobs WHERE id = ?", String.class, exportJob.id());
         assertObjectExists(storageKey);
-        assertWorkflow(alpha, OperatorWorkflowService.EXPORT, OperatorWorkflowService.EXPORT_JOB, exportJob.id(), "SUCCEEDED");
+        assertWorkflow(financeContext(alpha), OperatorWorkflowService.EXPORT, OperatorWorkflowService.EXPORT_JOB, exportJob.id(), "SUCCEEDED");
 
         var reconciliationRun = reconciliationService.startRun(paymentContext(alpha), new ReconciliationService.RunReconciliationCommand("FULL"));
         awaitStatus("reconciliation_runs", reconciliationRun.id(), "COMPLETED");
-        assertWorkflow(alpha, OperatorWorkflowService.RECONCILIATION, OperatorWorkflowService.RECONCILIATION_RUN, reconciliationRun.id(), "SUCCEEDED");
+        assertWorkflow(paymentContext(alpha), OperatorWorkflowService.RECONCILIATION, OperatorWorkflowService.RECONCILIATION_RUN, reconciliationRun.id(), "SUCCEEDED");
 
         var reindexJob = investigationIndexingService.startReindex(paymentContext(alpha));
         awaitStatus("investigation_reindex_jobs", reindexJob.id(), "SUCCEEDED");
-        assertWorkflow(alpha, OperatorWorkflowService.INVESTIGATION_REINDEX, OperatorWorkflowService.INVESTIGATION_REINDEX_JOB, reindexJob.id(), "SUCCEEDED");
+        assertWorkflow(paymentContext(alpha), OperatorWorkflowService.INVESTIGATION_REINDEX, OperatorWorkflowService.INVESTIGATION_REINDEX_JOB, reindexJob.id(), "SUCCEEDED");
 
-        assertThat(operatorWorkflowQueryService.list(paymentContext(beta), OperatorWorkflowService.EXPORT)).isEmpty();
+        assertThat(operatorWorkflowQueryService.list(financeContext(beta), OperatorWorkflowService.EXPORT)).isEmpty();
         assertThat(operatorWorkflowQueryService.list(paymentContext(beta), OperatorWorkflowService.RECONCILIATION)).isEmpty();
         assertThat(operatorWorkflowQueryService.list(paymentContext(beta), OperatorWorkflowService.INVESTIGATION_REINDEX)).isEmpty();
     }
 
-    private void assertWorkflow(Fixture fixture, String workflowType, String referenceType, UUID referenceId, String status) {
-        assertThat(operatorWorkflowQueryService.findByReference(paymentContext(fixture), workflowType, referenceType, referenceId).status())
+    private void assertWorkflow(AccessContext context, String workflowType, String referenceType, UUID referenceId, String status) {
+        assertThat(operatorWorkflowQueryService.findByReference(context, workflowType, referenceType, referenceId).status())
                 .isEqualTo(status);
     }
 

@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.HexFormat;
 import java.util.List;
@@ -16,8 +17,11 @@ import javax.crypto.spec.SecretKeySpec;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.boot.test.web.server.LocalServerPort;
+import org.springframework.context.SmartLifecycle;
+import org.springframework.context.annotation.Bean;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -35,6 +39,14 @@ import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
+
+import com.kayledger.api.temporal.config.TemporalProperties;
+import com.kayledger.api.temporal.config.TemporalWorkerCustomizer;
+
+import io.temporal.client.WorkflowClient;
+import io.temporal.testing.TestWorkflowEnvironment;
+import io.temporal.worker.Worker;
+import io.temporal.worker.WorkerFactory;
 
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
@@ -100,6 +112,7 @@ class Kay010Kay011CarryoverKay012Kay013Kay014IntegrationTest {
         registry.add("kay-ledger.object-storage.access-key", () -> ACCESS_KEY);
         registry.add("kay-ledger.object-storage.secret-key", () -> SECRET_KEY);
         registry.add("kay-ledger.object-storage.path-style-access-enabled", () -> "true");
+        registry.add("kay-ledger.temporal.task-queues.operator-workflows", () -> "kay-ledger-kay010-carryover");
     }
 
     @LocalServerPort
@@ -168,12 +181,14 @@ class Kay010Kay011CarryoverKay012Kay013Kay014IntegrationTest {
         String amountMismatchPayment = createSettledPayment(providerProfileId, customerProfileId, 12_000, "2036-01-07T14:00:00Z", "k12-amount-mismatch");
         postRawCallback(callbackToken, callbackPayload("evt-amount-mismatch", 50, "PAYMENT_SETTLED", amountMismatchPayment, 999), SECRET, HttpStatus.OK);
         post("/api/reconciliation/runs", workspaceHeaders("k12-recon-amount", ALPHA, OWNER), Map.of("runType", "FULL"));
+        awaitLatestStatus("reconciliation_runs", "COMPLETED");
         List<?> amountMismatches = getList("/api/reconciliation/mismatches", ownerHeaders, HttpStatus.OK);
         Map<?, ?> amountMismatch = firstMismatch(amountMismatches, "AMOUNT_MISMATCH");
         assertThat(amountMismatch.get("suggestedAction")).isEqualTo("MANUAL_REVIEW");
         assertStatus("/api/reconciliation/mismatches/" + amountMismatch.get("id") + "/apply-repair", HttpMethod.POST, workspaceHeaders("k12-unsafe-repair", ALPHA, OWNER), Map.of("note", "unsafe"), HttpStatus.BAD_REQUEST);
         jdbcTemplate.update("UPDATE payment_intents SET status = 'CREATED' WHERE id = ?::uuid", amountMismatchPayment);
         post("/api/reconciliation/runs", workspaceHeaders("k12-recon-state", ALPHA, OWNER), Map.of("runType", "FULL"));
+        awaitLatestStatus("reconciliation_runs", "COMPLETED");
         List<?> mismatches = getList("/api/reconciliation/mismatches", ownerHeaders, HttpStatus.OK);
         Map<?, ?> stateMismatch = firstMismatch(mismatches, "STATE_MISMATCH", amountMismatchPayment);
         post("/api/reconciliation/mismatches/" + stateMismatch.get("id") + "/apply-repair", workspaceHeaders("k12-safe-repair", ALPHA, OWNER), Map.of("note", "safe provider truth repair"));
@@ -201,12 +216,16 @@ class Kay010Kay011CarryoverKay012Kay013Kay014IntegrationTest {
         List<?> reviews = getList("/api/risk/reviews", ownerHeaders, HttpStatus.OK);
         assertThat(reviews).hasSizeGreaterThanOrEqualTo(3);
         Map<?, ?> reviewForBlock = reviewForRule(reviews, riskFlags, "REPEATED_FAILED_PAYMENT_BURST");
-        Map<?, ?> firstReview = (Map<?, ?>) reviews.get(0);
-        Map<?, ?> secondReview = (Map<?, ?>) reviews.get(1);
+        List<?> otherReviews = reviews.stream()
+                .map(Map.class::cast)
+                .filter(review -> !review.get("id").equals(reviewForBlock.get("id")))
+                .toList();
+        Map<?, ?> firstReview = (Map<?, ?>) otherReviews.get(0);
+        Map<?, ?> secondReview = (Map<?, ?>) otherReviews.get(1);
+        post("/api/risk/reviews/" + reviewForBlock.get("id") + "/decisions", workspaceHeaders("k12-block-decision", ALPHA, OWNER), Map.of("outcome", "BLOCK", "reason", "provider paused"));
         post("/api/risk/reviews/" + firstReview.get("id") + "/in-review", workspaceHeaders("k12-review-in-review", ALPHA, OWNER), Map.of());
         post("/api/risk/reviews/" + firstReview.get("id") + "/decisions", workspaceHeaders("k12-review-decision", ALPHA, OWNER), Map.of("outcome", "REVIEW", "reason", "operator review continues"));
         post("/api/risk/reviews/" + secondReview.get("id") + "/decisions", workspaceHeaders("k12-allow-decision", ALPHA, OWNER), Map.of("outcome", "ALLOW", "reason", "known provider behavior"));
-        post("/api/risk/reviews/" + reviewForBlock.get("id") + "/decisions", workspaceHeaders("k12-block-decision", ALPHA, OWNER), Map.of("outcome", "BLOCK", "reason", "provider paused"));
         assertThat(getList("/api/risk/decisions", ownerHeaders, HttpStatus.OK).stream()
                 .map(Map.class::cast)
                 .map(decision -> decision.get("outcome").toString())
@@ -219,7 +238,7 @@ class Kay010Kay011CarryoverKay012Kay013Kay014IntegrationTest {
         List<?> summaries = postList("/api/reporting/summaries/providers/refresh", workspaceHeaders("k12-summary-refresh", ALPHA, OWNER), Map.of());
         assertThat(summaries).anySatisfy(summary -> assertThat(((Number) ((Map<?, ?>) summary).get("settledGrossAmountMinor")).longValue()).isGreaterThan(0));
         Map<String, Object> exportJob = post("/api/reporting/exports", workspaceHeaders("k12-export", ALPHA, OWNER), Map.of("exportType", "PROVIDER_STATEMENT"));
-        assertThat(exportJob.get("status")).isEqualTo("SUCCEEDED");
+        awaitStatus("export_jobs", UUID.fromString(exportJob.get("id").toString()), "SUCCEEDED");
         List<?> exportJobs = getList("/api/reporting/exports/jobs", ownerHeaders, HttpStatus.OK);
         List<?> artifacts = getList("/api/reporting/exports/artifacts", ownerHeaders, HttpStatus.OK);
         assertThat(exportJobs).isNotEmpty();
@@ -511,7 +530,92 @@ class Kay010Kay011CarryoverKay012Kay013Kay014IntegrationTest {
         }
     }
 
+    private void awaitLatestStatus(String table, String expected) {
+        Instant deadline = Instant.now().plus(Duration.ofSeconds(20));
+        String status = null;
+        while (Instant.now().isBefore(deadline)) {
+            status = jdbcTemplate.queryForObject("SELECT status FROM " + table + " WHERE workspace_id = ? ORDER BY created_at DESC LIMIT 1", String.class, workspaceId(ALPHA));
+            if (expected.equals(status)) {
+                return;
+            }
+            sleep();
+        }
+        assertThat(status).isEqualTo(expected);
+    }
+
+    private void awaitStatus(String table, UUID id, String expected) {
+        Instant deadline = Instant.now().plus(Duration.ofSeconds(20));
+        String status = null;
+        while (Instant.now().isBefore(deadline)) {
+            status = jdbcTemplate.queryForObject("SELECT status FROM " + table + " WHERE id = ?", String.class, id);
+            if (expected.equals(status)) {
+                return;
+            }
+            sleep();
+        }
+        assertThat(status).isEqualTo(expected);
+    }
+
+    private static void sleep() {
+        try {
+            Thread.sleep(200);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(exception);
+        }
+    }
+
     private static String minioEndpoint() {
         return "http://" + MINIO.getHost() + ":" + MINIO.getMappedPort(9000);
+    }
+
+    @TestConfiguration
+    static class TemporalTestConfiguration {
+
+        @Bean(destroyMethod = "")
+        TestWorkflowEnvironment testWorkflowEnvironment() {
+            return TestWorkflowEnvironment.newInstance();
+        }
+
+        @Bean
+        WorkflowClient workflowClient(TestWorkflowEnvironment environment) {
+            return environment.getWorkflowClient();
+        }
+
+        @Bean
+        WorkerFactory workerFactory(TestWorkflowEnvironment environment) {
+            return environment.getWorkerFactory();
+        }
+
+        @Bean
+        Worker testOperatorWorker(WorkerFactory workerFactory, TemporalProperties properties, List<TemporalWorkerCustomizer> customizers) {
+            Worker worker = workerFactory.newWorker(properties.getTaskQueues().getOperatorWorkflows());
+            customizers.forEach(customizer -> customizer.customize(worker));
+            return worker;
+        }
+
+        @Bean
+        SmartLifecycle temporalTestLifecycle(TestWorkflowEnvironment environment) {
+            return new SmartLifecycle() {
+                private boolean running;
+
+                @Override
+                public void start() {
+                    environment.start();
+                    running = true;
+                }
+
+                @Override
+                public void stop() {
+                    environment.close();
+                    running = false;
+                }
+
+                @Override
+                public boolean isRunning() {
+                    return running;
+                }
+            };
+        }
     }
 }
