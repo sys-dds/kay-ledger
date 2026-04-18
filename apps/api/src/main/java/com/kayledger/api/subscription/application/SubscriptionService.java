@@ -2,7 +2,9 @@ package com.kayledger.api.subscription.application;
 
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
@@ -17,6 +19,7 @@ import com.kayledger.api.payment.model.PaymentIntent;
 import com.kayledger.api.payment.store.PaymentStore;
 import com.kayledger.api.shared.api.BadRequestException;
 import com.kayledger.api.shared.api.NotFoundException;
+import com.kayledger.api.shared.messaging.application.OutboxService;
 import com.kayledger.api.subscription.model.EntitlementGrant;
 import com.kayledger.api.subscription.model.SubscriptionCycle;
 import com.kayledger.api.subscription.model.SubscriptionPlan;
@@ -32,17 +35,19 @@ public class SubscriptionService {
     private final SubscriptionStore subscriptionStore;
     private final PaymentStore paymentStore;
     private final AccessPolicy accessPolicy;
+    private final OutboxService outboxService;
 
-    public SubscriptionService(SubscriptionStore subscriptionStore, PaymentStore paymentStore, AccessPolicy accessPolicy) {
+    public SubscriptionService(SubscriptionStore subscriptionStore, PaymentStore paymentStore, AccessPolicy accessPolicy, OutboxService outboxService) {
         this.subscriptionStore = subscriptionStore;
         this.paymentStore = paymentStore;
         this.accessPolicy = accessPolicy;
+        this.outboxService = outboxService;
     }
 
     @Transactional
     public SubscriptionPlan createPlan(AccessContext context, CreatePlanCommand command) {
         requireSubscriptionWrite(context);
-        return subscriptionStore.createPlan(
+        SubscriptionPlan plan = subscriptionStore.createPlan(
                 context.workspaceId(),
                 requireId(command.providerProfileId(), "providerProfileId"),
                 requireText(command.planCode(), "planCode"),
@@ -50,6 +55,8 @@ public class SubscriptionService {
                 requireOneOf(command.billingInterval(), BILLING_INTERVALS, "billingInterval"),
                 requireCurrency(command.currencyCode()),
                 requirePositive(command.amountMinor(), "amountMinor"));
+        outboxService.append(context.workspaceId(), "SUBSCRIPTION_PLAN", plan.id(), "subscription.plan.created", "subscription.plan.created:" + plan.id(), planData(plan));
+        return plan;
     }
 
     public List<SubscriptionPlan> listPlans(AccessContext context) {
@@ -81,6 +88,9 @@ public class SubscriptionService {
                 cycle.netAmountMinor(),
                 "subscription-cycle-" + cycle.id());
         subscriptionStore.attachPaymentIntent(context.workspaceId(), cycle.id(), intent.id());
+        outboxService.append(context.workspaceId(), "SUBSCRIPTION", subscription.id(), "subscription.created", "subscription.created:" + subscription.id(), subscriptionData(subscription));
+        outboxService.append(context.workspaceId(), "SUBSCRIPTION_CYCLE", cycle.id(), "subscription.cycle.created", "subscription.cycle.created:" + cycle.id(), cycleData(cycle, intent.id()));
+        outboxService.append(context.workspaceId(), "PAYMENT", intent.id(), "payment.intent.created", "payment.intent.created:" + intent.id() + ":" + intent.status(), paymentData(intent));
         return subscription;
     }
 
@@ -121,7 +131,9 @@ public class SubscriptionService {
         if (effectiveCycleNumber <= subscriptionStore.nextCycleNumber(context.workspaceId(), subscription.id()) - 1) {
             throw new BadRequestException("effectiveCycleNumber must be a future cycle.");
         }
-        return subscriptionStore.schedulePlanChange(context.workspaceId(), subscription.id(), target.id(), effectiveCycleNumber);
+        SubscriptionPlanChange change = subscriptionStore.schedulePlanChange(context.workspaceId(), subscription.id(), target.id(), effectiveCycleNumber);
+        outboxService.append(context.workspaceId(), "SUBSCRIPTION", subscription.id(), "subscription.plan_change.scheduled", "subscription.plan_change.scheduled:" + change.id(), planChangeData(change));
+        return change;
     }
 
     @Transactional
@@ -138,7 +150,7 @@ public class SubscriptionService {
                         int cycleNumber = subscriptionStore.nextCycleNumber(context.workspaceId(), subscription.id());
                         SubscriptionPlan plan = planForCycle(context.workspaceId(), subscription, cycleNumber);
                         Instant endAt = periodEnd(startAt, plan.billingInterval());
-                        return subscriptionStore.createCycle(
+                        SubscriptionCycle created = subscriptionStore.createCycle(
                                 context.workspaceId(),
                                 subscription.id(),
                                 cycleNumber,
@@ -148,10 +160,13 @@ public class SubscriptionService {
                                 endAt,
                                 forceFailure ? "FAILED" : "PENDING_PAYMENT",
                                 "renewal-" + cycleNumber);
+                        outboxService.append(context.workspaceId(), "SUBSCRIPTION_CYCLE", created.id(), "subscription.cycle.created", "subscription.cycle.created:" + created.id(), cycleData(created, null));
+                        return created;
                     });
             if (forceFailure) {
                 SubscriptionRecord grace = subscriptionStore.moveToGrace(context.workspaceId(), subscription.id(), now.plus(7, ChronoUnit.DAYS));
                 subscriptionStore.upsertEntitlement(context.workspaceId(), grace.id(), grace.customerProfileId(), "GRACE", grace.currentPeriodStartAt(), grace.graceExpiresAt());
+                outboxService.append(context.workspaceId(), "SUBSCRIPTION", grace.id(), "subscription.renewal.failed_to_grace", "subscription.renewal.failed_to_grace:" + grace.id() + ":" + cycle.id(), subscriptionData(grace));
             } else if (cycle.paymentIntentId() == null) {
                 PaymentIntent intent = paymentStore.createSubscriptionIntent(
                         context.workspaceId(),
@@ -164,6 +179,7 @@ public class SubscriptionService {
                         cycle.netAmountMinor(),
                         "subscription-cycle-" + cycle.id());
                 subscriptionStore.attachPaymentIntent(context.workspaceId(), cycle.id(), intent.id());
+                outboxService.append(context.workspaceId(), "PAYMENT", intent.id(), "payment.intent.created", "payment.intent.created:" + intent.id() + ":" + intent.status(), paymentData(intent));
                 paymentIntentsCreated++;
             }
             processed++;
@@ -179,6 +195,7 @@ public class SubscriptionService {
         for (SubscriptionRecord subscription : subscriptionStore.graceExpiredSubscriptions(context.workspaceId(), now)) {
             SubscriptionRecord updated = subscriptionStore.moveToSuspended(context.workspaceId(), subscription.id());
             subscriptionStore.upsertEntitlement(context.workspaceId(), updated.id(), updated.customerProfileId(), "SUSPENDED", updated.startAt(), now);
+            outboxService.append(context.workspaceId(), "SUBSCRIPTION", updated.id(), "subscription.suspended", "subscription.suspended:" + updated.id(), subscriptionData(updated));
             suspended++;
         }
         return new SuspensionRunResult(suspended);
@@ -208,18 +225,98 @@ public class SubscriptionService {
                 .orElseThrow(() -> new NotFoundException("Subscription was not found."));
     }
 
+    private Map<String, Object> planData(SubscriptionPlan plan) {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("planId", plan.id());
+        data.put("providerProfileId", plan.providerProfileId());
+        data.put("planCode", plan.planCode());
+        data.put("billingInterval", plan.billingInterval());
+        data.put("currencyCode", plan.currencyCode());
+        data.put("amountMinor", plan.amountMinor());
+        data.put("status", plan.status());
+        return data;
+    }
+
+    private Map<String, Object> subscriptionData(SubscriptionRecord subscription) {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("subscriptionId", subscription.id());
+        data.put("customerProfileId", subscription.customerProfileId());
+        data.put("currentPlanId", subscription.currentPlanId());
+        data.put("providerProfileId", subscription.providerProfileId());
+        data.put("status", subscription.status());
+        data.put("currentPeriodStartAt", subscription.currentPeriodStartAt());
+        data.put("currentPeriodEndAt", subscription.currentPeriodEndAt());
+        if (subscription.graceExpiresAt() != null) {
+            data.put("graceExpiresAt", subscription.graceExpiresAt());
+        }
+        return data;
+    }
+
+    private Map<String, Object> cycleData(SubscriptionCycle cycle, UUID paymentIntentId) {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("subscriptionCycleId", cycle.id());
+        data.put("subscriptionId", cycle.subscriptionId());
+        data.put("cycleNumber", cycle.cycleNumber());
+        data.put("planId", cycle.planId());
+        data.put("providerProfileId", cycle.providerProfileId());
+        data.put("customerProfileId", cycle.customerProfileId());
+        data.put("cycleStartAt", cycle.cycleStartAt());
+        data.put("cycleEndAt", cycle.cycleEndAt());
+        data.put("status", cycle.status());
+        data.put("currencyCode", cycle.currencyCode());
+        data.put("grossAmountMinor", cycle.grossAmountMinor());
+        data.put("feeAmountMinor", cycle.feeAmountMinor());
+        data.put("netAmountMinor", cycle.netAmountMinor());
+        if (paymentIntentId != null) {
+            data.put("paymentIntentId", paymentIntentId);
+        }
+        return data;
+    }
+
+    private Map<String, Object> planChangeData(SubscriptionPlanChange change) {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("planChangeId", change.id());
+        data.put("subscriptionId", change.subscriptionId());
+        data.put("targetPlanId", change.targetPlanId());
+        data.put("effectiveCycleNumber", change.effectiveCycleNumber());
+        data.put("status", change.status());
+        return data;
+    }
+
+    private Map<String, Object> paymentData(PaymentIntent intent) {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("paymentIntentId", intent.id());
+        if (intent.bookingId() != null) {
+            data.put("bookingId", intent.bookingId());
+        }
+        if (intent.subscriptionId() != null) {
+            data.put("subscriptionId", intent.subscriptionId());
+        }
+        if (intent.subscriptionCycleId() != null) {
+            data.put("subscriptionCycleId", intent.subscriptionCycleId());
+        }
+        data.put("providerProfileId", intent.providerProfileId());
+        data.put("status", intent.status());
+        data.put("currencyCode", intent.currencyCode());
+        data.put("grossAmountMinor", intent.grossAmountMinor());
+        data.put("feeAmountMinor", intent.feeAmountMinor());
+        data.put("netAmountMinor", intent.netAmountMinor());
+        return data;
+    }
+
     private void requireSubscriptionRead(AccessContext context) {
         accessPolicy.requireWorkspaceRole(context, WorkspaceRole.OWNER, WorkspaceRole.ADMIN);
-        accessPolicy.requireScope(context, AccessScope.PAYMENT_READ);
+        accessPolicy.requireScope(context, AccessScope.SUBSCRIPTION_READ);
     }
 
     private void requireSubscriptionWrite(AccessContext context) {
         accessPolicy.requireWorkspaceRole(context, WorkspaceRole.OWNER, WorkspaceRole.ADMIN);
-        accessPolicy.requireScope(context, AccessScope.PAYMENT_WRITE);
+        accessPolicy.requireScope(context, AccessScope.SUBSCRIPTION_WRITE);
     }
 
     private void requireSubscriptionRenew(AccessContext context) {
-        requireSubscriptionWrite(context);
+        accessPolicy.requireWorkspaceRole(context, WorkspaceRole.OWNER, WorkspaceRole.ADMIN);
+        accessPolicy.requireScope(context, AccessScope.SUBSCRIPTION_RENEW);
     }
 
     private static Instant periodEnd(Instant startAt, String billingInterval) {

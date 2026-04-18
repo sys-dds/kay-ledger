@@ -18,6 +18,9 @@ public final class AccessScope {
     public static final String FINANCE_WRITE = "FINANCE_WRITE";
     public static final String PAYMENT_READ = "PAYMENT_READ";
     public static final String PAYMENT_WRITE = "PAYMENT_WRITE";
+    public static final String SUBSCRIPTION_READ = "SUBSCRIPTION_READ";
+    public static final String SUBSCRIPTION_WRITE = "SUBSCRIPTION_WRITE";
+    public static final String SUBSCRIPTION_RENEW = "SUBSCRIPTION_RENEW";
 
     private AccessScope() {
     }
