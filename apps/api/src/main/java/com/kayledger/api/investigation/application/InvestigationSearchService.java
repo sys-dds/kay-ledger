@@ -36,7 +36,7 @@ public class InvestigationSearchService {
         requireRead(context);
         Map<String, Object> bool = new LinkedHashMap<>();
         List<Map<String, Object>> filters = new ArrayList<>();
-        filters.add(match("workspaceId", context.workspaceId().toString()));
+        filters.add(term("workspaceId", context.workspaceId().toString()));
         if (command != null) {
             addTerm(filters, "paymentIntentId", command.paymentId());
             addTerm(filters, "refundId", command.refundId());
@@ -76,12 +76,12 @@ public class InvestigationSearchService {
 
     private static void addTerm(List<Map<String, Object>> filters, String field, String value) {
         if (value != null && !value.isBlank()) {
-            filters.add(match(field, value.trim()));
+            filters.add(term(field, value.trim()));
         }
     }
 
-    private static Map<String, Object> match(String field, String value) {
-        return Map.of("match", Map.of(field, value));
+    private static Map<String, Object> term(String field, String value) {
+        return Map.of("term", Map.of(field, value));
     }
 
     public record SearchCommand(

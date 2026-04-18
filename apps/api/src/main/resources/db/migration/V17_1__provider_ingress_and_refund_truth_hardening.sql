@@ -36,3 +36,19 @@ ALTER TABLE refund_attempts
 
 ALTER TABLE refund_attempts
     ADD CONSTRAINT refund_attempts_status_check CHECK (status IN ('PROCESSING', 'SUCCEEDED', 'FAILED'));
+
+ALTER TABLE reconciliation_mismatches
+    DROP CONSTRAINT reconciliation_mismatches_drift_check;
+
+ALTER TABLE reconciliation_mismatches
+    ADD CONSTRAINT reconciliation_mismatches_drift_check CHECK (drift_category IN (
+        'STATE_MISMATCH',
+        'MISSING_INTERNAL',
+        'MISSING_PROVIDER',
+        'AMOUNT_MISMATCH',
+        'OUT_OF_ORDER',
+        'MISSING_PROJECTION',
+        'MISSING_JOURNAL',
+        'FAILED_CALLBACK_BACKLOG',
+        'MISSING_INTERNAL_REFERENCE'
+    ));

@@ -46,7 +46,7 @@ public class ProjectionConsumer {
                 record.value(),
                 () -> {
                     apply(event, event.workspaceId());
-                    reindex(event.workspaceId());
+                    reindex(event.workspaceId(), event);
                     return true;
                 });
     }
@@ -69,7 +69,7 @@ public class ProjectionConsumer {
                 parked.payloadJson(),
                 () -> {
                     apply(event, parked.workspaceId());
-                    reindex(parked.workspaceId());
+                    reindex(parked.workspaceId(), event);
                     return true;
                 });
     }
@@ -90,12 +90,21 @@ public class ProjectionConsumer {
         }
     }
 
-    private void reindex(UUID workspaceId) {
+    private void reindex(UUID workspaceId, DomainEventPayload event) {
         try {
-            investigationIndexingService.reindexWorkspace(workspaceId);
+            investigationIndexingService.indexReference(workspaceId, investigationReferenceType(event), event.aggregateId());
         } catch (RuntimeException ignored) {
             // Search indexing is replay-safe and re-driveable; projection processing remains source-of-truth first.
         }
+    }
+
+    private static String investigationReferenceType(DomainEventPayload event) {
+        return switch (event.aggregateType()) {
+            case "PAYMENT_INTENT" -> "PAYMENT_INTENT";
+            case "SUBSCRIPTION" -> "SUBSCRIPTION";
+            case "SUBSCRIPTION_CYCLE" -> "SUBSCRIPTION_CYCLE";
+            default -> event.aggregateType();
+        };
     }
 
     private DomainEventPayload payload(String value) {

@@ -110,7 +110,7 @@ public class ReconciliationStore {
                         internal_state, provider_state, suggested_action
                     )
                     SELECT workspace_id, ?, id, business_reference_type, business_reference_id,
-                           'STATE_MISMATCH', processing_status, callback_type, 'MANUAL_REVIEW'
+                           'FAILED_CALLBACK_BACKLOG', processing_status, callback_type, 'MANUAL_REVIEW'
                     FROM provider_callbacks
                     WHERE workspace_id = ?
                       AND processing_status = 'FAILED'
@@ -126,7 +126,8 @@ public class ReconciliationStore {
                         internal_state, provider_state, suggested_action
                     )
                     SELECT pi.workspace_id, ?, NULL, 'PAYMENT_INTENT', pi.id,
-                           'STATE_MISMATCH', pi.status, COALESCE(pp.latest_payment_status, 'MISSING_PROJECTION'), 'MANUAL_REVIEW'
+                           CASE WHEN pp.payment_intent_id IS NULL THEN 'MISSING_PROJECTION' ELSE 'STATE_MISMATCH' END,
+                           pi.status, COALESCE(pp.latest_payment_status, 'MISSING_PROJECTION'), 'MANUAL_REVIEW'
                     FROM payment_intents pi
                     LEFT JOIN payment_projection pp ON pp.workspace_id = pi.workspace_id
                      AND pp.payment_intent_id = pi.id
@@ -144,7 +145,7 @@ public class ReconciliationStore {
                         internal_state, provider_state, suggested_action
                     )
                     SELECT pi.workspace_id, ?, NULL, 'PAYMENT_INTENT', pi.id,
-                           'STATE_MISMATCH', pi.status, 'MISSING_SETTLEMENT_JOURNAL', 'MANUAL_REVIEW'
+                           'MISSING_JOURNAL', pi.status, 'MISSING_SETTLEMENT_JOURNAL', 'MANUAL_REVIEW'
                     FROM payment_intents pi
                     WHERE pi.workspace_id = ?
                       AND pi.status = 'SETTLED'
@@ -169,7 +170,7 @@ public class ReconciliationStore {
                         internal_state, provider_state, suggested_action
                     )
                     SELECT workspace_id, ?, NULL, 'REFUND', id,
-                           'STATE_MISMATCH', status, 'MISSING_REFUND_JOURNAL', 'MANUAL_REVIEW'
+                           'MISSING_JOURNAL', status, 'MISSING_REFUND_JOURNAL', 'MANUAL_REVIEW'
                     FROM refunds
                     WHERE workspace_id = ?
                       AND status = 'SUCCEEDED'

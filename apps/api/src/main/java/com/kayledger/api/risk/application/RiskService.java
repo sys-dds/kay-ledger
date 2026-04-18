@@ -10,6 +10,7 @@ import com.kayledger.api.access.application.AccessContext;
 import com.kayledger.api.access.application.AccessPolicy;
 import com.kayledger.api.access.model.AccessScope;
 import com.kayledger.api.access.model.WorkspaceRole;
+import com.kayledger.api.investigation.application.InvestigationIndexingService;
 import com.kayledger.api.risk.model.RiskDecision;
 import com.kayledger.api.risk.model.RiskFlag;
 import com.kayledger.api.risk.model.RiskReview;
@@ -23,10 +24,12 @@ public class RiskService {
 
     private final RiskStore riskStore;
     private final AccessPolicy accessPolicy;
+    private final InvestigationIndexingService investigationIndexingService;
 
-    public RiskService(RiskStore riskStore, AccessPolicy accessPolicy) {
+    public RiskService(RiskStore riskStore, AccessPolicy accessPolicy, InvestigationIndexingService investigationIndexingService) {
         this.riskStore = riskStore;
         this.accessPolicy = accessPolicy;
+        this.investigationIndexingService = investigationIndexingService;
     }
 
     @Transactional
@@ -84,7 +87,10 @@ public class RiskService {
     @Transactional
     public RiskReview markInReview(AccessContext context, UUID reviewId) {
         requireWrite(context);
-        return riskStore.markInReview(context.workspaceId(), reviewId, context.actorId());
+        RiskReview review = riskStore.markInReview(context.workspaceId(), reviewId, context.actorId());
+        indexReference(context.workspaceId(), "RISK_REVIEW", review.id());
+        indexReference(context.workspaceId(), "RISK_FLAG", review.riskFlagId());
+        return review;
     }
 
     @Transactional
@@ -92,7 +98,10 @@ public class RiskService {
         requireWrite(context);
         String outcome = requireOutcome(command == null ? null : command.outcome());
         String reason = requireText(command == null ? null : command.reason(), "reason");
-        return riskStore.decide(context.workspaceId(), reviewId, outcome, reason, context.actorId());
+        RiskDecision decision = riskStore.decide(context.workspaceId(), reviewId, outcome, reason, context.actorId());
+        indexReference(context.workspaceId(), "RISK_DECISION", decision.id());
+        indexReference(context.workspaceId(), "RISK_FLAG", decision.riskFlagId());
+        return decision;
     }
 
     public List<RiskDecision> listDecisions(AccessContext context) {
@@ -102,8 +111,18 @@ public class RiskService {
 
     private RiskFlag flag(UUID workspaceId, String referenceType, UUID referenceId, String ruleCode, String severity, String reason, int signalCount) {
         RiskFlag flag = riskStore.upsertFlag(workspaceId, referenceType, referenceId, ruleCode, severity, reason, signalCount);
-        riskStore.ensureReview(workspaceId, flag.id());
+        RiskReview review = riskStore.ensureReview(workspaceId, flag.id());
+        indexReference(workspaceId, "RISK_FLAG", flag.id());
+        indexReference(workspaceId, "RISK_REVIEW", review.id());
         return flag;
+    }
+
+    private void indexReference(UUID workspaceId, String referenceType, UUID referenceId) {
+        try {
+            investigationIndexingService.indexReference(workspaceId, referenceType, referenceId);
+        } catch (RuntimeException ignored) {
+            // PostgreSQL remains the risk source of truth; operator search can be re-driven.
+        }
     }
 
     private void requireRead(AccessContext context) {

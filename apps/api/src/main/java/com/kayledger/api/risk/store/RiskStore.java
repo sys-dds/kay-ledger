@@ -148,12 +148,16 @@ public class RiskStore {
                     RETURNING rr.risk_flag_id
                 )
                 UPDATE risk_flags rf
-                SET status = CASE WHEN ? = 'REVIEW' THEN 'IN_REVIEW' ELSE 'RESOLVED' END
+                SET status = CASE
+                        WHEN ? = 'REVIEW' THEN 'IN_REVIEW'
+                        WHEN ? = 'BLOCK' THEN 'BLOCKED'
+                        ELSE 'RESOLVED'
+                    END
                 FROM inserted i
                 WHERE rf.workspace_id = i.workspace_id
                   AND rf.id = i.risk_flag_id
                 RETURNING i.*
-                """, DECISION_MAPPER, workspaceId, reviewId, outcome, reason, actorId, outcome, outcome, outcome);
+                """, DECISION_MAPPER, workspaceId, reviewId, outcome, reason, actorId, outcome, outcome, outcome, outcome);
     }
 
     public List<RiskDecision> listDecisions(UUID workspaceId) {

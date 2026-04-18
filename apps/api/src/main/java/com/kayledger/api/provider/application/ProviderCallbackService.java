@@ -127,23 +127,26 @@ public class ProviderCallbackService {
         }
         Long latest = providerStore.latestAppliedSequence(workspaceId, referenceType, referenceId);
         if (latest != null && callback.providerSequence() != null && callback.providerSequence() <= latest) {
-            return providerStore.markIgnoredOutOfOrder(workspaceId, callback.id());
+            ProviderCallback ignored = providerStore.markIgnoredOutOfOrder(workspaceId, callback.id());
+            reindex(workspaceId, referenceType, referenceId, callback.id());
+            return ignored;
         }
         try {
             applyTruth(workspaceId, callbackType, referenceId, amount(command), command.providerEventId());
             ProviderCallback applied = providerStore.markApplied(workspaceId, callback.id());
-            reindex(workspaceId);
+            reindex(workspaceId, referenceType, referenceId, callback.id());
             return applied;
         } catch (RuntimeException exception) {
             providerStore.markFailed(workspaceId, callback.id(), exception.getMessage());
-            reindex(workspaceId);
+            reindex(workspaceId, referenceType, referenceId, callback.id());
             throw new ProviderCallbackApplyException("Provider callback application failed; retry is required.", exception);
         }
     }
 
-    private void reindex(UUID workspaceId) {
+    private void reindex(UUID workspaceId, String referenceType, UUID referenceId, UUID callbackId) {
         try {
-            investigationIndexingService.reindexWorkspace(workspaceId);
+            investigationIndexingService.indexReference(workspaceId, referenceType, referenceId);
+            investigationIndexingService.indexReference(workspaceId, "PROVIDER_CALLBACK", callbackId);
         } catch (RuntimeException ignored) {
             // Operator search is an index target; callback truth stays durable in PostgreSQL.
         }

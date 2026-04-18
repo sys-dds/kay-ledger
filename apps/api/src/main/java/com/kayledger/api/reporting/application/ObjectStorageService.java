@@ -13,6 +13,7 @@ import software.amazon.awssdk.services.s3.model.CreateBucketRequest;
 import software.amazon.awssdk.services.s3.model.HeadBucketRequest;
 import software.amazon.awssdk.services.s3.model.NoSuchBucketException;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
+import software.amazon.awssdk.services.s3.model.S3Exception;
 
 @Service
 public class ObjectStorageService {
@@ -45,6 +46,19 @@ public class ObjectStorageService {
             s3Client.headBucket(HeadBucketRequest.builder().bucket(properties.getBucket()).build());
         } catch (NoSuchBucketException exception) {
             s3Client.createBucket(CreateBucketRequest.builder().bucket(properties.getBucket()).build());
+        } catch (S3Exception exception) {
+            if (isMissingBucket(exception)) {
+                s3Client.createBucket(CreateBucketRequest.builder().bucket(properties.getBucket()).build());
+                return;
+            }
+            throw exception;
         }
+    }
+
+    private static boolean isMissingBucket(S3Exception exception) {
+        String errorCode = exception.awsErrorDetails() == null ? null : exception.awsErrorDetails().errorCode();
+        return exception.statusCode() == 404
+                || "NoSuchBucket".equals(errorCode)
+                || "NotFound".equals(errorCode);
     }
 }

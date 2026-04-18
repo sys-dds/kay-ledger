@@ -98,7 +98,7 @@ public class ReportingStore {
                              AND pi.currency_code = pc.currency_code AND pi.status = 'SETTLED'), 0),
                        COALESCE((SELECT SUM(requested_amount_minor) FROM payout_requests pr
                            WHERE pr.workspace_id = pc.workspace_id AND pr.provider_profile_id = pc.provider_profile_id
-                             AND pr.currency_code = pc.currency_code), 0),
+                             AND pr.currency_code = pc.currency_code AND pr.status IN ('REQUESTED', 'PROCESSING')), 0),
                        COALESCE((SELECT SUM(requested_amount_minor) FROM payout_requests pr
                            WHERE pr.workspace_id = pc.workspace_id AND pr.provider_profile_id = pc.provider_profile_id
                              AND pr.currency_code = pc.currency_code AND pr.status = 'SUCCEEDED'), 0),
@@ -109,8 +109,8 @@ public class ReportingStore {
                        COALESCE((SELECT SUM(d.disputed_amount_minor) FROM disputes d
                            JOIN payment_intents pi ON pi.workspace_id = d.workspace_id AND pi.id = d.payment_intent_id
                            WHERE d.workspace_id = pc.workspace_id AND pi.provider_profile_id = pc.provider_profile_id
-                             AND pi.currency_code = pc.currency_code), 0),
-                       COALESCE((SELECT SUM(pi.gross_amount_minor) FROM payment_intents pi
+                             AND pi.currency_code = pc.currency_code AND d.status = 'OPEN'), 0),
+                       COALESCE((SELECT SUM(pi.net_amount_minor) FROM payment_intents pi
                            WHERE pi.workspace_id = pc.workspace_id AND pi.provider_profile_id = pc.provider_profile_id
                              AND pi.currency_code = pc.currency_code AND pi.subscription_id IS NOT NULL AND pi.status = 'SETTLED'), 0)
                 FROM provider_currency pc

@@ -111,9 +111,46 @@ public class InvestigationStore {
                        'SUBSCRIPTION_CYCLE', sc.id, sc.status, sc.currency_code, sc.gross_amount_minor, sc.updated_at
                 FROM subscription_cycles sc
                 WHERE sc.workspace_id = ?
+                UNION ALL
+                SELECT rf.workspace_id, 'risk_flag', 'RISK_FLAG', rf.id, NULL::uuid, NULL::uuid,
+                       NULL::uuid, NULL::uuid, NULL::uuid, NULL::uuid, NULL::text, rf.rule_code,
+                       rf.reference_type, rf.reference_id, rf.status, NULL::text, NULL::bigint, rf.updated_at
+                FROM risk_flags rf
+                WHERE rf.workspace_id = ?
+                UNION ALL
+                SELECT rr.workspace_id, 'risk_review', 'RISK_REVIEW', rr.id, NULL::uuid, NULL::uuid,
+                       NULL::uuid, NULL::uuid, NULL::uuid, NULL::uuid, NULL::text, NULL::text,
+                       'RISK_FLAG', rr.risk_flag_id, rr.status, NULL::text, NULL::bigint, rr.updated_at
+                FROM risk_reviews rr
+                WHERE rr.workspace_id = ?
+                UNION ALL
+                SELECT rd.workspace_id, 'risk_decision', 'RISK_DECISION', rd.id, NULL::uuid, NULL::uuid,
+                       NULL::uuid, NULL::uuid, NULL::uuid, NULL::uuid, NULL::text, NULL::text,
+                       rd.reference_type, rd.reference_id, rd.outcome, NULL::text, NULL::bigint, rd.decided_at
+                FROM risk_decisions rd
+                WHERE rd.workspace_id = ?
+                UNION ALL
+                SELECT ej.workspace_id, 'export_job', 'EXPORT_JOB', ej.id, NULL::uuid, NULL::uuid,
+                       NULL::uuid, NULL::uuid, NULL::uuid, NULL::uuid, NULL::text, ej.storage_key,
+                       'EXPORT_JOB', ej.id, ej.status, NULL::text, ej.row_count::bigint, ej.updated_at
+                FROM export_jobs ej
+                WHERE ej.workspace_id = ?
+                UNION ALL
+                SELECT ea.workspace_id, 'export_artifact', 'EXPORT_ARTIFACT', ea.id, NULL::uuid, NULL::uuid,
+                       NULL::uuid, NULL::uuid, NULL::uuid, NULL::uuid, NULL::text, ea.storage_key,
+                       'EXPORT_JOB', ea.export_job_id, 'STORED', NULL::text, ea.byte_size::bigint, ea.created_at
+                FROM export_artifacts ea
+                WHERE ea.workspace_id = ?
                 """, this::mapDocument,
                 workspaceId, workspaceId, workspaceId, workspaceId, workspaceId, workspaceId,
-                workspaceId, workspaceId, workspaceId, workspaceId, workspaceId);
+                workspaceId, workspaceId, workspaceId, workspaceId, workspaceId, workspaceId,
+                workspaceId, workspaceId, workspaceId, workspaceId);
+    }
+
+    public List<InvestigationDocument> documentsForReference(UUID workspaceId, String referenceType, UUID referenceId) {
+        return documentsForWorkspace(workspaceId).stream()
+                .filter(document -> matchesReference(document, referenceType, referenceId))
+                .toList();
     }
 
     public void recordIndexed(InvestigationDocument document) {
@@ -210,6 +247,14 @@ public class InvestigationStore {
                 nullableLong(rs, "amount_minor"),
                 occurredAt,
                 data);
+    }
+
+    private static boolean matchesReference(InvestigationDocument document, String referenceType, UUID referenceId) {
+        if (referenceType == null || referenceId == null) {
+            return false;
+        }
+        return (referenceType.equals(document.referenceType()) && referenceId.equals(document.referenceId()))
+                || (referenceType.equals(document.businessReferenceType()) && referenceId.equals(document.businessReferenceId()));
     }
 
     private static Long nullableLong(ResultSet rs, String column) throws SQLException {

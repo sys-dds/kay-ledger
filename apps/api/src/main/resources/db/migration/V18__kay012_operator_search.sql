@@ -22,7 +22,12 @@ CREATE TABLE operator_search_index_state (
         'PROVIDER_CALLBACK',
         'RECONCILIATION_MISMATCH',
         'SUBSCRIPTION',
-        'SUBSCRIPTION_CYCLE'
+        'SUBSCRIPTION_CYCLE',
+        'RISK_FLAG',
+        'RISK_REVIEW',
+        'RISK_DECISION',
+        'EXPORT_JOB',
+        'EXPORT_ARTIFACT'
     )),
     CONSTRAINT operator_search_status_check CHECK (status IN ('PENDING', 'INDEXED', 'FAILED')),
     CONSTRAINT operator_search_document_unique UNIQUE (workspace_id, document_type, reference_id),

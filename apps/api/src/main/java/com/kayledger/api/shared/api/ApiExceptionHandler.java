@@ -38,6 +38,11 @@ public class ApiExceptionHandler {
         return error(HttpStatus.INTERNAL_SERVER_ERROR, exception.getMessage());
     }
 
+    @ExceptionHandler(InternalFailureException.class)
+    ResponseEntity<ApiError> internalFailure(InternalFailureException exception) {
+        return error(HttpStatus.INTERNAL_SERVER_ERROR, exception.getMessage());
+    }
+
     private static ResponseEntity<ApiError> error(HttpStatus status, String message) {
         return ResponseEntity.status(status).body(new ApiError(status.value(), message, Instant.now()));
     }

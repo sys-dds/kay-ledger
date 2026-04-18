@@ -19,9 +19,17 @@ public class InvestigationIndexingService {
     }
 
     public ReindexResult reindexWorkspace(UUID workspaceId) {
+        return indexDocuments(investigationStore.documentsForWorkspace(workspaceId));
+    }
+
+    public ReindexResult indexReference(UUID workspaceId, String referenceType, UUID referenceId) {
+        return indexDocuments(investigationStore.documentsForReference(workspaceId, referenceType, referenceId));
+    }
+
+    private ReindexResult indexDocuments(Iterable<InvestigationDocument> documents) {
         int indexed = 0;
         int failed = 0;
-        for (InvestigationDocument document : investigationStore.documentsForWorkspace(workspaceId)) {
+        for (InvestigationDocument document : documents) {
             try {
                 openSearchClient.index(document);
                 investigationStore.recordIndexed(document);

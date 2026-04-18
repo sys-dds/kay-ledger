@@ -22,7 +22,7 @@ CREATE TABLE risk_flags (
         'WORKSPACE'
     )),
     CONSTRAINT risk_flags_severity_check CHECK (severity IN ('LOW', 'MEDIUM', 'HIGH', 'CRITICAL')),
-    CONSTRAINT risk_flags_status_check CHECK (status IN ('OPEN', 'IN_REVIEW', 'RESOLVED', 'DISMISSED')),
+    CONSTRAINT risk_flags_status_check CHECK (status IN ('OPEN', 'IN_REVIEW', 'RESOLVED', 'DISMISSED', 'BLOCKED')),
     CONSTRAINT risk_flags_signal_count_check CHECK (signal_count > 0),
     CONSTRAINT risk_flags_workspace_id_unique UNIQUE (workspace_id, id),
     CONSTRAINT risk_flags_unique UNIQUE (workspace_id, reference_type, reference_id, rule_code)

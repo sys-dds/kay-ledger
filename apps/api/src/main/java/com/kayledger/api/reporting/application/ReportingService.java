@@ -15,11 +15,13 @@ import com.kayledger.api.access.application.AccessContext;
 import com.kayledger.api.access.application.AccessPolicy;
 import com.kayledger.api.access.model.AccessScope;
 import com.kayledger.api.access.model.WorkspaceRole;
+import com.kayledger.api.investigation.application.InvestigationIndexingService;
 import com.kayledger.api.reporting.model.ExportArtifact;
 import com.kayledger.api.reporting.model.ExportJob;
 import com.kayledger.api.reporting.model.ProviderFinancialSummary;
 import com.kayledger.api.reporting.store.ReportingStore;
 import com.kayledger.api.shared.api.BadRequestException;
+import com.kayledger.api.shared.api.InternalFailureException;
 
 @Service
 public class ReportingService {
@@ -31,12 +33,14 @@ public class ReportingService {
     private final ObjectStorageService objectStorageService;
     private final AccessPolicy accessPolicy;
     private final ObjectMapper objectMapper;
+    private final InvestigationIndexingService investigationIndexingService;
 
-    public ReportingService(ReportingStore reportingStore, ObjectStorageService objectStorageService, AccessPolicy accessPolicy, ObjectMapper objectMapper) {
+    public ReportingService(ReportingStore reportingStore, ObjectStorageService objectStorageService, AccessPolicy accessPolicy, ObjectMapper objectMapper, InvestigationIndexingService investigationIndexingService) {
         this.reportingStore = reportingStore;
         this.objectStorageService = objectStorageService;
         this.accessPolicy = accessPolicy;
         this.objectMapper = objectMapper;
+        this.investigationIndexingService = investigationIndexingService;
     }
 
     @Transactional
@@ -51,7 +55,7 @@ public class ReportingService {
         return reportingStore.listProviderSummaries(context.workspaceId());
     }
 
-    @Transactional
+    @Transactional(noRollbackFor = InternalFailureException.class)
     public ExportJob requestExport(AccessContext context, ExportRequestCommand command) {
         requireWrite(context);
         String exportType = command == null || command.exportType() == null ? PROVIDER_STATEMENT : command.exportType();
@@ -68,13 +72,17 @@ public class ReportingService {
             byte[] content = providerStatementCsv(summaries).getBytes(StandardCharsets.UTF_8);
             String storageKey = "exports/" + context.workspaceId() + "/" + job.id() + "/provider-statement.csv";
             objectStorageService.put(storageKey, CSV, content);
-            reportingStore.createArtifact(context.workspaceId(), job.id(), storageKey, CSV, content.length, summaries.size(), sha256(content));
-            return reportingStore.markSucceeded(context.workspaceId(), job.id(), summaries.size(), storageKey, CSV);
+            ExportArtifact artifact = reportingStore.createArtifact(context.workspaceId(), job.id(), storageKey, CSV, content.length, summaries.size(), sha256(content));
+            ExportJob succeeded = reportingStore.markSucceeded(context.workspaceId(), job.id(), summaries.size(), storageKey, CSV);
+            indexReference(context.workspaceId(), "EXPORT_JOB", succeeded.id());
+            indexReference(context.workspaceId(), "EXPORT_ARTIFACT", artifact.id());
+            return succeeded;
         } catch (Exception exception) {
             if (job != null) {
                 reportingStore.markFailed(context.workspaceId(), job.id(), exception.getMessage());
+                indexReference(context.workspaceId(), "EXPORT_JOB", job.id());
             }
-            throw new BadRequestException("Export could not be generated: " + exception.getMessage());
+            throw new InternalFailureException("Export generation or artifact storage failed; retry is required.", exception);
         }
     }
 
@@ -90,7 +98,7 @@ public class ReportingService {
 
     private static String providerStatementCsv(List<ProviderFinancialSummary> summaries) {
         StringBuilder builder = new StringBuilder();
-        builder.append("provider_profile_id,currency_code,settled_gross,fees,net_earnings,payout_requested,payout_succeeded,refunds,disputes,subscription_revenue,refreshed_at\n");
+        builder.append("provider_profile_id,currency_code,settled_gross,fees,net_earnings,pending_payout_requested,payout_succeeded,settled_refunds,open_dispute_exposure,subscription_net_revenue,refreshed_at\n");
         for (ProviderFinancialSummary summary : summaries) {
             builder.append(summary.providerProfileId()).append(',')
                     .append(summary.currencyCode()).append(',')
@@ -106,6 +114,14 @@ public class ReportingService {
                     .append('\n');
         }
         return builder.toString();
+    }
+
+    private void indexReference(UUID workspaceId, String referenceType, UUID referenceId) {
+        try {
+            investigationIndexingService.indexReference(workspaceId, referenceType, referenceId);
+        } catch (RuntimeException ignored) {
+            // Export metadata is durable in PostgreSQL; operator search can be repaired by reindex.
+        }
     }
 
     private static String sha256(byte[] content) throws Exception {

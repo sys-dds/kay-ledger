@@ -69,7 +69,7 @@ public class ReconciliationService {
                         callback.id(),
                         callback.businessReferenceType(),
                         callback.businessReferenceId(),
-                        "STATE_MISMATCH",
+                        "MISSING".equals(internalState) ? "MISSING_INTERNAL_REFERENCE" : "STATE_MISMATCH",
                         internalState,
                         providerState,
                         "APPLY_PROVIDER_STATE");
@@ -93,7 +93,7 @@ public class ReconciliationService {
         reconciliationStore.createEntityCentricMismatches(context.workspaceId(), run.id());
         riskService.evaluateMismatchBurst(context.workspaceId());
         ReconciliationRun completed = reconciliationStore.completeRun(context.workspaceId(), run.id());
-        reindex(context.workspaceId());
+        reindexRun(context.workspaceId(), completed.id());
         return completed;
     }
 
@@ -135,13 +135,24 @@ public class ReconciliationService {
         }
         applyProviderState(context.workspaceId(), mismatch);
         ReconciliationMismatch applied = reconciliationStore.markApplied(context.workspaceId(), mismatch.id(), command == null ? "Applied provider state." : command.note());
-        reindex(context.workspaceId());
+        reindexMismatch(context.workspaceId(), applied);
         return applied;
     }
 
-    private void reindex(UUID workspaceId) {
+    private void reindexRun(UUID workspaceId, UUID runId) {
         try {
-            investigationIndexingService.reindexWorkspace(workspaceId);
+            reconciliationStore.listMismatches(workspaceId).stream()
+                    .filter(mismatch -> runId.equals(mismatch.reconciliationRunId()))
+                    .forEach(mismatch -> reindexMismatch(workspaceId, mismatch));
+        } catch (RuntimeException ignored) {
+            // Search indexing can be safely re-driven; reconciliation truth remains in PostgreSQL.
+        }
+    }
+
+    private void reindexMismatch(UUID workspaceId, ReconciliationMismatch mismatch) {
+        try {
+            investigationIndexingService.indexReference(workspaceId, "RECONCILIATION_MISMATCH", mismatch.id());
+            investigationIndexingService.indexReference(workspaceId, mismatch.businessReferenceType(), mismatch.businessReferenceId());
         } catch (RuntimeException ignored) {
             // Search indexing can be safely re-driven; reconciliation truth remains in PostgreSQL.
         }

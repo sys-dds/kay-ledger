@@ -10,6 +10,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.springframework.stereotype.Component;
 
@@ -23,6 +24,8 @@ public class OpenSearchInvestigationClient {
 
     private final InvestigationSearchProperties properties;
     private final ObjectMapper objectMapper;
+    private final AtomicBoolean indexEnsured = new AtomicBoolean(false);
+    private final Object indexEnsureLock = new Object();
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
             .build();
@@ -33,16 +36,27 @@ public class OpenSearchInvestigationClient {
     }
 
     public void ensureIndex() {
+        if (indexEnsured.get()) {
+            return;
+        }
+        synchronized (indexEnsureLock) {
+            if (indexEnsured.get()) {
+                return;
+            }
+            createIndexIfNeeded();
+            indexEnsured.set(true);
+        }
+    }
+
+    private void createIndexIfNeeded() {
         try {
             HttpRequest request = HttpRequest.newBuilder(indexUri())
                     .timeout(Duration.ofSeconds(10))
-                    .PUT(HttpRequest.BodyPublishers.ofString("""
-                            {"settings":{"index":{"number_of_shards":1,"number_of_replicas":0}}}
-                            """))
+                    .PUT(HttpRequest.BodyPublishers.ofString(indexDefinition()))
                     .header("Content-Type", "application/json")
                     .build();
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            if (response.statusCode() >= 400 && response.statusCode() != 400) {
+            if (response.statusCode() >= 400 && !indexAlreadyExists(response)) {
                 throw new IllegalStateException("OpenSearch index creation failed with status " + response.statusCode());
             }
         } catch (Exception exception) {
@@ -66,6 +80,56 @@ public class OpenSearchInvestigationClient {
         } catch (Exception exception) {
             throw new IllegalStateException("Investigation document could not be indexed.", exception);
         }
+    }
+
+    private static boolean indexAlreadyExists(HttpResponse<String> response) {
+        return response.statusCode() == 400 && response.body() != null && response.body().contains("resource_already_exists_exception");
+    }
+
+    private static String indexDefinition() {
+        return """
+                {
+                  "settings": {
+                    "index": {
+                      "number_of_shards": 1,
+                      "number_of_replicas": 0
+                    },
+                    "analysis": {
+                      "normalizer": {
+                        "exact_lowercase": {
+                          "type": "custom",
+                          "filter": ["lowercase"]
+                        }
+                      }
+                    }
+                  },
+                  "mappings": {
+                    "dynamic": false,
+                    "properties": {
+                      "documentId": {"type": "keyword"},
+                      "workspaceId": {"type": "keyword"},
+                      "documentType": {"type": "keyword"},
+                      "referenceType": {"type": "keyword"},
+                      "referenceId": {"type": "keyword"},
+                      "providerProfileId": {"type": "keyword"},
+                      "paymentIntentId": {"type": "keyword"},
+                      "refundId": {"type": "keyword"},
+                      "payoutRequestId": {"type": "keyword"},
+                      "disputeId": {"type": "keyword"},
+                      "subscriptionId": {"type": "keyword"},
+                      "providerEventId": {"type": "keyword"},
+                      "externalReference": {"type": "keyword"},
+                      "businessReferenceType": {"type": "keyword"},
+                      "businessReferenceId": {"type": "keyword"},
+                      "status": {"type": "keyword"},
+                      "currencyCode": {"type": "keyword"},
+                      "amountMinor": {"type": "long"},
+                      "occurredAt": {"type": "date"},
+                      "data": {"type": "object", "enabled": false}
+                    }
+                  }
+                }
+                """;
     }
 
     public List<InvestigationSearchHit> search(Map<String, Object> query) {
