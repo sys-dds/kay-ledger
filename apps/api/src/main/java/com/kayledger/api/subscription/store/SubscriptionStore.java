@@ -261,6 +261,18 @@ public class SubscriptionStore {
                 """, CYCLE_MAPPER, workspaceId, paymentIntentId).stream().findFirst();
     }
 
+    public Optional<SubscriptionCycle> findCycleForPeriod(UUID workspaceId, UUID subscriptionId, Instant cycleStartAt) {
+        return jdbcTemplate.query("""
+                SELECT *
+                FROM subscription_cycles
+                WHERE workspace_id = ?
+                  AND subscription_id = ?
+                  AND cycle_start_at = ?
+                ORDER BY cycle_number
+                LIMIT 1
+                """, CYCLE_MAPPER, workspaceId, subscriptionId, timestamp(cycleStartAt)).stream().findFirst();
+    }
+
     public List<SubscriptionCycle> listCycles(UUID workspaceId, UUID subscriptionId) {
         return jdbcTemplate.query("""
                 SELECT *

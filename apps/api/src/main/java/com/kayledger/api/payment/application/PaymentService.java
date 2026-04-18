@@ -170,12 +170,7 @@ public class PaymentService {
         try {
             PaymentIntent settled = paymentStore.settle(context.workspaceId(), existing.id(), amount);
             PaymentAttempt attempt = paymentStore.createAttempt(context.workspaceId(), settled.id(), "SETTLE", "SUCCEEDED", amount, externalReference(command), null);
-            attachJournal(context.workspaceId(), settled, attempt, "Payment settlement creates payable and fee revenue", List.of(
-                    posting(account(context.workspaceId(), "PLATFORM_CLEARING", settled.currencyCode()), "DEBIT", amount, settled.currencyCode()),
-                    posting(account(context.workspaceId(), "CASH_PLACEHOLDER", settled.currencyCode()), "DEBIT", amount, settled.currencyCode()),
-                    posting(account(context.workspaceId(), "CAPTURED_FUNDS", settled.currencyCode()), "CREDIT", amount, settled.currencyCode()),
-                    posting(account(context.workspaceId(), "SELLER_PAYABLE", settled.currencyCode()), "CREDIT", settled.netAmountMinor(), settled.currencyCode()),
-                    posting(account(context.workspaceId(), "FEE_REVENUE", settled.currencyCode()), "CREDIT", settled.feeAmountMinor(), settled.currencyCode())));
+            attachJournal(context.workspaceId(), settled, attempt, "Payment settlement creates payable and fee revenue", settlementPostings(context.workspaceId(), settled, amount));
             paymentStore.refreshPayableBalance(
                     context.workspaceId(),
                     settled.providerProfileId(),
@@ -461,6 +456,20 @@ public class PaymentService {
 
     private PaymentIntentDetails details(UUID workspaceId, PaymentIntent intent) {
         return new PaymentIntentDetails(intent, paymentStore.listAttempts(workspaceId, intent.id()));
+    }
+
+    private List<PostingCommand> settlementPostings(UUID workspaceId, PaymentIntent settled, long amount) {
+        List<PostingCommand> postings = new ArrayList<>();
+        postings.add(posting(account(workspaceId, "PLATFORM_CLEARING", settled.currencyCode()), "DEBIT", amount, settled.currencyCode()));
+        postings.add(posting(account(workspaceId, "CASH_PLACEHOLDER", settled.currencyCode()), "DEBIT", amount, settled.currencyCode()));
+        postings.add(posting(account(workspaceId, "CAPTURED_FUNDS", settled.currencyCode()), "CREDIT", amount, settled.currencyCode()));
+        if (settled.netAmountMinor() > 0) {
+            postings.add(posting(account(workspaceId, "SELLER_PAYABLE", settled.currencyCode()), "CREDIT", settled.netAmountMinor(), settled.currencyCode()));
+        }
+        if (settled.feeAmountMinor() > 0) {
+            postings.add(posting(account(workspaceId, "FEE_REVENUE", settled.currencyCode()), "CREDIT", settled.feeAmountMinor(), settled.currencyCode()));
+        }
+        return postings;
     }
 
     private void activateSubscriptionCycleIfPresent(UUID workspaceId, PaymentIntent settled) {

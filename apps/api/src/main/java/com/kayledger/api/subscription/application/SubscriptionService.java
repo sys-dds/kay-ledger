@@ -132,20 +132,23 @@ public class SubscriptionService {
         int processed = 0;
         int paymentIntentsCreated = 0;
         for (SubscriptionRecord subscription : subscriptionStore.dueSubscriptions(context.workspaceId(), now)) {
-            int cycleNumber = subscriptionStore.nextCycleNumber(context.workspaceId(), subscription.id());
-            SubscriptionPlan plan = planForCycle(context.workspaceId(), subscription, cycleNumber);
             Instant startAt = subscription.currentPeriodEndAt();
-            Instant endAt = periodEnd(startAt, plan.billingInterval());
-            SubscriptionCycle cycle = subscriptionStore.createCycle(
-                    context.workspaceId(),
-                    subscription.id(),
-                    cycleNumber,
-                    plan,
-                    subscription.customerProfileId(),
-                    startAt,
-                    endAt,
-                    forceFailure ? "FAILED" : "PENDING_PAYMENT",
-                    "renewal-" + cycleNumber);
+            SubscriptionCycle cycle = subscriptionStore.findCycleForPeriod(context.workspaceId(), subscription.id(), startAt)
+                    .orElseGet(() -> {
+                        int cycleNumber = subscriptionStore.nextCycleNumber(context.workspaceId(), subscription.id());
+                        SubscriptionPlan plan = planForCycle(context.workspaceId(), subscription, cycleNumber);
+                        Instant endAt = periodEnd(startAt, plan.billingInterval());
+                        return subscriptionStore.createCycle(
+                                context.workspaceId(),
+                                subscription.id(),
+                                cycleNumber,
+                                plan,
+                                subscription.customerProfileId(),
+                                startAt,
+                                endAt,
+                                forceFailure ? "FAILED" : "PENDING_PAYMENT",
+                                "renewal-" + cycleNumber);
+                    });
             if (forceFailure) {
                 SubscriptionRecord grace = subscriptionStore.moveToGrace(context.workspaceId(), subscription.id(), now.plus(7, ChronoUnit.DAYS));
                 subscriptionStore.upsertEntitlement(context.workspaceId(), grace.id(), grace.customerProfileId(), "GRACE", grace.currentPeriodStartAt(), grace.graceExpiresAt());
@@ -154,7 +157,7 @@ public class SubscriptionService {
                         context.workspaceId(),
                         subscription.id(),
                         cycle.id(),
-                        plan.providerProfileId(),
+                        cycle.providerProfileId(),
                         cycle.currencyCode(),
                         cycle.grossAmountMinor(),
                         cycle.feeAmountMinor(),
