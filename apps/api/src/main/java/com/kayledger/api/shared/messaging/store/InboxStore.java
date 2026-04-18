@@ -86,13 +86,14 @@ public class InboxStore {
 
     public Optional<ParkedMessage> findParked(UUID workspaceId, String consumerName, String dedupeKey) {
         return jdbcTemplate.query("""
-                SELECT topic, partition_id, message_key, event_id, dedupe_key, payload_json::text AS payload_json
+                SELECT workspace_id, topic, partition_id, message_key, event_id, dedupe_key, payload_json::text AS payload_json
                 FROM inbox_messages
                 WHERE workspace_id = ?
                   AND consumer_name = ?
                   AND dedupe_key = ?
                   AND outcome = 'PARKED'
                 """, (rs, rowNum) -> new ParkedMessage(
+                rs.getObject("workspace_id", UUID.class),
                 rs.getString("topic"),
                 rs.getInt("partition_id"),
                 rs.getString("message_key"),
@@ -119,6 +120,6 @@ public class InboxStore {
         return error.length() <= 1000 ? error : error.substring(0, 1000);
     }
 
-    public record ParkedMessage(String topic, int partitionId, String messageKey, UUID eventId, String dedupeKey, String payloadJson) {
+    public record ParkedMessage(UUID workspaceId, String topic, int partitionId, String messageKey, UUID eventId, String dedupeKey, String payloadJson) {
     }
 }

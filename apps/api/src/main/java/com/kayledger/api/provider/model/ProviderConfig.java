@@ -9,6 +9,7 @@ public record ProviderConfig(
         String providerKey,
         String displayName,
         String signingSecret,
+        String callbackToken,
         String status,
         Instant createdAt,
         Instant updatedAt) {

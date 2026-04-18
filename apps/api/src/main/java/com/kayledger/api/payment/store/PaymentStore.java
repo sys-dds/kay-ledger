@@ -735,6 +735,17 @@ public class PaymentStore {
                 """, REFUND_MAPPER, workspaceId, paymentIntentId, bookingId, refundType, amountMinor, payableReductionAmountMinor);
     }
 
+    public RefundRecord markRefundProcessing(UUID workspaceId, UUID refundId) {
+        return jdbcTemplate.queryForObject("""
+                UPDATE refunds
+                SET status = 'PROCESSING'
+                WHERE workspace_id = ?
+                  AND id = ?
+                  AND status = 'FAILED'
+                RETURNING *
+                """, REFUND_MAPPER, workspaceId, refundId);
+    }
+
     public void attachRefundJournal(UUID workspaceId, UUID refundId, UUID journalEntryId) {
         jdbcTemplate.update("""
                 UPDATE refunds
@@ -783,7 +794,7 @@ public class PaymentStore {
                 SET status = 'FAILED'
                 WHERE workspace_id = ?
                   AND id = ?
-                  AND status = 'SUCCEEDED'
+                  AND status IN ('REQUESTED', 'PROCESSING', 'SUCCEEDED')
                 RETURNING *
                 """, REFUND_MAPPER, workspaceId, refundId);
     }
@@ -794,7 +805,7 @@ public class PaymentStore {
                 SET status = 'SUCCEEDED'
                 WHERE workspace_id = ?
                   AND id = ?
-                  AND status = 'FAILED'
+                  AND status IN ('REQUESTED', 'PROCESSING', 'FAILED')
                 RETURNING *
                 """, REFUND_MAPPER, workspaceId, refundId);
     }

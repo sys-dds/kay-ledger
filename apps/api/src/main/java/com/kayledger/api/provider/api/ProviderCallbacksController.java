@@ -15,7 +15,6 @@ import com.kayledger.api.access.application.AccessContext;
 import com.kayledger.api.access.application.AccessContextResolver;
 import com.kayledger.api.provider.application.ProviderCallbackService;
 import com.kayledger.api.provider.application.ProviderCallbackService.CreateProviderConfigCommand;
-import com.kayledger.api.provider.application.ProviderCallbackService.ProviderCallbackCommand;
 import com.kayledger.api.provider.model.ProviderCallback;
 import com.kayledger.api.provider.model.ProviderConfig;
 import com.kayledger.api.shared.idempotency.IdempotencyService;
@@ -54,13 +53,12 @@ public class ProviderCallbacksController {
                 () -> providerCallbackService.createConfig(context, request));
     }
 
-    @PostMapping("/{providerKey}/callbacks")
+    @PostMapping("/callbacks/{callbackToken}")
     ProviderCallback ingest(
-            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
             @RequestHeader(value = "X-Provider-Signature", required = false) String signature,
-            @PathVariable String providerKey,
-            @RequestBody ProviderCallbackCommand request) {
-        return providerCallbackService.ingestExternal(workspaceSlug, providerKey, signature, request);
+            @PathVariable String callbackToken,
+            @RequestBody byte[] rawPayload) {
+        return providerCallbackService.ingestExternal(callbackToken, signature, rawPayload);
     }
 
     @GetMapping("/callbacks")

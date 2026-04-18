@@ -84,6 +84,7 @@ public class ReconciliationService {
                         "MANUAL_REVIEW");
             }
         }
+        reconciliationStore.createEntityCentricMismatches(context.workspaceId(), run.id());
         return reconciliationStore.completeRun(context.workspaceId(), run.id());
     }
 

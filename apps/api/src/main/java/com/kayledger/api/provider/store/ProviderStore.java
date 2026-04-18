@@ -24,6 +24,7 @@ public class ProviderStore {
             rs.getString("provider_key"),
             rs.getString("display_name"),
             rs.getString("signing_secret"),
+            rs.getString("callback_token"),
             rs.getString("status"),
             instant(rs, "created_at"),
             instant(rs, "updated_at"));
@@ -55,16 +56,17 @@ public class ProviderStore {
         this.jdbcTemplate = jdbcTemplate;
     }
 
-    public ProviderConfig createConfig(UUID workspaceId, String providerKey, String displayName, String signingSecret) {
+    public ProviderConfig createConfig(UUID workspaceId, String providerKey, String displayName, String signingSecret, String callbackToken) {
         return jdbcTemplate.queryForObject("""
-                INSERT INTO provider_configs (workspace_id, provider_key, display_name, signing_secret)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO provider_configs (workspace_id, provider_key, display_name, signing_secret, callback_token)
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT (workspace_id, provider_key) DO UPDATE
                 SET display_name = EXCLUDED.display_name,
                     signing_secret = EXCLUDED.signing_secret,
+                    callback_token = EXCLUDED.callback_token,
                     status = 'ACTIVE'
                 RETURNING *
-                """, CONFIG_MAPPER, workspaceId, providerKey, displayName, signingSecret);
+                """, CONFIG_MAPPER, workspaceId, providerKey, displayName, signingSecret, callbackToken);
     }
 
     public Optional<ProviderConfig> findConfig(UUID workspaceId, String providerKey) {
@@ -77,15 +79,23 @@ public class ProviderStore {
                 """, CONFIG_MAPPER, workspaceId, providerKey).stream().findFirst();
     }
 
-    public Optional<ProviderConfig> findConfigByWorkspaceSlug(String workspaceSlug, String providerKey) {
+    public Optional<ProviderConfig> findConfigByCallbackToken(String callbackToken) {
         return jdbcTemplate.query("""
-                SELECT pc.*
-                FROM provider_configs pc
-                JOIN workspaces w ON w.id = pc.workspace_id
-                WHERE w.slug = ?
-                  AND pc.provider_key = ?
-                  AND pc.status = 'ACTIVE'
-                """, CONFIG_MAPPER, workspaceSlug, providerKey).stream().findFirst();
+                SELECT *
+                FROM provider_configs
+                WHERE callback_token = ?
+                  AND status = 'ACTIVE'
+                """, CONFIG_MAPPER, callbackToken).stream().findFirst();
+    }
+
+    public Optional<ProviderCallback> findCallbackByDedupe(UUID workspaceId, String providerKey, String dedupeKey) {
+        return jdbcTemplate.query("""
+                SELECT *
+                FROM provider_callbacks
+                WHERE workspace_id = ?
+                  AND provider_key = ?
+                  AND dedupe_key = ?
+                """, CALLBACK_MAPPER, workspaceId, providerKey, dedupeKey).stream().findFirst();
     }
 
     public List<ProviderCallback> listCallbacks(UUID workspaceId) {
@@ -97,7 +107,7 @@ public class ProviderStore {
                 """, CALLBACK_MAPPER, workspaceId);
     }
 
-    public ProviderCallback insertCallback(
+    public Optional<ProviderCallback> insertCallback(
             UUID workspaceId,
             UUID providerConfigId,
             String providerKey,
@@ -110,21 +120,17 @@ public class ProviderStore {
             String signatureHeader,
             boolean signatureVerified,
             String dedupeKey) {
-        return jdbcTemplate.queryForObject("""
+        return jdbcTemplate.query("""
                 INSERT INTO provider_callbacks (
                     workspace_id, provider_config_id, provider_key, provider_event_id, provider_sequence,
                     callback_type, business_reference_type, business_reference_id, payload_json,
                     signature_header, signature_verified, dedupe_key
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?)
-                ON CONFLICT (workspace_id, provider_key, dedupe_key) DO UPDATE
-                SET processing_status = CASE
-                        WHEN provider_callbacks.processing_status = 'RECEIVED' THEN 'DUPLICATE'
-                        ELSE provider_callbacks.processing_status
-                    END
+                ON CONFLICT (workspace_id, provider_key, dedupe_key) DO NOTHING
                 RETURNING *
                 """, CALLBACK_MAPPER, workspaceId, providerConfigId, providerKey, providerEventId, providerSequence,
-                callbackType, businessReferenceType, businessReferenceId, payloadJson, signatureHeader, signatureVerified, dedupeKey);
+                callbackType, businessReferenceType, businessReferenceId, payloadJson, signatureHeader, signatureVerified, dedupeKey).stream().findFirst();
     }
 
     public Long latestAppliedSequence(UUID workspaceId, String referenceType, UUID referenceId) {

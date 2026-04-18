@@ -42,7 +42,7 @@ public class ProjectionConsumer {
                 CONSUMER_NAME,
                 record.value(),
                 () -> {
-                    apply(event);
+                    apply(event, event.workspaceId());
                     return true;
                 });
     }
@@ -55,7 +55,7 @@ public class ProjectionConsumer {
         inboxService.replayParked(workspaceId, CONSUMER_NAME, dedupeKey);
         DomainEventPayload event = payload(parked.payloadJson());
         return inboxService.processOnce(
-                event.workspaceId(),
+                parked.workspaceId(),
                 parked.topic(),
                 parked.partitionId(),
                 parked.messageKey(),
@@ -64,19 +64,23 @@ public class ProjectionConsumer {
                 CONSUMER_NAME,
                 parked.payloadJson(),
                 () -> {
-                    apply(event);
+                    apply(event, parked.workspaceId());
                     return true;
                 });
     }
 
     public void apply(DomainEventPayload event) {
+        apply(event, event.workspaceId());
+    }
+
+    private void apply(DomainEventPayload event, UUID workspaceId) {
         if (event.eventType().startsWith("payment.")) {
-            projectionStore.upsertPayment(event.workspaceId(), event.data());
+            projectionStore.upsertPayment(workspaceId, event.data());
         }
         if (event.eventType().startsWith("subscription.")) {
             UUID subscriptionId = subscriptionId(event);
             if (subscriptionId != null) {
-                projectionStore.upsertSubscription(event.workspaceId(), subscriptionId, event.data());
+                projectionStore.upsertSubscription(workspaceId, subscriptionId, event.data());
             }
         }
     }
