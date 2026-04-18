@@ -13,6 +13,7 @@ import com.kayledger.api.access.application.AccessContext;
 import com.kayledger.api.access.application.AccessPolicy;
 import com.kayledger.api.access.model.AccessScope;
 import com.kayledger.api.access.model.WorkspaceRole;
+import com.kayledger.api.investigation.application.InvestigationIndexingService;
 import com.kayledger.api.payment.model.PaymentIntent;
 import com.kayledger.api.payment.model.PayoutRequest;
 import com.kayledger.api.payment.model.RefundRecord;
@@ -23,6 +24,7 @@ import com.kayledger.api.provider.store.ProviderStore;
 import com.kayledger.api.reconciliation.model.ReconciliationMismatch;
 import com.kayledger.api.reconciliation.model.ReconciliationRun;
 import com.kayledger.api.reconciliation.store.ReconciliationStore;
+import com.kayledger.api.risk.application.RiskService;
 import com.kayledger.api.shared.api.BadRequestException;
 import com.kayledger.api.shared.api.NotFoundException;
 
@@ -35,14 +37,18 @@ public class ReconciliationService {
     private final PaymentService paymentService;
     private final AccessPolicy accessPolicy;
     private final ObjectMapper objectMapper;
+    private final InvestigationIndexingService investigationIndexingService;
+    private final RiskService riskService;
 
-    public ReconciliationService(ReconciliationStore reconciliationStore, ProviderStore providerStore, PaymentStore paymentStore, PaymentService paymentService, AccessPolicy accessPolicy, ObjectMapper objectMapper) {
+    public ReconciliationService(ReconciliationStore reconciliationStore, ProviderStore providerStore, PaymentStore paymentStore, PaymentService paymentService, AccessPolicy accessPolicy, ObjectMapper objectMapper, InvestigationIndexingService investigationIndexingService, RiskService riskService) {
         this.reconciliationStore = reconciliationStore;
         this.providerStore = providerStore;
         this.paymentStore = paymentStore;
         this.paymentService = paymentService;
         this.accessPolicy = accessPolicy;
         this.objectMapper = objectMapper;
+        this.investigationIndexingService = investigationIndexingService;
+        this.riskService = riskService;
     }
 
     @Transactional
@@ -85,7 +91,10 @@ public class ReconciliationService {
             }
         }
         reconciliationStore.createEntityCentricMismatches(context.workspaceId(), run.id());
-        return reconciliationStore.completeRun(context.workspaceId(), run.id());
+        riskService.evaluateMismatchBurst(context.workspaceId());
+        ReconciliationRun completed = reconciliationStore.completeRun(context.workspaceId(), run.id());
+        reindex(context.workspaceId());
+        return completed;
     }
 
     public List<ReconciliationRun> listRuns(AccessContext context) {
@@ -96,6 +105,18 @@ public class ReconciliationService {
     public List<ReconciliationMismatch> listMismatches(AccessContext context) {
         requireRead(context);
         return reconciliationStore.listMismatches(context.workspaceId());
+    }
+
+    public Map<String, Object> investigationReference(AccessContext context, UUID mismatchId) {
+        requireRead(context);
+        ReconciliationMismatch mismatch = reconciliationStore.findMismatch(context.workspaceId(), mismatchId)
+                .orElseThrow(() -> new NotFoundException("Reconciliation mismatch was not found."));
+        return Map.of(
+                "referenceType", "RECONCILIATION_MISMATCH",
+                "referenceId", mismatch.id(),
+                "businessReferenceType", mismatch.businessReferenceType(),
+                "businessReferenceId", mismatch.businessReferenceId(),
+                "driftCategory", mismatch.driftCategory());
     }
 
     @Transactional
@@ -113,7 +134,17 @@ public class ReconciliationService {
             throw new BadRequestException("Mismatch does not have a safe automatic repair action.");
         }
         applyProviderState(context.workspaceId(), mismatch);
-        return reconciliationStore.markApplied(context.workspaceId(), mismatch.id(), command == null ? "Applied provider state." : command.note());
+        ReconciliationMismatch applied = reconciliationStore.markApplied(context.workspaceId(), mismatch.id(), command == null ? "Applied provider state." : command.note());
+        reindex(context.workspaceId());
+        return applied;
+    }
+
+    private void reindex(UUID workspaceId) {
+        try {
+            investigationIndexingService.reindexWorkspace(workspaceId);
+        } catch (RuntimeException ignored) {
+            // Search indexing can be safely re-driven; reconciliation truth remains in PostgreSQL.
+        }
     }
 
     private void applyProviderState(UUID workspaceId, ReconciliationMismatch mismatch) {

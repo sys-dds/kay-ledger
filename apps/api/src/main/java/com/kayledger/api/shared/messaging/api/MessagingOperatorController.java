@@ -110,6 +110,23 @@ public class MessagingOperatorController {
         return inboxService.listParked(context.workspaceId());
     }
 
+    @GetMapping("/inbox/parked/{consumerName}/{dedupeKey}")
+    Map<String, Object> parkedInboxDetail(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @PathVariable String consumerName,
+            @PathVariable String dedupeKey) {
+        AccessContext context = operatorContext(workspaceSlug, actorKey);
+        var parked = inboxService.parkedMessage(context.workspaceId(), consumerName, dedupeKey);
+        return Map.of(
+                "workspaceId", parked.workspaceId(),
+                "consumerName", consumerName,
+                "dedupeKey", parked.dedupeKey(),
+                "topic", parked.topic(),
+                "eventId", parked.eventId(),
+                "hasPayload", parked.payloadJson() != null && !parked.payloadJson().isBlank());
+    }
+
     @PostMapping("/inbox/parked/{consumerName}/{dedupeKey}/replay")
     ResponseEntity<Object> replayInbox(
             @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,

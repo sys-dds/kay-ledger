@@ -98,6 +98,15 @@ public class ProviderStore {
                 """, CALLBACK_MAPPER, workspaceId, providerKey, dedupeKey).stream().findFirst();
     }
 
+    public Optional<ProviderCallback> findCallback(UUID workspaceId, UUID callbackId) {
+        return jdbcTemplate.query("""
+                SELECT *
+                FROM provider_callbacks
+                WHERE workspace_id = ?
+                  AND id = ?
+                """, CALLBACK_MAPPER, workspaceId, callbackId).stream().findFirst();
+    }
+
     public List<ProviderCallback> listCallbacks(UUID workspaceId) {
         return jdbcTemplate.query("""
                 SELECT *

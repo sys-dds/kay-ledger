@@ -9,6 +9,7 @@ import org.springframework.stereotype.Component;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.kayledger.api.investigation.application.InvestigationIndexingService;
 import com.kayledger.api.shared.events.DomainEventPayload;
 import com.kayledger.api.shared.messaging.store.ProjectionStore;
 
@@ -20,11 +21,13 @@ public class ProjectionConsumer {
     private final InboxService inboxService;
     private final ProjectionStore projectionStore;
     private final ObjectMapper objectMapper;
+    private final InvestigationIndexingService investigationIndexingService;
 
-    public ProjectionConsumer(InboxService inboxService, ProjectionStore projectionStore, ObjectMapper objectMapper) {
+    public ProjectionConsumer(InboxService inboxService, ProjectionStore projectionStore, ObjectMapper objectMapper, InvestigationIndexingService investigationIndexingService) {
         this.inboxService = inboxService;
         this.projectionStore = projectionStore;
         this.objectMapper = objectMapper;
+        this.investigationIndexingService = investigationIndexingService;
     }
 
     @KafkaListener(
@@ -43,6 +46,7 @@ public class ProjectionConsumer {
                 record.value(),
                 () -> {
                     apply(event, event.workspaceId());
+                    reindex(event.workspaceId());
                     return true;
                 });
     }
@@ -65,6 +69,7 @@ public class ProjectionConsumer {
                 parked.payloadJson(),
                 () -> {
                     apply(event, parked.workspaceId());
+                    reindex(parked.workspaceId());
                     return true;
                 });
     }
@@ -82,6 +87,14 @@ public class ProjectionConsumer {
             if (subscriptionId != null) {
                 projectionStore.upsertSubscription(workspaceId, subscriptionId, event.data());
             }
+        }
+    }
+
+    private void reindex(UUID workspaceId) {
+        try {
+            investigationIndexingService.reindexWorkspace(workspaceId);
+        } catch (RuntimeException ignored) {
+            // Search indexing is replay-safe and re-driveable; projection processing remains source-of-truth first.
         }
     }
 

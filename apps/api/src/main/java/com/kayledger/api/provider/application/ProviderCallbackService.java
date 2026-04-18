@@ -21,6 +21,7 @@ import com.kayledger.api.access.application.AccessContext;
 import com.kayledger.api.access.application.AccessPolicy;
 import com.kayledger.api.access.model.AccessScope;
 import com.kayledger.api.access.model.WorkspaceRole;
+import com.kayledger.api.investigation.application.InvestigationIndexingService;
 import com.kayledger.api.payment.application.PaymentService;
 import com.kayledger.api.provider.model.ProviderCallback;
 import com.kayledger.api.provider.model.ProviderConfig;
@@ -47,12 +48,14 @@ public class ProviderCallbackService {
     private final PaymentService paymentService;
     private final AccessPolicy accessPolicy;
     private final ObjectMapper objectMapper;
+    private final InvestigationIndexingService investigationIndexingService;
 
-    public ProviderCallbackService(ProviderStore providerStore, PaymentService paymentService, AccessPolicy accessPolicy, ObjectMapper objectMapper) {
+    public ProviderCallbackService(ProviderStore providerStore, PaymentService paymentService, AccessPolicy accessPolicy, ObjectMapper objectMapper, InvestigationIndexingService investigationIndexingService) {
         this.providerStore = providerStore;
         this.paymentService = paymentService;
         this.accessPolicy = accessPolicy;
         this.objectMapper = objectMapper;
+        this.investigationIndexingService = investigationIndexingService;
     }
 
     @Transactional
@@ -71,7 +74,18 @@ public class ProviderCallbackService {
         return providerStore.listCallbacks(context.workspaceId());
     }
 
-    @Transactional(noRollbackFor = ProviderCallbackApplyException.class)
+    public Map<String, Object> investigationReference(AccessContext context, UUID callbackId) {
+        requireProviderRead(context);
+        ProviderCallback callback = providerStore.findCallback(context.workspaceId(), callbackId)
+                .orElseThrow(() -> new NotFoundException("Provider callback was not found."));
+        return Map.of(
+                "referenceType", "PROVIDER_CALLBACK",
+                "referenceId", callback.id(),
+                "providerEventId", callback.providerEventId(),
+                "businessReferenceType", callback.businessReferenceType(),
+                "businessReferenceId", callback.businessReferenceId());
+    }
+
     public ProviderCallback ingestExternal(String callbackToken, String signatureHeader, byte[] rawPayload) {
         ProviderConfig config = providerStore.findConfigByCallbackToken(requireText(callbackToken, "callbackToken"))
                 .orElseThrow(() -> new NotFoundException("Provider config was not found."));
@@ -117,10 +131,21 @@ public class ProviderCallbackService {
         }
         try {
             applyTruth(workspaceId, callbackType, referenceId, amount(command), command.providerEventId());
-            return providerStore.markApplied(workspaceId, callback.id());
+            ProviderCallback applied = providerStore.markApplied(workspaceId, callback.id());
+            reindex(workspaceId);
+            return applied;
         } catch (RuntimeException exception) {
             providerStore.markFailed(workspaceId, callback.id(), exception.getMessage());
+            reindex(workspaceId);
             throw new ProviderCallbackApplyException("Provider callback application failed; retry is required.", exception);
+        }
+    }
+
+    private void reindex(UUID workspaceId) {
+        try {
+            investigationIndexingService.reindexWorkspace(workspaceId);
+        } catch (RuntimeException ignored) {
+            // Operator search is an index target; callback truth stays durable in PostgreSQL.
         }
     }
 

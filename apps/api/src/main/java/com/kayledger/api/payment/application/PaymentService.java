@@ -34,6 +34,7 @@ import com.kayledger.api.payment.model.PayoutRequest;
 import com.kayledger.api.payment.model.ProviderBalanceSummary;
 import com.kayledger.api.payment.model.RefundRecord;
 import com.kayledger.api.payment.store.PaymentStore;
+import com.kayledger.api.risk.application.RiskService;
 import com.kayledger.api.shared.api.BadRequestException;
 import com.kayledger.api.shared.api.NotFoundException;
 import com.kayledger.api.shared.messaging.application.OutboxService;
@@ -58,14 +59,16 @@ public class PaymentService {
     private final FinanceService financeService;
     private final SubscriptionStore subscriptionStore;
     private final OutboxService outboxService;
+    private final RiskService riskService;
 
-    public PaymentService(PaymentStore paymentStore, BookingStore bookingStore, AccessPolicy accessPolicy, FinanceService financeService, SubscriptionStore subscriptionStore, OutboxService outboxService) {
+    public PaymentService(PaymentStore paymentStore, BookingStore bookingStore, AccessPolicy accessPolicy, FinanceService financeService, SubscriptionStore subscriptionStore, OutboxService outboxService, RiskService riskService) {
         this.paymentStore = paymentStore;
         this.bookingStore = bookingStore;
         this.accessPolicy = accessPolicy;
         this.financeService = financeService;
         this.subscriptionStore = subscriptionStore;
         this.outboxService = outboxService;
+        this.riskService = riskService;
     }
 
     @Transactional
@@ -261,6 +264,7 @@ public class PaymentService {
             throw new BadRequestException("Payout request body is required.");
         }
         UUID providerProfileId = requireId(command.providerProfileId(), "providerProfileId");
+        riskService.requireNotBlocked(context.workspaceId(), "PROVIDER_PROFILE", providerProfileId);
         String currencyCode = requireCurrency(command.currencyCode());
         long amountMinor = requirePositive(command.amountMinor(), "amountMinor");
         ProviderBalanceSummary summary = paymentStore.balanceSummary(context.workspaceId(), providerProfileId, currencyCode);
@@ -268,6 +272,7 @@ public class PaymentService {
             throw new BadRequestException("Payout cannot exceed available payable balance.");
         }
         PayoutRequest payout = paymentStore.createPayoutRequest(context.workspaceId(), providerProfileId, currencyCode, amountMinor);
+        riskService.evaluatePayoutRequest(context.workspaceId(), payout.id(), payout.requestedAmountMinor());
         return attachPayoutRequestJournal(context.workspaceId(), payout, "Payout request reserves seller payable for payout clearing", List.of(
                 posting(account(context.workspaceId(), "SELLER_PAYABLE", payout.currencyCode()), "DEBIT", payout.requestedAmountMinor(), payout.currencyCode()),
                 posting(account(context.workspaceId(), "PAYOUT_CLEARING", payout.currencyCode()), "CREDIT", payout.requestedAmountMinor(), payout.currencyCode())));
@@ -419,6 +424,7 @@ public class PaymentService {
         long payableReduction = Math.min(amountMinor, remainingPayableExposure);
         RefundRecord refund = paymentStore.createRefund(context.workspaceId(), intent.id(), intent.bookingId(), refundType, amountMinor, payableReduction);
         paymentStore.createRefundAttempt(context.workspaceId(), refund.id(), "PROCESSING", null, externalReference(command));
+        riskService.evaluateRefundVelocity(context.workspaceId(), intent.providerProfileId());
         outboxService.append(context.workspaceId(), "REFUND", refund.id(), "refund.requested", "refund.requested:" + refund.id(), refundData(refund, intent));
         return refund;
     }
@@ -520,6 +526,7 @@ public class PaymentService {
             PaymentIntent failed = paymentStore.fail(workspaceId, existing.id());
             paymentStore.createAttempt(workspaceId, failed.id(), "AUTHORIZE", "FAILED", 0, externalReference, null);
             failSubscriptionCycleIfPresent(workspaceId, failed);
+            riskService.evaluatePaymentFailure(workspaceId, failed.providerProfileId());
             appendPaymentEvent(workspaceId, failed, "payment.failed", transitionSource);
             return failed;
         } catch (EmptyResultDataAccessException exception) {
@@ -643,6 +650,7 @@ public class PaymentService {
         RefundRecord succeeded = paymentStore.markRefundSucceeded(workspaceId, refund.id());
         paymentStore.createRefundAttempt(workspaceId, succeeded.id(), "SUCCEEDED", null, externalReference);
         attachRefundJournal(workspaceId, succeeded, intent, "Provider truth confirms refund payable and fee effects", refundPostings(workspaceId, intent, succeeded.refundType(), succeeded.amountMinor(), succeeded.payableReductionAmountMinor()));
+        riskService.evaluateRefundVelocity(workspaceId, intent.providerProfileId());
         outboxService.append(workspaceId, "REFUND", succeeded.id(), "refund.provider_succeeded", "refund.provider_succeeded:" + succeeded.id(), refundData(succeeded, intent));
         return succeeded;
     }

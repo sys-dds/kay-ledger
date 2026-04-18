@@ -1,6 +1,8 @@
 package com.kayledger.api.provider.api;
 
 import java.util.List;
+import java.util.Map;
+import java.util.UUID;
 
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -67,5 +69,14 @@ public class ProviderCallbacksController {
             @RequestHeader(value = "X-Actor-Key", required = false) String actorKey) {
         AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
         return providerCallbackService.listCallbacks(context);
+    }
+
+    @GetMapping("/callbacks/{callbackId}/investigation")
+    Map<String, Object> callbackInvestigation(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @PathVariable UUID callbackId) {
+        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
+        return providerCallbackService.investigationReference(context, callbackId);
     }
 }

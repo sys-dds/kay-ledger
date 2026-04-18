@@ -26,3 +26,14 @@ kay-ledger:
       batch-size: 10
       max-attempts: 2
       backoff-seconds: 1
+  search:
+    opensearch:
+      endpoint: http://localhost:9200
+      investigation-index: kay-ledger-test-investigation
+  object-storage:
+    endpoint: http://localhost:9000
+    region: us-east-1
+    bucket: kay-ledger-test-exports
+    access-key: kay_ledger
+    secret-key: kay_ledger_secret
+    path-style-access-enabled: true
