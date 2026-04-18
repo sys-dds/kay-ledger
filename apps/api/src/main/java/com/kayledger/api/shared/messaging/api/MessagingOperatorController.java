@@ -20,7 +20,9 @@ import com.kayledger.api.shared.idempotency.IdempotencyService;
 import com.kayledger.api.shared.messaging.application.InboxService;
 import com.kayledger.api.shared.messaging.application.OutboxRelayService;
 import com.kayledger.api.shared.messaging.application.OutboxService;
+import com.kayledger.api.shared.messaging.application.ProjectionConsumer;
 import com.kayledger.api.shared.messaging.model.OutboxEvent;
+import com.kayledger.api.shared.api.BadRequestException;
 
 @RestController
 @RequestMapping("/api/messaging")
@@ -31,6 +33,7 @@ public class MessagingOperatorController {
     private final OutboxService outboxService;
     private final OutboxRelayService outboxRelayService;
     private final InboxService inboxService;
+    private final ProjectionConsumer projectionConsumer;
     private final IdempotencyService idempotencyService;
 
     public MessagingOperatorController(
@@ -39,12 +42,14 @@ public class MessagingOperatorController {
             OutboxService outboxService,
             OutboxRelayService outboxRelayService,
             InboxService inboxService,
+            ProjectionConsumer projectionConsumer,
             IdempotencyService idempotencyService) {
         this.accessContextResolver = accessContextResolver;
         this.accessPolicy = accessPolicy;
         this.outboxService = outboxService;
         this.outboxRelayService = outboxRelayService;
         this.inboxService = inboxService;
+        this.projectionConsumer = projectionConsumer;
         this.idempotencyService = idempotencyService;
     }
 
@@ -69,7 +74,7 @@ public class MessagingOperatorController {
                 context.actorId(),
                 "POST /api/messaging/outbox/relay",
                 IdempotencyService.fingerprint(workspaceSlug, actorKey, Map.of("relay", true)),
-                outboxRelayService::relayDue);
+                () -> outboxRelayService.relayDue(context.workspaceId()));
     }
 
     @GetMapping("/outbox/parked")
@@ -120,7 +125,12 @@ public class MessagingOperatorController {
                 context.actorId(),
                 "POST /api/messaging/inbox/parked/{consumerName}/{dedupeKey}/replay",
                 IdempotencyService.fingerprint(workspaceSlug, actorKey, consumerName, dedupeKey),
-                () -> Map.of("replayed", inboxService.replayParked(context.workspaceId(), consumerName, dedupeKey)));
+                () -> {
+                    if (!"projection-consumer".equals(consumerName)) {
+                        throw new BadRequestException("Replay is only supported for projection-consumer messages.");
+                    }
+                    return Map.of("replayed", projectionConsumer.replayParked(context.workspaceId(), dedupeKey));
+                });
     }
 
     private AccessContext operatorContext(String workspaceSlug, String actorKey) {

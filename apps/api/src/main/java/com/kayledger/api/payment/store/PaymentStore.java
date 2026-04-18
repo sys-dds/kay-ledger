@@ -269,6 +269,19 @@ public class PaymentStore {
                 """, INTENT_MAPPER, amountMinor, workspaceId, paymentIntentId, amountMinor);
     }
 
+    public PaymentIntent authorizeRequiredAction(UUID workspaceId, UUID paymentIntentId, long amountMinor) {
+        return jdbcTemplate.queryForObject("""
+                UPDATE payment_intents
+                SET status = 'AUTHORIZED',
+                    authorized_amount_minor = ?
+                WHERE workspace_id = ?
+                  AND id = ?
+                  AND status = 'REQUIRES_ACTION'
+                  AND ? <= gross_amount_minor
+                RETURNING *
+                """, INTENT_MAPPER, amountMinor, workspaceId, paymentIntentId, amountMinor);
+    }
+
     public PaymentIntent capture(UUID workspaceId, UUID paymentIntentId, long amountMinor) {
         return jdbcTemplate.queryForObject("""
                 UPDATE payment_intents
@@ -326,51 +339,6 @@ public class PaymentStore {
                   AND status IN ('CREATED', 'REQUIRES_ACTION')
                 RETURNING *
                 """, INTENT_MAPPER, workspaceId, paymentIntentId);
-    }
-
-    public PaymentIntent applyProviderPaymentStatus(UUID workspaceId, UUID paymentIntentId, String status, long amountMinor) {
-        return jdbcTemplate.queryForObject("""
-                UPDATE payment_intents
-                SET status = ?,
-                    authorized_amount_minor = CASE WHEN ? = 'AUTHORIZED' THEN GREATEST(authorized_amount_minor, ?) ELSE authorized_amount_minor END,
-                    captured_amount_minor = CASE WHEN ? = 'CAPTURED' THEN GREATEST(captured_amount_minor, ?) ELSE captured_amount_minor END,
-                    settled_amount_minor = CASE WHEN ? = 'SETTLED' THEN GREATEST(settled_amount_minor, ?) ELSE settled_amount_minor END
-                WHERE workspace_id = ?
-                  AND id = ?
-                  AND (
-                    (status = 'CREATED' AND ? IN ('AUTHORIZED', 'FAILED'))
-                    OR (status = 'REQUIRES_ACTION' AND ? IN ('AUTHORIZED', 'FAILED'))
-                    OR (status = 'AUTHORIZED' AND ? IN ('CAPTURED', 'CANCELLED'))
-                    OR (status = 'CAPTURED' AND ? = 'SETTLED')
-                    OR status = ?
-                  )
-                RETURNING *
-                """, INTENT_MAPPER,
-                status, status, amountMinor, status, amountMinor, status, amountMinor,
-                workspaceId, paymentIntentId, status, status, status, status, status);
-    }
-
-    public PayoutRequest applyProviderPayoutStatus(UUID workspaceId, UUID payoutRequestId, String status, String failureReason) {
-        return jdbcTemplate.queryForObject("""
-                UPDATE payout_requests
-                SET status = ?,
-                    failure_reason = ?
-                WHERE workspace_id = ?
-                  AND id = ?
-                  AND status IN ('REQUESTED', 'PROCESSING', 'FAILED')
-                RETURNING *
-                """, PAYOUT_MAPPER, status, failureReason, workspaceId, payoutRequestId);
-    }
-
-    public RefundRecord applyProviderRefundStatus(UUID workspaceId, UUID refundId, String status) {
-        return jdbcTemplate.queryForObject("""
-                UPDATE refunds
-                SET status = ?
-                WHERE workspace_id = ?
-                  AND id = ?
-                  AND status IN ('SUCCEEDED', 'FAILED')
-                RETURNING *
-                """, REFUND_MAPPER, status, workspaceId, refundId);
     }
 
     public PaymentAttempt createAttempt(

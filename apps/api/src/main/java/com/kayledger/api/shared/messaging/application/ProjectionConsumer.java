@@ -40,6 +40,29 @@ public class ProjectionConsumer {
                 event.eventId(),
                 event.dedupeKey(),
                 CONSUMER_NAME,
+                record.value(),
+                () -> {
+                    apply(event);
+                    return true;
+                });
+    }
+
+    public boolean replayParked(UUID workspaceId, String dedupeKey) {
+        var parked = inboxService.parkedMessage(workspaceId, CONSUMER_NAME, dedupeKey);
+        if (parked.payloadJson() == null || parked.payloadJson().isBlank()) {
+            throw new IllegalStateException("Parked inbox message has no payload to replay.");
+        }
+        inboxService.replayParked(workspaceId, CONSUMER_NAME, dedupeKey);
+        DomainEventPayload event = payload(parked.payloadJson());
+        return inboxService.processOnce(
+                event.workspaceId(),
+                parked.topic(),
+                parked.partitionId(),
+                parked.messageKey(),
+                parked.eventId(),
+                parked.dedupeKey(),
+                CONSUMER_NAME,
+                parked.payloadJson(),
                 () -> {
                     apply(event);
                     return true;

@@ -114,18 +114,19 @@ class Kay009HardeningKay010Kay011ProviderReconciliationIntegrationTest {
         String firstCycleId = (String) ((Map<?, ?>) getList("/api/subscriptions/" + subscriptionId + "/cycles", ownerHeaders, HttpStatus.OK).get(0)).get("id");
         String firstPaymentId = paymentIntentIdForCycle(ownerHeaders, firstCycleId);
 
-        assertThatThrownBy(() -> inboxService.processOnce(workspaceId("k10-alpha"), "topic", 0, "key", UUID.randomUUID(), "consumer-failure-1", "projection-consumer", () -> {
+        String replayPayload = jdbcTemplate.queryForObject("SELECT payload_json::text FROM outbox_events WHERE workspace_id = ? ORDER BY created_at DESC LIMIT 1", String.class, workspaceId("k10-alpha"));
+        assertThatThrownBy(() -> inboxService.processOnce(workspaceId("k10-alpha"), "topic", 0, "key", UUID.randomUUID(), "consumer-failure-1", "projection-consumer", replayPayload, () -> {
             throw new IllegalStateException("forced projection failure");
         })).isInstanceOf(IllegalStateException.class);
         assertThat(inboxOutcome("consumer-failure-1")).isEqualTo("FAILED");
         jdbcTemplate.update("UPDATE inbox_messages SET available_at = now() WHERE dedupe_key = 'consumer-failure-1'");
-        inboxService.processOnce(workspaceId("k10-alpha"), "topic", 0, "key", UUID.randomUUID(), "consumer-failure-1", "projection-consumer", () -> {
+        inboxService.processOnce(workspaceId("k10-alpha"), "topic", 0, "key", UUID.randomUUID(), "consumer-failure-1", "projection-consumer", replayPayload, () -> {
             throw new IllegalStateException("forced projection failure again");
         });
         assertThat(inboxOutcome("consumer-failure-1")).isEqualTo("PARKED");
         assertThat(getList("/api/messaging/inbox/parked", ownerHeaders, HttpStatus.OK)).isNotEmpty();
         post("/api/messaging/inbox/parked/projection-consumer/consumer-failure-1/replay", workspaceHeaders("k10-inbox-replay", "k10-alpha", "k10-owner"), Map.of());
-        assertThat(inboxOutcome("consumer-failure-1")).isEqualTo("FAILED");
+        assertThat(inboxOutcome("consumer-failure-1")).isEqualTo("PROCESSED");
 
         String payload = jdbcTemplate.queryForObject("SELECT payload_json::text FROM outbox_events WHERE workspace_id = ? ORDER BY created_at DESC LIMIT 1", String.class, workspaceId("k10-alpha"));
         projectionConsumer.consume(new ConsumerRecord<>("kay-ledger.kay010.test.events", 0, 1, "dupe", payload));
@@ -206,7 +207,12 @@ class Kay009HardeningKay010Kay011ProviderReconciliationIntegrationTest {
     }
 
     private String signature(String secret, Map<String, Object> callback) {
-        return sign(secret, callback.get("providerEventId") + ":" + callback.get("callbackType") + ":" + callback.get("businessReferenceId") + ":" + callback.get("amountMinor"));
+        return sign(secret, "{\"providerEventId\":\"" + callback.get("providerEventId")
+                + "\",\"providerSequence\":" + callback.get("providerSequence")
+                + ",\"callbackType\":\"" + callback.get("callbackType")
+                + "\",\"businessReferenceId\":\"" + callback.get("businessReferenceId")
+                + "\",\"amountMinor\":" + callback.get("amountMinor")
+                + ",\"metadata\":null}");
     }
 
     private static String sign(String secret, String payload) {

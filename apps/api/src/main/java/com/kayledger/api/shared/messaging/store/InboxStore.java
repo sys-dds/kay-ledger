@@ -3,6 +3,7 @@ package com.kayledger.api.shared.messaging.store;
 import java.util.UUID;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -17,25 +18,26 @@ public class InboxStore {
         this.jdbcTemplate = jdbcTemplate;
     }
 
-    public boolean beginProcessing(UUID workspaceId, String topic, int partitionId, String messageKey, UUID eventId, String dedupeKey, String consumerName) {
+    public boolean beginProcessing(UUID workspaceId, String topic, int partitionId, String messageKey, UUID eventId, String dedupeKey, String consumerName, String payloadJson) {
         try {
             jdbcTemplate.update("""
                     INSERT INTO inbox_messages (
-                        workspace_id, topic, partition_id, message_key, event_id, dedupe_key, consumer_name, outcome
+                        workspace_id, topic, partition_id, message_key, event_id, dedupe_key, consumer_name, outcome, payload_json
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 'PROCESSING')
-                    """, workspaceId, topic, partitionId, messageKey, eventId, dedupeKey, consumerName);
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'PROCESSING', ?::jsonb)
+                    """, workspaceId, topic, partitionId, messageKey, eventId, dedupeKey, consumerName, payloadJson);
             return true;
         } catch (DuplicateKeyException exception) {
             int claimed = jdbcTemplate.update("""
                     UPDATE inbox_messages
                     SET outcome = 'PROCESSING',
-                        last_error = NULL
+                        last_error = NULL,
+                        payload_json = COALESCE(payload_json, ?::jsonb)
                     WHERE consumer_name = ?
                       AND dedupe_key = ?
                       AND outcome = 'FAILED'
                       AND available_at <= now()
-                    """, consumerName, dedupeKey);
+                    """, payloadJson, consumerName, dedupeKey);
             return claimed == 1;
         }
     }
@@ -82,6 +84,23 @@ public class InboxStore {
                 """, workspaceId, consumerName, dedupeKey);
     }
 
+    public Optional<ParkedMessage> findParked(UUID workspaceId, String consumerName, String dedupeKey) {
+        return jdbcTemplate.query("""
+                SELECT topic, partition_id, message_key, event_id, dedupe_key, payload_json::text AS payload_json
+                FROM inbox_messages
+                WHERE workspace_id = ?
+                  AND consumer_name = ?
+                  AND dedupe_key = ?
+                  AND outcome = 'PARKED'
+                """, (rs, rowNum) -> new ParkedMessage(
+                rs.getString("topic"),
+                rs.getInt("partition_id"),
+                rs.getString("message_key"),
+                rs.getObject("event_id", UUID.class),
+                rs.getString("dedupe_key"),
+                rs.getString("payload_json")), workspaceId, consumerName, dedupeKey).stream().findFirst();
+    }
+
     public List<Map<String, Object>> listParked(UUID workspaceId) {
         return jdbcTemplate.queryForList("""
                 SELECT id, workspace_id, topic, message_key, event_id, dedupe_key, consumer_name,
@@ -98,5 +117,8 @@ public class InboxStore {
             return null;
         }
         return error.length() <= 1000 ? error : error.substring(0, 1000);
+    }
+
+    public record ParkedMessage(String topic, int partitionId, String messageKey, UUID eventId, String dedupeKey, String payloadJson) {
     }
 }

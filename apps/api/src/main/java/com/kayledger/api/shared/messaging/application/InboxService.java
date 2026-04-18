@@ -9,6 +9,7 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.stereotype.Service;
 
 import com.kayledger.api.shared.messaging.store.InboxStore;
+import com.kayledger.api.shared.messaging.store.InboxStore.ParkedMessage;
 
 @Service
 @EnableConfigurationProperties(AsyncMessagingProperties.class)
@@ -23,7 +24,11 @@ public class InboxService {
     }
 
     public boolean processOnce(UUID workspaceId, String topic, int partitionId, String messageKey, UUID eventId, String dedupeKey, String consumerName, Supplier<Boolean> handler) {
-        boolean claimed = inboxStore.beginProcessing(workspaceId, topic, partitionId, messageKey, eventId, dedupeKey, consumerName);
+        return processOnce(workspaceId, topic, partitionId, messageKey, eventId, dedupeKey, consumerName, null, handler);
+    }
+
+    public boolean processOnce(UUID workspaceId, String topic, int partitionId, String messageKey, UUID eventId, String dedupeKey, String consumerName, String payloadJson, Supplier<Boolean> handler) {
+        boolean claimed = inboxStore.beginProcessing(workspaceId, topic, partitionId, messageKey, eventId, dedupeKey, consumerName, payloadJson);
         if (!claimed) {
             return false;
         }
@@ -49,6 +54,11 @@ public class InboxService {
 
     public int replayParked(UUID workspaceId, String consumerName, String dedupeKey) {
         return inboxStore.replayParked(workspaceId, consumerName, dedupeKey);
+    }
+
+    public ParkedMessage parkedMessage(UUID workspaceId, String consumerName, String dedupeKey) {
+        return inboxStore.findParked(workspaceId, consumerName, dedupeKey)
+                .orElseThrow(() -> new com.kayledger.api.shared.api.NotFoundException("Parked inbox message was not found."));
     }
 
     public List<Map<String, Object>> listParked(UUID workspaceId) {
