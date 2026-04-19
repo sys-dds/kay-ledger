@@ -37,12 +37,14 @@ public class RegionReplicationService {
     private final RegionProperties regionProperties;
     private final KafkaTemplate<String, String> kafkaTemplate;
     private final ObjectMapper objectMapper;
+    private final RegionFaultService regionFaultService;
 
-    public RegionReplicationService(RegionStore regionStore, RegionProperties regionProperties, KafkaTemplate<String, String> kafkaTemplate, ObjectMapper objectMapper) {
+    public RegionReplicationService(RegionStore regionStore, RegionProperties regionProperties, KafkaTemplate<String, String> kafkaTemplate, ObjectMapper objectMapper, RegionFaultService regionFaultService) {
         this.regionStore = regionStore;
         this.regionProperties = regionProperties;
         this.kafkaTemplate = kafkaTemplate;
         this.objectMapper = objectMapper;
+        this.regionFaultService = regionFaultService;
     }
 
     public void publishInvestigationDocument(InvestigationDocument document) {
@@ -85,6 +87,10 @@ public class RegionReplicationService {
         if (!regionProperties.isReplicationConsumerEnabled() || !regionProperties.getLocalRegionId().equals(event.targetRegion())) {
             return;
         }
+        if (regionFaultService.active(event.workspaceId(), RegionFaultService.REGIONAL_REPLICATION_APPLY_BLOCK)) {
+            return;
+        }
+        regionFaultService.simulateDelayIfActive(event.workspaceId(), RegionFaultService.REGIONAL_REPLICATION_APPLY_DELAY);
         if (INVESTIGATION_READ_SNAPSHOT.equals(event.streamName())) {
             InvestigationDocument document = objectMapper.convertValue(event.payload().get("document"), InvestigationDocument.class);
             String documentJson = writeJson(document);
@@ -149,7 +155,7 @@ public class RegionReplicationService {
                         checkpoint.targetRegion(),
                         checkpoint.lagMillis(),
                         checkpoint.lastAppliedAt()))
-                .orElse(new RegionReadFreshness("LOCAL_SOURCE_OF_TRUTH", regionProperties.getLocalRegionId(), regionProperties.getLocalRegionId(), 0, null));
+                .orElse(new RegionReadFreshness("NO_REPLICATED_CHECKPOINT", null, regionProperties.getLocalRegionId(), 0, null));
     }
 
     public List<RegionReplicationCheckpoint> checkpoints() {
@@ -157,6 +163,10 @@ public class RegionReplicationService {
     }
 
     private void publish(String streamName, UUID workspaceId, String targetRegion, Map<String, Object> payload) {
+        if (regionFaultService.active(workspaceId, RegionFaultService.REGIONAL_REPLICATION_PUBLISH_BLOCK)) {
+            return;
+        }
+        regionFaultService.simulateDelayIfActive(workspaceId, RegionFaultService.REGIONAL_REPLICATION_PUBLISH_DELAY);
         RegionReplicationEvent event = new RegionReplicationEvent(
                 UUID.randomUUID(),
                 System.currentTimeMillis(),

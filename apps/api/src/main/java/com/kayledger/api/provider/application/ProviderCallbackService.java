@@ -26,6 +26,7 @@ import com.kayledger.api.payment.application.PaymentService;
 import com.kayledger.api.provider.model.ProviderCallback;
 import com.kayledger.api.provider.model.ProviderConfig;
 import com.kayledger.api.provider.store.ProviderStore;
+import com.kayledger.api.region.application.RegionFaultService;
 import com.kayledger.api.shared.api.BadRequestException;
 import com.kayledger.api.shared.api.ForbiddenException;
 import com.kayledger.api.shared.api.NotFoundException;
@@ -49,13 +50,15 @@ public class ProviderCallbackService {
     private final AccessPolicy accessPolicy;
     private final ObjectMapper objectMapper;
     private final InvestigationIndexingService investigationIndexingService;
+    private final RegionFaultService regionFaultService;
 
-    public ProviderCallbackService(ProviderStore providerStore, PaymentService paymentService, AccessPolicy accessPolicy, ObjectMapper objectMapper, InvestigationIndexingService investigationIndexingService) {
+    public ProviderCallbackService(ProviderStore providerStore, PaymentService paymentService, AccessPolicy accessPolicy, ObjectMapper objectMapper, InvestigationIndexingService investigationIndexingService, RegionFaultService regionFaultService) {
         this.providerStore = providerStore;
         this.paymentService = paymentService;
         this.accessPolicy = accessPolicy;
         this.objectMapper = objectMapper;
         this.investigationIndexingService = investigationIndexingService;
+        this.regionFaultService = regionFaultService;
     }
 
     @Transactional
@@ -134,6 +137,21 @@ public class ProviderCallbackService {
         if (!"RECEIVED".equals(callback.processingStatus())) {
             return callback;
         }
+        if (regionFaultService.active(workspaceId, RegionFaultService.DELAY_PROVIDER_CALLBACK_APPLY)) {
+            ProviderCallback delayed = providerStore.markDelayedByDrill(workspaceId, callback.id());
+            reindex(workspaceId, referenceType, referenceId, callback.id());
+            return delayed;
+        }
+        if (regionFaultService.active(workspaceId, RegionFaultService.DROP_PROVIDER_CALLBACK_APPLY)) {
+            ProviderCallback dropped = providerStore.markFailed(workspaceId, callback.id(), "Simulated dropped provider callback apply drill.");
+            reindex(workspaceId, referenceType, referenceId, callback.id());
+            return dropped;
+        }
+        if (regionFaultService.active(workspaceId, RegionFaultService.OUT_OF_ORDER_PROVIDER_CALLBACK_APPLY)) {
+            ProviderCallback ignored = providerStore.markIgnoredOutOfOrder(workspaceId, callback.id());
+            reindex(workspaceId, referenceType, referenceId, callback.id());
+            return ignored;
+        }
         Long latest = providerStore.latestAppliedSequence(workspaceId, referenceType, referenceId);
         if (latest != null && callback.providerSequence() != null && callback.providerSequence() <= latest) {
             ProviderCallback ignored = providerStore.markIgnoredOutOfOrder(workspaceId, callback.id());
@@ -142,6 +160,9 @@ public class ProviderCallbackService {
         }
         try {
             applyTruth(workspaceId, callbackType, referenceId, amount(command), command.providerEventId());
+            if (regionFaultService.active(workspaceId, RegionFaultService.DUPLICATE_PROVIDER_CALLBACK_APPLY)) {
+                applyTruth(workspaceId, callbackType, referenceId, amount(command), command.providerEventId());
+            }
             ProviderCallback applied = providerStore.markApplied(workspaceId, callback.id());
             reindex(workspaceId, referenceType, referenceId, callback.id());
             return applied;

@@ -175,6 +175,17 @@ public class ProviderStore {
                 """, CALLBACK_MAPPER, workspaceId, callbackId);
     }
 
+    public ProviderCallback markDelayedByDrill(UUID workspaceId, UUID callbackId) {
+        return jdbcTemplate.queryForObject("""
+                UPDATE provider_callbacks
+                SET processing_status = 'DELAYED_BY_DRILL',
+                    processing_error = 'Simulated delayed provider callback apply drill.'
+                WHERE workspace_id = ?
+                  AND id = ?
+                RETURNING *
+                """, CALLBACK_MAPPER, workspaceId, callbackId);
+    }
+
     public ProviderCallback markFailed(UUID workspaceId, UUID callbackId, String error) {
         return jdbcTemplate.queryForObject("""
                 UPDATE provider_callbacks

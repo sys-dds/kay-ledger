@@ -94,7 +94,7 @@ public class RegionService {
     @Transactional
     public WorkspaceRegionOwnership ownership(AccessContext context) {
         requireRegionRead(context);
-        return ensureWorkspaceOwnership(context.workspaceId());
+        return ownership(context.workspaceId());
     }
 
     @Transactional(readOnly = true)
