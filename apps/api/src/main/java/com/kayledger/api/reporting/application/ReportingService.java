@@ -72,7 +72,7 @@ public class ReportingService {
 
     @Transactional
     public List<ProviderFinancialSummary> refreshAndListSummaries(AccessContext context) {
-        requireRead(context);
+        requireWrite(context);
         reportingStore.refreshProviderSummaries(context.workspaceId());
         List<ProviderFinancialSummary> summaries = reportingStore.listProviderSummaries(context.workspaceId());
         summaries.forEach(regionReplicationService::publishProviderSummary);

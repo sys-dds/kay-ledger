@@ -179,15 +179,17 @@ public class RiskStore {
 
     public Optional<RiskDecision> latestBlockingDecision(UUID workspaceId, String referenceType, UUID referenceId) {
         return jdbcTemplate.query("""
-                SELECT *
-                FROM risk_decisions
-                WHERE workspace_id = ?
-                  AND reference_type = ?
-                  AND reference_id = ?
-                ORDER BY decided_at DESC, id DESC
+                SELECT rd.*
+                FROM risk_decisions rd
+                JOIN risk_flags rf ON rf.workspace_id = rd.workspace_id AND rf.id = rd.risk_flag_id
+                WHERE rd.workspace_id = ?
+                  AND rd.reference_type = ?
+                  AND rd.reference_id = ?
+                  AND rd.outcome = 'BLOCK'
+                  AND rf.status = 'BLOCKED'
+                ORDER BY rd.decided_at DESC, rd.id DESC
                 LIMIT 1
                 """, DECISION_MAPPER, workspaceId, referenceType, referenceId).stream()
-                .filter(decision -> "BLOCK".equals(decision.outcome()))
                 .findFirst();
     }
 

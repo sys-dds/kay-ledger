@@ -27,11 +27,13 @@ public class RegionService {
     private final RegionStore regionStore;
     private final RegionProperties regionProperties;
     private final AccessPolicy accessPolicy;
+    private final RegionReplicationService regionReplicationService;
 
-    public RegionService(RegionStore regionStore, RegionProperties regionProperties, AccessPolicy accessPolicy) {
+    public RegionService(RegionStore regionStore, RegionProperties regionProperties, AccessPolicy accessPolicy, RegionReplicationService regionReplicationService) {
         this.regionStore = regionStore;
         this.regionProperties = regionProperties;
         this.accessPolicy = accessPolicy;
+        this.regionReplicationService = regionReplicationService;
     }
 
     public String localRegionId() {
@@ -65,7 +67,8 @@ public class RegionService {
 
     @Transactional
     public WorkspaceRegionOwnership requireOwnedForWrite(UUID workspaceId, String mutationName) {
-        WorkspaceRegionOwnership ownership = ensureWorkspaceOwnership(workspaceId);
+        WorkspaceRegionOwnership ownership = regionStore.findOwnership(workspaceId)
+                .orElseThrow(() -> new ForbiddenException("Workspace has no region ownership record for " + mutationName + "."));
         requireActiveOwnership(ownership, mutationName);
         if (!localRegionId().equals(ownership.homeRegion())) {
             throw new ForbiddenException("Workspace writes for " + mutationName + " are owned by region " + ownership.homeRegion() + ".");
@@ -91,22 +94,23 @@ public class RegionService {
     @Transactional
     public WorkspaceRegionOwnership ownership(AccessContext context) {
         requireRegionRead(context);
-        return ensureWorkspaceOwnership(context.workspaceId());
+        return ownership(context.workspaceId());
     }
 
     @Transactional(readOnly = true)
     public boolean isLocalOwner(UUID workspaceId) {
         return regionStore.findOwnership(workspaceId)
                 .map(ownership -> localRegionId().equals(ownership.homeRegion()) && "ACTIVE".equals(ownership.status()))
-                .orElse(true);
+                .orElse(false);
     }
 
     @Transactional
     public WorkspaceRegionFailoverEvent transferOwnership(AccessContext context, String toRegion, String triggerMode) {
         requireRegionWrite(context);
         String targetRegion = requireRegion(toRegion, "target region");
+        requireKnownPeerRegion(targetRegion);
         String trigger = requireTriggerMode(triggerMode);
-        WorkspaceRegionOwnership existing = regionStore.ensureOwnership(context.workspaceId(), localRegionId());
+        WorkspaceRegionOwnership existing = ownership(context.workspaceId());
         if (existing.homeRegion().equals(targetRegion)) {
             throw new BadRequestException("Workspace is already owned by region " + targetRegion + ".");
         }
@@ -116,7 +120,9 @@ public class RegionService {
         }
         long newEpoch = locked.ownershipEpoch() + 1;
         regionStore.transferOwnership(context.workspaceId(), targetRegion, newEpoch);
-        return regionStore.recordFailover(context.workspaceId(), locked.homeRegion(), targetRegion, locked.ownershipEpoch(), newEpoch, trigger, context.actorId());
+        WorkspaceRegionFailoverEvent event = regionStore.recordFailover(context.workspaceId(), locked.homeRegion(), targetRegion, locked.ownershipEpoch(), newEpoch, trigger, context.actorId());
+        regionReplicationService.publishOwnershipTransfer(context.workspaceId(), locked.homeRegion(), targetRegion, locked.ownershipEpoch(), newEpoch, trigger, context.actorId());
+        return event;
     }
 
     @Transactional(readOnly = true)
@@ -153,6 +159,12 @@ public class RegionService {
             throw new BadRequestException("triggerMode is invalid.");
         }
         return value;
+    }
+
+    private void requireKnownPeerRegion(String targetRegion) {
+        if (!peerRegionIds().contains(targetRegion)) {
+            throw new BadRequestException("target region is not a configured peer region.");
+        }
     }
 
     public record RegionTopology(

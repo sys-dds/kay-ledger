@@ -12,8 +12,11 @@ import org.springframework.web.bind.annotation.RestController;
 import com.kayledger.api.access.application.AccessContext;
 import com.kayledger.api.access.application.AccessContextResolver;
 import com.kayledger.api.region.application.RegionReplicationService;
+import com.kayledger.api.region.application.RegionFaultService;
+import com.kayledger.api.region.application.RegionFaultService.FaultCommand;
 import com.kayledger.api.region.application.RegionService;
 import com.kayledger.api.region.application.RegionService.RegionTopology;
+import com.kayledger.api.region.model.RegionChaosFault;
 import com.kayledger.api.region.model.RegionReplicationCheckpoint;
 import com.kayledger.api.region.model.WorkspaceRegionFailoverEvent;
 import com.kayledger.api.region.model.WorkspaceRegionOwnership;
@@ -25,11 +28,13 @@ public class RegionTopologyController {
     private final AccessContextResolver accessContextResolver;
     private final RegionService regionService;
     private final RegionReplicationService regionReplicationService;
+    private final RegionFaultService regionFaultService;
 
-    public RegionTopologyController(AccessContextResolver accessContextResolver, RegionService regionService, RegionReplicationService regionReplicationService) {
+    public RegionTopologyController(AccessContextResolver accessContextResolver, RegionService regionService, RegionReplicationService regionReplicationService, RegionFaultService regionFaultService) {
         this.accessContextResolver = accessContextResolver;
         this.regionService = regionService;
         this.regionReplicationService = regionReplicationService;
+        this.regionFaultService = regionFaultService;
     }
 
     @GetMapping("/topology")
@@ -61,6 +66,56 @@ public class RegionTopologyController {
             @RequestBody FailoverRequest request) {
         AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
         return regionService.transferOwnership(context, request == null ? null : request.toRegion(), request == null ? null : request.triggerMode());
+    }
+
+    @GetMapping("/workspaces/current/failover-history")
+    List<WorkspaceRegionFailoverEvent> failoverHistory(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey) {
+        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
+        regionService.topology(context);
+        return regionService.failoverEvents(context.workspaceId());
+    }
+
+    @PostMapping("/workspaces/current/failover-drill")
+    WorkspaceRegionFailoverEvent failoverDrill(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @RequestBody FailoverRequest request) {
+        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
+        return regionService.transferOwnership(context, request == null ? null : request.toRegion(), RegionService.SIMULATED_REGION_FAILOVER);
+    }
+
+    @PostMapping("/workspaces/current/failback-drill")
+    WorkspaceRegionFailoverEvent failbackDrill(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @RequestBody FailoverRequest request) {
+        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
+        return regionService.transferOwnership(context, request == null ? null : request.toRegion(), RegionService.MANUAL_FAILBACK);
+    }
+
+    @GetMapping("/faults/active")
+    List<RegionChaosFault> activeFaults(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey) {
+        return regionFaultService.active(accessContextResolver.resolveWorkspace(workspaceSlug, actorKey));
+    }
+
+    @PostMapping("/faults")
+    RegionChaosFault injectFault(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @RequestBody FaultCommand command) {
+        return regionFaultService.inject(accessContextResolver.resolveWorkspace(workspaceSlug, actorKey), command);
+    }
+
+    @PostMapping("/faults/{faultId}/clear")
+    RegionChaosFault clearFault(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @org.springframework.web.bind.annotation.PathVariable java.util.UUID faultId) {
+        return regionFaultService.clear(accessContextResolver.resolveWorkspace(workspaceSlug, actorKey), faultId);
     }
 
     public record FailoverRequest(String toRegion, String triggerMode) {

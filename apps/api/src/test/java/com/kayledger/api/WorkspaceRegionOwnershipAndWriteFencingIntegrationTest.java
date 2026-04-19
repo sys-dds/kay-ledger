@@ -86,6 +86,7 @@ class WorkspaceRegionOwnershipAndWriteFencingIntegrationTest {
         UUID ownerId = UUID.randomUUID();
         UUID membershipId = UUID.randomUUID();
         jdbcTemplate.update("INSERT INTO workspaces (id, slug, display_name) VALUES (?, ?, ?)", workspaceId, slug, slug);
+        jdbcTemplate.update("INSERT INTO workspace_region_ownership (workspace_id, home_region, ownership_epoch) VALUES (?, 'region-a', 1)", workspaceId);
         jdbcTemplate.update("INSERT INTO actors (id, actor_key, display_name) VALUES (?, ?, ?)", ownerId, slug + "-owner", "Owner");
         jdbcTemplate.update("INSERT INTO workspace_memberships (id, workspace_id, actor_id, role) VALUES (?, ?, ?, 'OWNER')", membershipId, workspaceId, ownerId);
         return new Fixture(workspaceId, slug, ownerId, membershipId);

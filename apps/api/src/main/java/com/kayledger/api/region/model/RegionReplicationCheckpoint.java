@@ -7,6 +7,7 @@ public record RegionReplicationCheckpoint(
         String sourceRegion,
         String targetRegion,
         String streamName,
+        java.util.UUID workspaceId,
         UUID lastAppliedEventId,
         long lastAppliedSequence,
         Instant lastAppliedAt,

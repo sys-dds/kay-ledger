@@ -30,18 +30,21 @@ public class RegionReplicationService {
 
     public static final String INVESTIGATION_READ_SNAPSHOT = "INVESTIGATION_READ_SNAPSHOT";
     public static final String PROVIDER_SUMMARY_SNAPSHOT = "PROVIDER_SUMMARY_SNAPSHOT";
+    public static final String WORKSPACE_OWNERSHIP_TRANSFER = "WORKSPACE_OWNERSHIP_TRANSFER";
     private static final Logger log = LoggerFactory.getLogger(RegionReplicationService.class);
 
     private final RegionStore regionStore;
     private final RegionProperties regionProperties;
     private final KafkaTemplate<String, String> kafkaTemplate;
     private final ObjectMapper objectMapper;
+    private final RegionFaultService regionFaultService;
 
-    public RegionReplicationService(RegionStore regionStore, RegionProperties regionProperties, KafkaTemplate<String, String> kafkaTemplate, ObjectMapper objectMapper) {
+    public RegionReplicationService(RegionStore regionStore, RegionProperties regionProperties, KafkaTemplate<String, String> kafkaTemplate, ObjectMapper objectMapper, RegionFaultService regionFaultService) {
         this.regionStore = regionStore;
         this.regionProperties = regionProperties;
         this.kafkaTemplate = kafkaTemplate;
         this.objectMapper = objectMapper;
+        this.regionFaultService = regionFaultService;
     }
 
     public void publishInvestigationDocument(InvestigationDocument document) {
@@ -62,12 +65,32 @@ public class RegionReplicationService {
         }
     }
 
+    public void publishOwnershipTransfer(UUID workspaceId, String fromRegion, String toRegion, long priorEpoch, long newEpoch, String triggerMode, UUID actorId) {
+        if (!regionProperties.isReplicationProducerEnabled()) {
+            return;
+        }
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("fromRegion", fromRegion);
+        payload.put("toRegion", toRegion);
+        payload.put("priorEpoch", priorEpoch);
+        payload.put("newEpoch", newEpoch);
+        payload.put("triggerMode", triggerMode);
+        payload.put("requestedByActorId", actorId == null ? null : actorId.toString());
+        for (String peerRegion : regionProperties.getPeerRegionIds()) {
+            publish(WORKSPACE_OWNERSHIP_TRANSFER, workspaceId, peerRegion, payload);
+        }
+    }
+
     @Transactional
     public void apply(String payloadJson) {
         RegionReplicationEvent event = readEvent(payloadJson);
         if (!regionProperties.isReplicationConsumerEnabled() || !regionProperties.getLocalRegionId().equals(event.targetRegion())) {
             return;
         }
+        if (regionFaultService.active(event.workspaceId(), RegionFaultService.REGIONAL_REPLICATION_APPLY_BLOCK)) {
+            return;
+        }
+        regionFaultService.simulateDelayIfActive(event.workspaceId(), RegionFaultService.REGIONAL_REPLICATION_APPLY_DELAY);
         if (INVESTIGATION_READ_SNAPSHOT.equals(event.streamName())) {
             InvestigationDocument document = objectMapper.convertValue(event.payload().get("document"), InvestigationDocument.class);
             String documentJson = writeJson(document);
@@ -77,6 +100,13 @@ public class RegionReplicationService {
         if (PROVIDER_SUMMARY_SNAPSHOT.equals(event.streamName())) {
             ProviderFinancialSummary summary = objectMapper.convertValue(event.payload().get("summary"), ProviderFinancialSummary.class);
             regionStore.upsertProviderSummarySnapshot(event, summary, lagMillis(event.occurredAt()));
+            return;
+        }
+        if (WORKSPACE_OWNERSHIP_TRANSFER.equals(event.streamName())) {
+            String toRegion = text(event.payload().get("toRegion"));
+            long newEpoch = number(event.payload().get("newEpoch"));
+            regionStore.upsertReplicatedOwnership(event.workspaceId(), toRegion, newEpoch);
+            regionStore.upsertReplicationCheckpoint(event, lagMillis(event.occurredAt()));
         }
     }
 
@@ -118,14 +148,14 @@ public class RegionReplicationService {
     }
 
     public RegionReadFreshness freshness(String streamName, UUID workspaceId) {
-        return regionStore.latestCheckpointForTarget(regionProperties.getLocalRegionId(), streamName)
+        return regionStore.latestCheckpointForTarget(regionProperties.getLocalRegionId(), streamName, workspaceId)
                 .map(checkpoint -> new RegionReadFreshness(
                         "REPLICATED_SNAPSHOT",
                         checkpoint.sourceRegion(),
                         checkpoint.targetRegion(),
                         checkpoint.lagMillis(),
                         checkpoint.lastAppliedAt()))
-                .orElse(new RegionReadFreshness("LOCAL_SOURCE_OF_TRUTH", regionProperties.getLocalRegionId(), regionProperties.getLocalRegionId(), 0, null));
+                .orElse(new RegionReadFreshness("NO_REPLICATED_CHECKPOINT", null, regionProperties.getLocalRegionId(), 0, null));
     }
 
     public List<RegionReplicationCheckpoint> checkpoints() {
@@ -133,6 +163,10 @@ public class RegionReplicationService {
     }
 
     private void publish(String streamName, UUID workspaceId, String targetRegion, Map<String, Object> payload) {
+        if (regionFaultService.active(workspaceId, RegionFaultService.REGIONAL_REPLICATION_PUBLISH_BLOCK)) {
+            return;
+        }
+        regionFaultService.simulateDelayIfActive(workspaceId, RegionFaultService.REGIONAL_REPLICATION_PUBLISH_DELAY);
         RegionReplicationEvent event = new RegionReplicationEvent(
                 UUID.randomUUID(),
                 System.currentTimeMillis(),
@@ -190,6 +224,20 @@ public class RegionReplicationService {
 
     private static long lagMillis(Instant occurredAt) {
         return Math.max(Duration.between(occurredAt, Instant.now()).toMillis(), 0);
+    }
+
+    private static String text(Object value) {
+        if (value == null || value.toString().isBlank()) {
+            throw new IllegalArgumentException("Regional replication payload field is required.");
+        }
+        return value.toString();
+    }
+
+    private static long number(Object value) {
+        if (value instanceof Number number) {
+            return number.longValue();
+        }
+        return Long.parseLong(text(value));
     }
 
     public record RegionReplicationEvent(
