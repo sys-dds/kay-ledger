@@ -25,6 +25,7 @@ import com.kayledger.api.provider.store.ProviderStore;
 import com.kayledger.api.reconciliation.model.ReconciliationMismatch;
 import com.kayledger.api.reconciliation.model.ReconciliationRun;
 import com.kayledger.api.reconciliation.store.ReconciliationStore;
+import com.kayledger.api.region.application.RegionService;
 import com.kayledger.api.risk.application.RiskService;
 import com.kayledger.api.shared.api.BadRequestException;
 import com.kayledger.api.shared.api.InternalFailureException;
@@ -55,6 +56,7 @@ public class ReconciliationService {
     private final RiskService riskService;
     private final ObjectProvider<OperatorWorkflowStarter> operatorWorkflowStarter;
     private final OperatorWorkflowService operatorWorkflowService;
+    private final RegionService regionService;
 
     public ReconciliationService(
             ReconciliationStore reconciliationStore,
@@ -66,7 +68,8 @@ public class ReconciliationService {
             InvestigationIndexingService investigationIndexingService,
             RiskService riskService,
             ObjectProvider<OperatorWorkflowStarter> operatorWorkflowStarter,
-            OperatorWorkflowService operatorWorkflowService) {
+            OperatorWorkflowService operatorWorkflowService,
+            RegionService regionService) {
         this.reconciliationStore = reconciliationStore;
         this.providerStore = providerStore;
         this.paymentStore = paymentStore;
@@ -77,6 +80,7 @@ public class ReconciliationService {
         this.riskService = riskService;
         this.operatorWorkflowStarter = operatorWorkflowStarter;
         this.operatorWorkflowService = operatorWorkflowService;
+        this.regionService = regionService;
     }
 
     @Transactional(noRollbackFor = InternalFailureException.class)
@@ -341,6 +345,7 @@ public class ReconciliationService {
     private void requireWrite(AccessContext context) {
         accessPolicy.requireWorkspaceRole(context, WorkspaceRole.OWNER, WorkspaceRole.ADMIN);
         accessPolicy.requireScope(context, AccessScope.PAYMENT_WRITE);
+        regionService.requireOwnedForWrite(context, "reconciliation run start");
     }
 
     public record RunReconciliationCommand(String runType) {

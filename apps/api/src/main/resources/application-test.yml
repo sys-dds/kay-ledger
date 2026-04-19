@@ -37,6 +37,15 @@ kay-ledger:
     access-key: kay_ledger
     secret-key: kay_ledger_secret
     path-style-access-enabled: true
+  region:
+    local-region-id: region-a
+    peer-region-ids:
+      - region-b
+    active-region-label: region-a
+    home-region-mode: OWNED_WORKSPACES
+    replication-producer-enabled: true
+    replication-consumer-enabled: false
+    replication-topic: kay-ledger.test.region.replication
   temporal:
     enabled: false
     target: localhost:7233

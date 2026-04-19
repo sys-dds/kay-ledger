@@ -13,6 +13,8 @@ import com.kayledger.api.access.model.WorkspaceRole;
 import com.kayledger.api.investigation.model.InvestigationDocument;
 import com.kayledger.api.investigation.store.InvestigationStore;
 import com.kayledger.api.investigation.store.InvestigationStore.ReindexJob;
+import com.kayledger.api.region.application.RegionReplicationService;
+import com.kayledger.api.region.application.RegionService;
 import com.kayledger.api.shared.api.InternalFailureException;
 import com.kayledger.api.temporal.application.OperatorWorkflowRecord;
 import com.kayledger.api.temporal.application.OperatorWorkflowService;
@@ -30,18 +32,24 @@ public class InvestigationIndexingService {
     private final AccessPolicy accessPolicy;
     private final ObjectProvider<OperatorWorkflowStarter> operatorWorkflowStarter;
     private final OperatorWorkflowService operatorWorkflowService;
+    private final RegionService regionService;
+    private final RegionReplicationService regionReplicationService;
 
     public InvestigationIndexingService(
             InvestigationStore investigationStore,
             OpenSearchInvestigationClient openSearchClient,
             AccessPolicy accessPolicy,
             ObjectProvider<OperatorWorkflowStarter> operatorWorkflowStarter,
-            OperatorWorkflowService operatorWorkflowService) {
+            OperatorWorkflowService operatorWorkflowService,
+            RegionService regionService,
+            RegionReplicationService regionReplicationService) {
         this.investigationStore = investigationStore;
         this.openSearchClient = openSearchClient;
         this.accessPolicy = accessPolicy;
         this.operatorWorkflowStarter = operatorWorkflowStarter;
         this.operatorWorkflowService = operatorWorkflowService;
+        this.regionService = regionService;
+        this.regionReplicationService = regionReplicationService;
     }
 
     @Transactional(noRollbackFor = InternalFailureException.class)
@@ -115,6 +123,7 @@ public class InvestigationIndexingService {
             try {
                 openSearchClient.index(document);
                 investigationStore.recordIndexed(document);
+                regionReplicationService.publishInvestigationDocument(document);
                 indexed++;
             } catch (RuntimeException exception) {
                 investigationStore.recordFailed(document, exception);
@@ -130,6 +139,7 @@ public class InvestigationIndexingService {
     private void requireReindexStart(AccessContext context) {
         accessPolicy.requireWorkspaceRole(context, WorkspaceRole.OWNER, WorkspaceRole.ADMIN);
         accessPolicy.requireScope(context, AccessScope.PAYMENT_WRITE);
+        regionService.requireOwnedForWrite(context, "investigation reindex start");
     }
 
     private void markWorkflowProgress(UUID workspaceId, ReindexJob job, int current, int total, String message) {

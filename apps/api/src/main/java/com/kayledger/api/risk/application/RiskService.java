@@ -13,6 +13,7 @@ import com.kayledger.api.access.application.AccessPolicy;
 import com.kayledger.api.access.model.AccessScope;
 import com.kayledger.api.access.model.WorkspaceRole;
 import com.kayledger.api.investigation.application.InvestigationIndexingService;
+import com.kayledger.api.region.application.RegionService;
 import com.kayledger.api.risk.model.RiskDecision;
 import com.kayledger.api.risk.model.RiskFlag;
 import com.kayledger.api.risk.model.RiskReview;
@@ -33,11 +34,13 @@ public class RiskService {
     private final RiskStore riskStore;
     private final AccessPolicy accessPolicy;
     private final InvestigationIndexingService investigationIndexingService;
+    private final RegionService regionService;
 
-    public RiskService(RiskStore riskStore, AccessPolicy accessPolicy, InvestigationIndexingService investigationIndexingService) {
+    public RiskService(RiskStore riskStore, AccessPolicy accessPolicy, InvestigationIndexingService investigationIndexingService, RegionService regionService) {
         this.riskStore = riskStore;
         this.accessPolicy = accessPolicy;
         this.investigationIndexingService = investigationIndexingService;
+        this.regionService = regionService;
     }
 
     @Transactional
@@ -159,6 +162,7 @@ public class RiskService {
     private void requireWrite(AccessContext context) {
         accessPolicy.requireWorkspaceRole(context, WorkspaceRole.OWNER, WorkspaceRole.ADMIN);
         accessPolicy.requireScope(context, AccessScope.PAYMENT_WRITE);
+        regionService.requireOwnedForWrite(context, "risk decision mutation");
     }
 
     private static String requireOutcome(String outcome) {
