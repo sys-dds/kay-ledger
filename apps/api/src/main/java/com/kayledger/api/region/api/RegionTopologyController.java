@@ -1,6 +1,7 @@
 package com.kayledger.api.region.api;
 
 import java.util.List;
+import java.util.Map;
 
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -20,6 +21,10 @@ import com.kayledger.api.region.model.RegionChaosFault;
 import com.kayledger.api.region.model.RegionReplicationCheckpoint;
 import com.kayledger.api.region.model.WorkspaceRegionFailoverEvent;
 import com.kayledger.api.region.model.WorkspaceRegionOwnership;
+import com.kayledger.api.region.recovery.application.RegionalRecoveryService;
+import com.kayledger.api.region.recovery.application.RegionalRecoveryService.RecoveryCommand;
+import com.kayledger.api.region.recovery.model.RegionalDriftRecord;
+import com.kayledger.api.region.recovery.model.RegionalRecoveryAction;
 
 @RestController
 @RequestMapping("/api/region")
@@ -29,12 +34,14 @@ public class RegionTopologyController {
     private final RegionService regionService;
     private final RegionReplicationService regionReplicationService;
     private final RegionFaultService regionFaultService;
+    private final RegionalRecoveryService regionalRecoveryService;
 
-    public RegionTopologyController(AccessContextResolver accessContextResolver, RegionService regionService, RegionReplicationService regionReplicationService, RegionFaultService regionFaultService) {
+    public RegionTopologyController(AccessContextResolver accessContextResolver, RegionService regionService, RegionReplicationService regionReplicationService, RegionFaultService regionFaultService, RegionalRecoveryService regionalRecoveryService) {
         this.accessContextResolver = accessContextResolver;
         this.regionService = regionService;
         this.regionReplicationService = regionReplicationService;
         this.regionFaultService = regionFaultService;
+        this.regionalRecoveryService = regionalRecoveryService;
     }
 
     @GetMapping("/topology")
@@ -116,6 +123,52 @@ public class RegionTopologyController {
             @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
             @org.springframework.web.bind.annotation.PathVariable java.util.UUID faultId) {
         return regionFaultService.clear(accessContextResolver.resolveWorkspace(workspaceSlug, actorKey), faultId);
+    }
+
+    @GetMapping("/recovery/drift")
+    List<RegionalDriftRecord> drift(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey) {
+        return regionalRecoveryService.listDrift(accessContextResolver.resolveWorkspace(workspaceSlug, actorKey));
+    }
+
+    @GetMapping("/recovery/drift/unresolved")
+    List<RegionalDriftRecord> unresolvedDrift(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey) {
+        return regionalRecoveryService.listUnresolvedDrift(accessContextResolver.resolveWorkspace(workspaceSlug, actorKey));
+    }
+
+    @PostMapping("/recovery/drift/scan")
+    List<RegionalDriftRecord> scanDrift(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey) {
+        return regionalRecoveryService.scan(accessContextResolver.resolveWorkspace(workspaceSlug, actorKey));
+    }
+
+    @PostMapping("/recovery/actions")
+    RegionalRecoveryAction requestRecovery(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @RequestBody RecoveryCommand command) {
+        return regionalRecoveryService.requestRecovery(accessContextResolver.resolveWorkspace(workspaceSlug, actorKey), command);
+    }
+
+    @GetMapping("/recovery/actions")
+    List<RegionalRecoveryAction> recoveryActions(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey) {
+        return regionalRecoveryService.listActions(accessContextResolver.resolveWorkspace(workspaceSlug, actorKey));
+    }
+
+    @GetMapping("/recovery/history")
+    Map<String, Object> recoveryHistory(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey) {
+        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
+        return Map.of(
+                "failoverEvents", regionService.failoverEvents(context.workspaceId()),
+                "recoveryActions", regionalRecoveryService.listActions(context));
     }
 
     public record FailoverRequest(String toRegion, String triggerMode) {

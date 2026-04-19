@@ -56,7 +56,8 @@ public class RegionFaultService {
         if (!List.of("WORKSPACE", "REGION").contains(scope)) {
             throw new BadRequestException("scope is invalid.");
         }
-        return regionFaultStore.create(context.workspaceId(), type, scope, json(command == null ? null : command.parameters()), command == null ? null : command.reason(), context.actorId());
+        String storedScope = "REGION".equals(scope) ? "WORKSPACE" : scope;
+        return regionFaultStore.create(context.workspaceId(), type, storedScope, json(command == null ? null : command.parameters()), command == null ? null : command.reason(), context.actorId());
     }
 
     @Transactional

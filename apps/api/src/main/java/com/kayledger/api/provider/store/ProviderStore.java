@@ -107,6 +107,16 @@ public class ProviderStore {
                 """, CALLBACK_MAPPER, workspaceId, callbackId).stream().findFirst();
     }
 
+    public List<ProviderCallback> listDelayedCallbacks(UUID workspaceId) {
+        return jdbcTemplate.query("""
+                SELECT *
+                FROM provider_callbacks
+                WHERE workspace_id = ?
+                  AND processing_status = 'DELAYED_BY_DRILL'
+                ORDER BY received_at, id
+                """, CALLBACK_MAPPER, workspaceId);
+    }
+
     public List<ProviderCallback> listCallbacks(UUID workspaceId) {
         return jdbcTemplate.query("""
                 SELECT *

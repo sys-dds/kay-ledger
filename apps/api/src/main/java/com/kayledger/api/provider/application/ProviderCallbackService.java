@@ -77,6 +77,11 @@ public class ProviderCallbackService {
         return providerStore.listCallbacks(context.workspaceId());
     }
 
+    public List<ProviderCallback> listDelayedCallbacks(AccessContext context) {
+        requireProviderRead(context);
+        return providerStore.listDelayedCallbacks(context.workspaceId());
+    }
+
     public Map<String, Object> investigationReference(AccessContext context, UUID callbackId) {
         requireProviderRead(context);
         ProviderCallback callback = providerStore.findCallback(context.workspaceId(), callbackId)
@@ -148,7 +153,10 @@ public class ProviderCallbackService {
             return dropped;
         }
         if (regionFaultService.active(workspaceId, RegionFaultService.OUT_OF_ORDER_PROVIDER_CALLBACK_APPLY)) {
-            ProviderCallback ignored = providerStore.markIgnoredOutOfOrder(workspaceId, callback.id());
+            Long latest = providerStore.latestAppliedSequence(workspaceId, referenceType, referenceId);
+            ProviderCallback ignored = latest != null && callback.providerSequence() != null && callback.providerSequence() <= latest
+                    ? providerStore.markIgnoredOutOfOrder(workspaceId, callback.id())
+                    : providerStore.markDelayedByDrill(workspaceId, callback.id());
             reindex(workspaceId, referenceType, referenceId, callback.id());
             return ignored;
         }
@@ -170,6 +178,47 @@ public class ProviderCallbackService {
             providerStore.markFailed(workspaceId, callback.id(), exception.getMessage());
             reindex(workspaceId, referenceType, referenceId, callback.id());
             throw new ProviderCallbackApplyException("Provider callback application failed; retry is required.", exception);
+        }
+    }
+
+    @Transactional
+    public ProviderCallback redriveDelayedCallback(AccessContext context, UUID callbackId) {
+        requireProviderAdmin(context);
+        ProviderCallback callback = providerStore.findCallback(context.workspaceId(), callbackId)
+                .orElseThrow(() -> new NotFoundException("Provider callback was not found."));
+        if (!"DELAYED_BY_DRILL".equals(callback.processingStatus())) {
+            throw new BadRequestException("Provider callback is not delayed by a drill.");
+        }
+        return applyStoredCallback(callback);
+    }
+
+    @Transactional
+    public ProviderCallback redriveDelayedCallback(UUID workspaceId, UUID callbackId) {
+        ProviderCallback callback = providerStore.findCallback(workspaceId, callbackId)
+                .orElseThrow(() -> new NotFoundException("Provider callback was not found."));
+        if (!"DELAYED_BY_DRILL".equals(callback.processingStatus())) {
+            throw new BadRequestException("Provider callback is not delayed by a drill.");
+        }
+        return applyStoredCallback(callback);
+    }
+
+    private ProviderCallback applyStoredCallback(ProviderCallback callback) {
+        Long latest = providerStore.latestAppliedSequence(callback.workspaceId(), callback.businessReferenceType(), callback.businessReferenceId());
+        if (latest != null && callback.providerSequence() != null && callback.providerSequence() <= latest) {
+            ProviderCallback ignored = providerStore.markIgnoredOutOfOrder(callback.workspaceId(), callback.id());
+            reindex(callback.workspaceId(), callback.businessReferenceType(), callback.businessReferenceId(), callback.id());
+            return ignored;
+        }
+        try {
+            ProviderCallbackCommand command = payload(callback.payloadJson().getBytes(StandardCharsets.UTF_8));
+            applyTruth(callback.workspaceId(), callback.callbackType(), callback.businessReferenceId(), amount(command), callback.providerEventId());
+            ProviderCallback applied = providerStore.markApplied(callback.workspaceId(), callback.id());
+            reindex(callback.workspaceId(), callback.businessReferenceType(), callback.businessReferenceId(), callback.id());
+            return applied;
+        } catch (RuntimeException exception) {
+            providerStore.markFailed(callback.workspaceId(), callback.id(), exception.getMessage());
+            reindex(callback.workspaceId(), callback.businessReferenceType(), callback.businessReferenceId(), callback.id());
+            throw new ProviderCallbackApplyException("Provider callback re-drive failed; retry is required.", exception);
         }
     }
 
