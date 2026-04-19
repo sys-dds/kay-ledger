@@ -103,9 +103,14 @@ public class RegionReplicationService {
             return;
         }
         if (WORKSPACE_OWNERSHIP_TRANSFER.equals(event.streamName())) {
+            String fromRegion = text(event.payload().get("fromRegion"));
             String toRegion = text(event.payload().get("toRegion"));
+            long priorEpoch = number(event.payload().get("priorEpoch"));
             long newEpoch = number(event.payload().get("newEpoch"));
+            String triggerMode = text(event.payload().get("triggerMode"));
+            UUID requestedByActorId = optionalUuid(event.payload().get("requestedByActorId"));
             regionStore.upsertReplicatedOwnership(event.workspaceId(), toRegion, newEpoch);
+            regionStore.recordReplicatedFailover(event.workspaceId(), fromRegion, toRegion, priorEpoch, newEpoch, triggerMode, requestedByActorId);
             regionStore.upsertReplicationCheckpoint(event, lagMillis(event.occurredAt()));
         }
     }
@@ -148,6 +153,11 @@ public class RegionReplicationService {
     }
 
     public RegionReadFreshness freshness(String streamName, UUID workspaceId) {
+        if (regionStore.findOwnership(workspaceId)
+                .map(ownership -> regionProperties.getLocalRegionId().equals(ownership.homeRegion()))
+                .orElse(false)) {
+            return new RegionReadFreshness("LOCAL_SOURCE_OF_TRUTH", regionProperties.getLocalRegionId(), regionProperties.getLocalRegionId(), 0, null);
+        }
         return regionStore.latestCheckpointForTarget(regionProperties.getLocalRegionId(), streamName, workspaceId)
                 .map(checkpoint -> new RegionReadFreshness(
                         "REPLICATED_SNAPSHOT",
@@ -238,6 +248,13 @@ public class RegionReplicationService {
             return number.longValue();
         }
         return Long.parseLong(text(value));
+    }
+
+    private static UUID optionalUuid(Object value) {
+        if (value == null || value.toString().isBlank()) {
+            return null;
+        }
+        return UUID.fromString(value.toString());
     }
 
     public record RegionReplicationEvent(

@@ -143,6 +143,16 @@ public class RegionStore {
                 """, FAILOVER_MAPPER, workspaceId, fromRegion, toRegion, priorEpoch, newEpoch, triggerMode, actorId);
     }
 
+    public void recordReplicatedFailover(UUID workspaceId, String fromRegion, String toRegion, long priorEpoch, long newEpoch, String triggerMode, UUID actorId) {
+        jdbcTemplate.update("""
+                INSERT INTO workspace_region_failover_events (
+                    workspace_id, from_region, to_region, prior_epoch, new_epoch, trigger_mode, requested_by_actor_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (workspace_id, from_region, to_region, prior_epoch, new_epoch, trigger_mode) DO NOTHING
+                """, workspaceId, fromRegion, toRegion, priorEpoch, newEpoch, triggerMode, actorId);
+    }
+
     public List<WorkspaceRegionFailoverEvent> listFailoverEvents(UUID workspaceId) {
         return jdbcTemplate.query("""
                 SELECT id, workspace_id, from_region, to_region, prior_epoch, new_epoch, trigger_mode, requested_by_actor_id, created_at
