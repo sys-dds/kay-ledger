@@ -37,6 +37,7 @@ public class RegionStore {
             rs.getString("source_region"),
             rs.getString("target_region"),
             rs.getString("stream_name"),
+            rs.getObject("workspace_id", UUID.class),
             rs.getObject("last_applied_event_id", UUID.class),
             rs.getLong("last_applied_sequence"),
             nullableInstant(rs, "last_applied_at"),
@@ -88,6 +89,21 @@ public class RegionStore {
                 .orElseThrow(() -> new IllegalStateException("Workspace ownership could not be resolved."));
     }
 
+    public WorkspaceRegionOwnership upsertReplicatedOwnership(UUID workspaceId, String homeRegion, long ownershipEpoch) {
+        jdbcTemplate.update("""
+                INSERT INTO workspace_region_ownership (workspace_id, home_region, ownership_epoch, status, transfer_state)
+                VALUES (?, ?, ?, 'ACTIVE', 'TRANSFERRED')
+                ON CONFLICT (workspace_id) DO UPDATE
+                SET home_region = EXCLUDED.home_region,
+                    ownership_epoch = EXCLUDED.ownership_epoch,
+                    status = 'ACTIVE',
+                    transfer_state = 'TRANSFERRED'
+                WHERE workspace_region_ownership.ownership_epoch <= EXCLUDED.ownership_epoch
+                """, workspaceId, homeRegion, ownershipEpoch);
+        return findOwnership(workspaceId)
+                .orElseThrow(() -> new IllegalStateException("Replicated workspace ownership could not be resolved."));
+    }
+
     public Optional<WorkspaceRegionOwnership> findOwnership(UUID workspaceId) {
         return jdbcTemplate.query("""
                 SELECT workspace_id, home_region, ownership_epoch, status, transfer_state, updated_at, created_at
@@ -137,17 +153,18 @@ public class RegionStore {
     }
 
     public void upsertInvestigationSnapshot(RegionReplicationEvent event, com.kayledger.api.investigation.model.InvestigationDocument document, String payloadJson, long lagMillis) {
-        jdbcTemplate.update("""
+        int applied = jdbcTemplate.update("""
                 INSERT INTO region_investigation_read_snapshots (
                     workspace_id, source_region, target_region, replication_event_id,
                     document_id, document_type, reference_type, reference_id,
                     provider_profile_id, payment_intent_id, refund_id, payout_request_id, dispute_id, subscription_id,
                     provider_event_id, external_reference, business_reference_id, status, occurred_at,
-                    payload_json, source_updated_at
+                    payload_json, source_updated_at, replication_sequence
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?)
                 ON CONFLICT (target_region, workspace_id, document_id) DO UPDATE
                 SET replication_event_id = EXCLUDED.replication_event_id,
+                    replication_sequence = EXCLUDED.replication_sequence,
                     document_type = EXCLUDED.document_type,
                     reference_type = EXCLUDED.reference_type,
                     reference_id = EXCLUDED.reference_id,
@@ -165,6 +182,8 @@ public class RegionStore {
                     payload_json = EXCLUDED.payload_json,
                     source_updated_at = EXCLUDED.source_updated_at,
                     replicated_at = now()
+                WHERE region_investigation_read_snapshots.source_updated_at <= EXCLUDED.source_updated_at
+                  AND region_investigation_read_snapshots.replication_sequence <= EXCLUDED.replication_sequence
                 """,
                 event.workspaceId(),
                 event.sourceRegion(),
@@ -186,22 +205,26 @@ public class RegionStore {
                 document.status(),
                 timestamp(document.occurredAt()),
                 payloadJson,
-                timestamp(event.occurredAt()));
-        upsertCheckpoint(event, lagMillis);
+                timestamp(event.occurredAt()),
+                event.sequence());
+        if (applied > 0) {
+            upsertReplicationCheckpoint(event, lagMillis);
+        }
     }
 
     public void upsertProviderSummarySnapshot(RegionReplicationEvent event, ProviderFinancialSummary summary, long lagMillis) {
-        jdbcTemplate.update("""
+        int applied = jdbcTemplate.update("""
                 INSERT INTO region_provider_summary_snapshots (
                     workspace_id, source_region, target_region, replication_event_id,
                     provider_profile_id, currency_code,
                     settled_gross_amount_minor, fee_amount_minor, net_earnings_amount_minor,
                     current_payout_requested_amount_minor, payout_succeeded_amount_minor, refund_amount_minor,
-                    active_dispute_exposure_amount_minor, settled_subscription_net_revenue_amount_minor, source_refreshed_at
+                    active_dispute_exposure_amount_minor, settled_subscription_net_revenue_amount_minor, source_refreshed_at, replication_sequence
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (target_region, workspace_id, provider_profile_id, currency_code) DO UPDATE
                 SET replication_event_id = EXCLUDED.replication_event_id,
+                    replication_sequence = EXCLUDED.replication_sequence,
                     settled_gross_amount_minor = EXCLUDED.settled_gross_amount_minor,
                     fee_amount_minor = EXCLUDED.fee_amount_minor,
                     net_earnings_amount_minor = EXCLUDED.net_earnings_amount_minor,
@@ -212,6 +235,8 @@ public class RegionStore {
                     settled_subscription_net_revenue_amount_minor = EXCLUDED.settled_subscription_net_revenue_amount_minor,
                     source_refreshed_at = EXCLUDED.source_refreshed_at,
                     replicated_at = now()
+                WHERE region_provider_summary_snapshots.source_refreshed_at <= EXCLUDED.source_refreshed_at
+                  AND region_provider_summary_snapshots.replication_sequence <= EXCLUDED.replication_sequence
                 """,
                 event.workspaceId(),
                 event.sourceRegion(),
@@ -227,8 +252,11 @@ public class RegionStore {
                 summary.refundAmountMinor(),
                 summary.activeDisputeExposureAmountMinor(),
                 summary.settledSubscriptionNetRevenueAmountMinor(),
-                timestamp(summary.refreshedAt()));
-        upsertCheckpoint(event, lagMillis);
+                timestamp(summary.refreshedAt()),
+                event.sequence());
+        if (applied > 0) {
+            upsertReplicationCheckpoint(event, lagMillis);
+        }
     }
 
     public List<RegionInvestigationSnapshot> searchInvestigationSnapshots(
@@ -288,36 +316,38 @@ public class RegionStore {
 
     public List<RegionReplicationCheckpoint> replicationCheckpoints(String localRegion) {
         return jdbcTemplate.query("""
-                SELECT source_region, target_region, stream_name, last_applied_event_id, last_applied_sequence, last_applied_at, lag_millis, updated_at
+                SELECT source_region, target_region, stream_name, workspace_id, last_applied_event_id, last_applied_sequence, last_applied_at, lag_millis, updated_at
                 FROM region_replication_checkpoints
                 WHERE target_region = ?
                 ORDER BY source_region, stream_name
                 """, CHECKPOINT_MAPPER, localRegion);
     }
 
-    public Optional<RegionReplicationCheckpoint> latestCheckpointForTarget(String localRegion, String streamName) {
+    public Optional<RegionReplicationCheckpoint> latestCheckpointForTarget(String localRegion, String streamName, UUID workspaceId) {
         return jdbcTemplate.query("""
-                SELECT source_region, target_region, stream_name, last_applied_event_id, last_applied_sequence, last_applied_at, lag_millis, updated_at
+                SELECT source_region, target_region, stream_name, workspace_id, last_applied_event_id, last_applied_sequence, last_applied_at, lag_millis, updated_at
                 FROM region_replication_checkpoints
                 WHERE target_region = ?
                   AND stream_name = ?
+                  AND workspace_id = ?
                 ORDER BY last_applied_at DESC NULLS LAST
                 LIMIT 1
-                """, CHECKPOINT_MAPPER, localRegion, streamName).stream().findFirst();
+                """, CHECKPOINT_MAPPER, localRegion, streamName, workspaceId).stream().findFirst();
     }
 
-    private void upsertCheckpoint(RegionReplicationEvent event, long lagMillis) {
+    public void upsertReplicationCheckpoint(RegionReplicationEvent event, long lagMillis) {
         jdbcTemplate.update("""
                 INSERT INTO region_replication_checkpoints (
-                    source_region, target_region, stream_name, last_applied_event_id, last_applied_sequence, last_applied_at, lag_millis
+                    source_region, target_region, stream_name, workspace_id, last_applied_event_id, last_applied_sequence, last_applied_at, lag_millis
                 )
-                VALUES (?, ?, ?, ?, ?, now(), ?)
-                ON CONFLICT (source_region, target_region, stream_name) DO UPDATE
+                VALUES (?, ?, ?, ?, ?, ?, now(), ?)
+                ON CONFLICT (source_region, target_region, stream_name, workspace_id) DO UPDATE
                 SET last_applied_event_id = EXCLUDED.last_applied_event_id,
                     last_applied_sequence = GREATEST(region_replication_checkpoints.last_applied_sequence, EXCLUDED.last_applied_sequence),
                     last_applied_at = now(),
                     lag_millis = EXCLUDED.lag_millis
-                """, event.sourceRegion(), event.targetRegion(), event.streamName(), event.eventId(), event.sequence(), lagMillis);
+                WHERE region_replication_checkpoints.last_applied_sequence <= EXCLUDED.last_applied_sequence
+                """, event.sourceRegion(), event.targetRegion(), event.streamName(), event.workspaceId(), event.eventId(), event.sequence(), lagMillis);
     }
 
     private static WorkspaceRegionOwnership mapOwnership(ResultSet rs) throws SQLException {

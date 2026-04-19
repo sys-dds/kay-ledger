@@ -30,6 +30,7 @@ public class RegionReplicationService {
 
     public static final String INVESTIGATION_READ_SNAPSHOT = "INVESTIGATION_READ_SNAPSHOT";
     public static final String PROVIDER_SUMMARY_SNAPSHOT = "PROVIDER_SUMMARY_SNAPSHOT";
+    public static final String WORKSPACE_OWNERSHIP_TRANSFER = "WORKSPACE_OWNERSHIP_TRANSFER";
     private static final Logger log = LoggerFactory.getLogger(RegionReplicationService.class);
 
     private final RegionStore regionStore;
@@ -62,6 +63,22 @@ public class RegionReplicationService {
         }
     }
 
+    public void publishOwnershipTransfer(UUID workspaceId, String fromRegion, String toRegion, long priorEpoch, long newEpoch, String triggerMode, UUID actorId) {
+        if (!regionProperties.isReplicationProducerEnabled()) {
+            return;
+        }
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("fromRegion", fromRegion);
+        payload.put("toRegion", toRegion);
+        payload.put("priorEpoch", priorEpoch);
+        payload.put("newEpoch", newEpoch);
+        payload.put("triggerMode", triggerMode);
+        payload.put("requestedByActorId", actorId == null ? null : actorId.toString());
+        for (String peerRegion : regionProperties.getPeerRegionIds()) {
+            publish(WORKSPACE_OWNERSHIP_TRANSFER, workspaceId, peerRegion, payload);
+        }
+    }
+
     @Transactional
     public void apply(String payloadJson) {
         RegionReplicationEvent event = readEvent(payloadJson);
@@ -77,6 +94,13 @@ public class RegionReplicationService {
         if (PROVIDER_SUMMARY_SNAPSHOT.equals(event.streamName())) {
             ProviderFinancialSummary summary = objectMapper.convertValue(event.payload().get("summary"), ProviderFinancialSummary.class);
             regionStore.upsertProviderSummarySnapshot(event, summary, lagMillis(event.occurredAt()));
+            return;
+        }
+        if (WORKSPACE_OWNERSHIP_TRANSFER.equals(event.streamName())) {
+            String toRegion = text(event.payload().get("toRegion"));
+            long newEpoch = number(event.payload().get("newEpoch"));
+            regionStore.upsertReplicatedOwnership(event.workspaceId(), toRegion, newEpoch);
+            regionStore.upsertReplicationCheckpoint(event, lagMillis(event.occurredAt()));
         }
     }
 
@@ -118,7 +142,7 @@ public class RegionReplicationService {
     }
 
     public RegionReadFreshness freshness(String streamName, UUID workspaceId) {
-        return regionStore.latestCheckpointForTarget(regionProperties.getLocalRegionId(), streamName)
+        return regionStore.latestCheckpointForTarget(regionProperties.getLocalRegionId(), streamName, workspaceId)
                 .map(checkpoint -> new RegionReadFreshness(
                         "REPLICATED_SNAPSHOT",
                         checkpoint.sourceRegion(),
@@ -190,6 +214,20 @@ public class RegionReplicationService {
 
     private static long lagMillis(Instant occurredAt) {
         return Math.max(Duration.between(occurredAt, Instant.now()).toMillis(), 0);
+    }
+
+    private static String text(Object value) {
+        if (value == null || value.toString().isBlank()) {
+            throw new IllegalArgumentException("Regional replication payload field is required.");
+        }
+        return value.toString();
+    }
+
+    private static long number(Object value) {
+        if (value instanceof Number number) {
+            return number.longValue();
+        }
+        return Long.parseLong(text(value));
     }
 
     public record RegionReplicationEvent(
