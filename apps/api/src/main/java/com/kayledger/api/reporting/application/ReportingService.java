@@ -21,6 +21,8 @@ import com.kayledger.api.reporting.model.ExportArtifact;
 import com.kayledger.api.reporting.model.ExportJob;
 import com.kayledger.api.reporting.model.ProviderFinancialSummary;
 import com.kayledger.api.reporting.store.ReportingStore;
+import com.kayledger.api.region.application.RegionReplicationService;
+import com.kayledger.api.region.application.RegionService;
 import com.kayledger.api.shared.api.BadRequestException;
 import com.kayledger.api.shared.api.InternalFailureException;
 import com.kayledger.api.temporal.application.OperatorWorkflowRecord;
@@ -44,6 +46,8 @@ public class ReportingService {
     private final InvestigationIndexingService investigationIndexingService;
     private final ObjectProvider<OperatorWorkflowStarter> operatorWorkflowStarter;
     private final OperatorWorkflowService operatorWorkflowService;
+    private final RegionService regionService;
+    private final RegionReplicationService regionReplicationService;
 
     public ReportingService(
             ReportingStore reportingStore,
@@ -52,7 +56,9 @@ public class ReportingService {
             ObjectMapper objectMapper,
             InvestigationIndexingService investigationIndexingService,
             ObjectProvider<OperatorWorkflowStarter> operatorWorkflowStarter,
-            OperatorWorkflowService operatorWorkflowService) {
+            OperatorWorkflowService operatorWorkflowService,
+            RegionService regionService,
+            RegionReplicationService regionReplicationService) {
         this.reportingStore = reportingStore;
         this.objectStorageService = objectStorageService;
         this.accessPolicy = accessPolicy;
@@ -60,17 +66,24 @@ public class ReportingService {
         this.investigationIndexingService = investigationIndexingService;
         this.operatorWorkflowStarter = operatorWorkflowStarter;
         this.operatorWorkflowService = operatorWorkflowService;
+        this.regionService = regionService;
+        this.regionReplicationService = regionReplicationService;
     }
 
     @Transactional
     public List<ProviderFinancialSummary> refreshAndListSummaries(AccessContext context) {
         requireRead(context);
         reportingStore.refreshProviderSummaries(context.workspaceId());
-        return reportingStore.listProviderSummaries(context.workspaceId());
+        List<ProviderFinancialSummary> summaries = reportingStore.listProviderSummaries(context.workspaceId());
+        summaries.forEach(regionReplicationService::publishProviderSummary);
+        return summaries;
     }
 
     public List<ProviderFinancialSummary> listSummaries(AccessContext context) {
         requireRead(context);
+        if (!regionService.isLocalOwner(context.workspaceId())) {
+            return regionReplicationService.providerSummarySnapshots(context.workspaceId());
+        }
         return reportingStore.listProviderSummaries(context.workspaceId());
     }
 
@@ -229,6 +242,7 @@ public class ReportingService {
     private void requireWrite(AccessContext context) {
         accessPolicy.requireWorkspaceRole(context, WorkspaceRole.OWNER, WorkspaceRole.ADMIN);
         accessPolicy.requireScope(context, AccessScope.FINANCE_WRITE);
+        regionService.requireOwnedForWrite(context, "export request start");
     }
 
     public record ExportRequestCommand(String exportType) {

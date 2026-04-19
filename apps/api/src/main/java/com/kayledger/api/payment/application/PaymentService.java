@@ -34,6 +34,7 @@ import com.kayledger.api.payment.model.PayoutRequest;
 import com.kayledger.api.payment.model.ProviderBalanceSummary;
 import com.kayledger.api.payment.model.RefundRecord;
 import com.kayledger.api.payment.store.PaymentStore;
+import com.kayledger.api.region.application.RegionService;
 import com.kayledger.api.risk.application.RiskService;
 import com.kayledger.api.shared.api.BadRequestException;
 import com.kayledger.api.shared.api.NotFoundException;
@@ -60,8 +61,9 @@ public class PaymentService {
     private final SubscriptionStore subscriptionStore;
     private final OutboxService outboxService;
     private final RiskService riskService;
+    private final RegionService regionService;
 
-    public PaymentService(PaymentStore paymentStore, BookingStore bookingStore, AccessPolicy accessPolicy, FinanceService financeService, SubscriptionStore subscriptionStore, OutboxService outboxService, RiskService riskService) {
+    public PaymentService(PaymentStore paymentStore, BookingStore bookingStore, AccessPolicy accessPolicy, FinanceService financeService, SubscriptionStore subscriptionStore, OutboxService outboxService, RiskService riskService, RegionService regionService) {
         this.paymentStore = paymentStore;
         this.bookingStore = bookingStore;
         this.accessPolicy = accessPolicy;
@@ -69,6 +71,7 @@ public class PaymentService {
         this.subscriptionStore = subscriptionStore;
         this.outboxService = outboxService;
         this.riskService = riskService;
+        this.regionService = regionService;
     }
 
     @Transactional
@@ -1009,6 +1012,7 @@ public class PaymentService {
     private void requirePaymentWrite(AccessContext context) {
         accessPolicy.requireWorkspaceRole(context, WorkspaceRole.OWNER, WorkspaceRole.ADMIN);
         accessPolicy.requireScope(context, AccessScope.PAYMENT_WRITE);
+        regionService.requireOwnedForWrite(context, "payment operator mutation");
     }
 
     private static UUID requireId(UUID value, String field) {

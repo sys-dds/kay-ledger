@@ -15,6 +15,38 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
+  region-a-postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: kay_ledger
+      POSTGRES_USER: kay_ledger
+      POSTGRES_PASSWORD: kay_ledger
+    ports:
+      - "15432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kay_ledger -d kay_ledger"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - region_a_postgres_data:/var/lib/postgresql/data
+
+  region-b-postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: kay_ledger
+      POSTGRES_USER: kay_ledger
+      POSTGRES_PASSWORD: kay_ledger
+    ports:
+      - "25432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kay_ledger -d kay_ledger"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - region_b_postgres_data:/var/lib/postgresql/data
+
   redis:
     image: redis:7.4
     ports:
@@ -113,7 +145,69 @@ services:
     ports:
       - "8088:8080"
 
+  region-a-api:
+    build:
+      context: ../../apps/api
+    depends_on:
+      region-a-postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    environment:
+      KAY_LEDGER_DB_URL: jdbc:postgresql://region-a-postgres:5432/kay_ledger
+      KAY_LEDGER_DB_USERNAME: kay_ledger
+      KAY_LEDGER_DB_PASSWORD: kay_ledger
+      KAY_LEDGER_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAY_LEDGER_OPENSEARCH_ENDPOINT: http://opensearch:9200
+      KAY_LEDGER_OBJECT_STORAGE_ENDPOINT: http://minio:9000
+      KAY_LEDGER_TEMPORAL_TARGET: temporal:7233
+      KAY_LEDGER_REGION_LOCAL_ID: region-a
+      KAY_LEDGER_REGION_PEER_IDS: region-b
+      KAY_LEDGER_REGION_ACTIVE_LABEL: region-a
+      KAY_LEDGER_REGION_REPLICATION_PRODUCER_ENABLED: "true"
+      KAY_LEDGER_REGION_REPLICATION_CONSUMER_ENABLED: "true"
+    ports:
+      - "8080:8080"
+
+  region-b-api:
+    build:
+      context: ../../apps/api
+    depends_on:
+      region-b-postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    environment:
+      KAY_LEDGER_DB_URL: jdbc:postgresql://region-b-postgres:5432/kay_ledger
+      KAY_LEDGER_DB_USERNAME: kay_ledger
+      KAY_LEDGER_DB_PASSWORD: kay_ledger
+      KAY_LEDGER_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAY_LEDGER_OPENSEARCH_ENDPOINT: http://opensearch:9200
+      KAY_LEDGER_OBJECT_STORAGE_ENDPOINT: http://minio:9000
+      KAY_LEDGER_TEMPORAL_TARGET: temporal:7233
+      KAY_LEDGER_REGION_LOCAL_ID: region-b
+      KAY_LEDGER_REGION_PEER_IDS: region-a
+      KAY_LEDGER_REGION_ACTIVE_LABEL: region-b
+      KAY_LEDGER_REGION_REPLICATION_PRODUCER_ENABLED: "true"
+      KAY_LEDGER_REGION_REPLICATION_CONSUMER_ENABLED: "true"
+    ports:
+      - "8081:8080"
+
 volumes:
   postgres_data:
+  region_a_postgres_data:
+  region_b_postgres_data:
   opensearch_data:
   minio_data:

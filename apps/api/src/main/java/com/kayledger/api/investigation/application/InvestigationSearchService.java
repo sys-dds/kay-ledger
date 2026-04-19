@@ -13,6 +13,8 @@ import com.kayledger.api.access.application.AccessPolicy;
 import com.kayledger.api.access.model.AccessScope;
 import com.kayledger.api.access.model.WorkspaceRole;
 import com.kayledger.api.investigation.model.InvestigationSearchHit;
+import com.kayledger.api.region.application.RegionReplicationService;
+import com.kayledger.api.region.application.RegionService;
 
 @Service
 public class InvestigationSearchService {
@@ -20,11 +22,15 @@ public class InvestigationSearchService {
     private final OpenSearchInvestigationClient openSearchClient;
     private final InvestigationIndexingService indexingService;
     private final AccessPolicy accessPolicy;
+    private final RegionService regionService;
+    private final RegionReplicationService regionReplicationService;
 
-    public InvestigationSearchService(OpenSearchInvestigationClient openSearchClient, InvestigationIndexingService indexingService, AccessPolicy accessPolicy) {
+    public InvestigationSearchService(OpenSearchInvestigationClient openSearchClient, InvestigationIndexingService indexingService, AccessPolicy accessPolicy, RegionService regionService, RegionReplicationService regionReplicationService) {
         this.openSearchClient = openSearchClient;
         this.indexingService = indexingService;
         this.accessPolicy = accessPolicy;
+        this.regionService = regionService;
+        this.regionReplicationService = regionReplicationService;
     }
 
     public InvestigationIndexingService.ReindexResult reindex(AccessContext context) {
@@ -34,6 +40,21 @@ public class InvestigationSearchService {
 
     public List<InvestigationSearchHit> search(AccessContext context, SearchCommand command) {
         requireRead(context);
+        if (!regionService.isLocalOwner(context.workspaceId())) {
+            SearchCommand criteria = command == null ? new SearchCommand(null, null, null, null, null, null, null, null, null, null) : command;
+            return regionReplicationService.searchInvestigationSnapshots(
+                    context.workspaceId(),
+                    criteria.paymentId(),
+                    criteria.refundId(),
+                    criteria.payoutId(),
+                    criteria.disputeId(),
+                    criteria.providerEventId(),
+                    criteria.externalReference(),
+                    criteria.businessReferenceId(),
+                    criteria.subscriptionId(),
+                    criteria.providerProfileId(),
+                    criteria.referenceId());
+        }
         Map<String, Object> bool = new LinkedHashMap<>();
         List<Map<String, Object>> filters = new ArrayList<>();
         filters.add(term("workspaceId", context.workspaceId().toString()));
