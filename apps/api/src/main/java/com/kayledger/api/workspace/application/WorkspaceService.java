@@ -7,6 +7,7 @@ import org.springframework.stereotype.Service;
 import com.kayledger.api.access.application.AccessContext;
 import com.kayledger.api.access.application.AccessPolicy;
 import com.kayledger.api.access.model.AccessScope;
+import com.kayledger.api.region.application.RegionService;
 import com.kayledger.api.shared.api.BadRequestException;
 import com.kayledger.api.workspace.Workspace;
 import com.kayledger.api.workspace.WorkspaceStore;
@@ -16,14 +17,18 @@ public class WorkspaceService {
 
     private final WorkspaceStore workspaceStore;
     private final AccessPolicy accessPolicy;
+    private final RegionService regionService;
 
-    public WorkspaceService(WorkspaceStore workspaceStore, AccessPolicy accessPolicy) {
+    public WorkspaceService(WorkspaceStore workspaceStore, AccessPolicy accessPolicy, RegionService regionService) {
         this.workspaceStore = workspaceStore;
         this.accessPolicy = accessPolicy;
+        this.regionService = regionService;
     }
 
     public Workspace create(String slug, String displayName) {
-        return workspaceStore.create(requireText(slug, "slug"), requireText(displayName, "displayName"));
+        Workspace workspace = workspaceStore.create(requireText(slug, "slug"), requireText(displayName, "displayName"));
+        regionService.ensureWorkspaceOwnership(workspace.id());
+        return workspace;
     }
 
     public List<Workspace> listForContext(AccessContext context) {
