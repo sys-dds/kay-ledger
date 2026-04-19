@@ -14,11 +14,8 @@ CREATE TABLE regional_drift_records (
     updated_at timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT regional_drift_records_status_check CHECK (status IN ('OPEN', 'RESOLVED')),
     CONSTRAINT regional_drift_records_type_check CHECK (drift_type IN (
-        'OWNERSHIP_MISSING_ON_PEER',
-        'FAILOVER_HISTORY_MISSING_ON_PEER',
         'DELAYED_PROVIDER_CALLBACK_BACKLOG',
         'SNAPSHOT_CHECKPOINT_WITHOUT_ROW',
-        'SNAPSHOT_ROW_BEHIND_CHECKPOINT',
         'REGIONAL_READ_SNAPSHOT_MISSING'
     )),
     CONSTRAINT regional_drift_records_unique_open UNIQUE (workspace_id, drift_type, reference_type, reference_id, status)
@@ -48,7 +45,7 @@ CREATE TABLE regional_recovery_actions (
     completed_at timestamptz,
     CONSTRAINT regional_recovery_actions_actor_fk FOREIGN KEY (workspace_id, requested_by_actor_id)
         REFERENCES workspace_memberships(workspace_id, actor_id),
-    CONSTRAINT regional_recovery_actions_status_check CHECK (status IN ('REQUESTED', 'SUCCEEDED', 'FAILED')),
+    CONSTRAINT regional_recovery_actions_status_check CHECK (status IN ('REQUESTED', 'AWAITING_PEER_APPLY', 'SUCCEEDED', 'FAILED')),
     CONSTRAINT regional_recovery_actions_type_check CHECK (action_type IN (
         'REPLAY_OWNERSHIP_TRANSFER',
         'REDRIVE_DELAYED_PROVIDER_CALLBACK',

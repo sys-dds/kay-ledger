@@ -27,8 +27,6 @@ import com.kayledger.api.shared.api.NotFoundException;
 @Service
 public class RegionalRecoveryService {
 
-    public static final String OWNERSHIP_MISSING_ON_PEER = "OWNERSHIP_MISSING_ON_PEER";
-    public static final String FAILOVER_HISTORY_MISSING_ON_PEER = "FAILOVER_HISTORY_MISSING_ON_PEER";
     public static final String DELAYED_PROVIDER_CALLBACK_BACKLOG = "DELAYED_PROVIDER_CALLBACK_BACKLOG";
     public static final String SNAPSHOT_CHECKPOINT_WITHOUT_ROW = "SNAPSHOT_CHECKPOINT_WITHOUT_ROW";
     public static final String REGIONAL_READ_SNAPSHOT_MISSING = "REGIONAL_READ_SNAPSHOT_MISSING";
@@ -79,24 +77,6 @@ public class RegionalRecoveryService {
                     "PROVIDER_CALLBACK",
                     row.callbackId().toString(),
                     json(Map.of("callbackId", row.callbackId().toString())));
-        }
-        if (recoveryStore.hasFailoverHistory(workspaceId) && !recoveryStore.hasOwnershipTransferCheckpoint(workspaceId)) {
-            recoveryStore.upsertOpenDrift(
-                    workspaceId,
-                    OWNERSHIP_MISSING_ON_PEER,
-                    regionService.localRegionId(),
-                    String.join(",", regionService.peerRegionIds()),
-                    "WORKSPACE",
-                    workspaceId.toString(),
-                    json(Map.of("reason", "failover history exists without ownership transfer checkpoint")));
-            recoveryStore.upsertOpenDrift(
-                    workspaceId,
-                    FAILOVER_HISTORY_MISSING_ON_PEER,
-                    regionService.localRegionId(),
-                    String.join(",", regionService.peerRegionIds()),
-                    "WORKSPACE_FAILOVER_HISTORY",
-                    workspaceId.toString(),
-                    json(Map.of("reason", "failover history has no peer checkpoint")));
         }
         for (var drift : recoveryStore.snapshotCheckpointDrifts(workspaceId)) {
             recoveryStore.upsertOpenDrift(
@@ -159,25 +139,40 @@ public class RegionalRecoveryService {
         }
         RegionalRecoveryAction action = recoveryStore.createAction(context.workspaceId(), drift == null ? null : drift.id(), actionType, referenceType, referenceId, context.actorId());
         try {
-            applyRecovery(context, action);
-            if (drift != null) {
+            RecoveryOutcome outcome = applyRecovery(context, action);
+            if (outcome.completed() && drift != null) {
                 recoveryStore.resolveDrift(context.workspaceId(), drift.id());
             }
-            return recoveryStore.markActionSucceeded(context.workspaceId(), action.id(), json(Map.of("status", "applied")));
+            if (outcome.completed()) {
+                return recoveryStore.markActionSucceeded(context.workspaceId(), action.id(), json(Map.of("status", "applied")));
+            }
+            return recoveryStore.markActionAwaitingPeerApply(context.workspaceId(), action.id(), json(Map.of("status", "replay_published", "completionBoundary", "peer_apply")));
         } catch (RuntimeException exception) {
             recoveryStore.markActionFailed(context.workspaceId(), action.id(), exception.getMessage());
             throw exception;
         }
     }
 
-    private void applyRecovery(AccessContext context, RegionalRecoveryAction action) {
-        switch (action.actionType()) {
-            case REPLAY_OWNERSHIP_TRANSFER -> replayOwnershipTransfer(context);
-            case REDRIVE_DELAYED_PROVIDER_CALLBACK -> providerCallbackService.redriveDelayedCallback(context, UUID.fromString(action.referenceId()));
-            case REPLAY_INVESTIGATION_SNAPSHOT -> investigationIndexingService.indexReference(context.workspaceId(), action.referenceType(), UUID.fromString(action.referenceId()));
-            case REPLAY_PROVIDER_SUMMARY_SNAPSHOT -> reportingService.refreshAndListSummaries(context);
+    private RecoveryOutcome applyRecovery(AccessContext context, RegionalRecoveryAction action) {
+        return switch (action.actionType()) {
+            case REPLAY_OWNERSHIP_TRANSFER -> {
+                replayOwnershipTransfer(context);
+                yield RecoveryOutcome.awaitingPeerApply();
+            }
+            case REDRIVE_DELAYED_PROVIDER_CALLBACK -> {
+                providerCallbackService.redriveDelayedCallback(context, UUID.fromString(action.referenceId()));
+                yield RecoveryOutcome.complete();
+            }
+            case REPLAY_INVESTIGATION_SNAPSHOT -> {
+                investigationIndexingService.indexReference(context.workspaceId(), action.referenceType(), UUID.fromString(action.referenceId()));
+                yield RecoveryOutcome.awaitingPeerApply();
+            }
+            case REPLAY_PROVIDER_SUMMARY_SNAPSHOT -> {
+                reportingService.refreshAndListSummaries(context);
+                yield RecoveryOutcome.awaitingPeerApply();
+            }
             default -> throw new BadRequestException("actionType is invalid.");
-        }
+        };
     }
 
     private void replayOwnershipTransfer(AccessContext context) {
@@ -226,5 +221,15 @@ public class RegionalRecoveryService {
     }
 
     public record RecoveryCommand(UUID driftRecordId, String actionType, String referenceType, String referenceId) {
+    }
+
+    private record RecoveryOutcome(boolean completed) {
+        private static RecoveryOutcome complete() {
+            return new RecoveryOutcome(true);
+        }
+
+        private static RecoveryOutcome awaitingPeerApply() {
+            return new RecoveryOutcome(false);
+        }
     }
 }

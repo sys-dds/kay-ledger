@@ -65,7 +65,7 @@ public class RegionFaultStore {
     }
 
     public RegionChaosFault clear(UUID workspaceId, UUID faultId) {
-        return jdbcTemplate.queryForObject("""
+        return jdbcTemplate.query("""
                 UPDATE region_chaos_faults
                 SET status = 'CLEARED',
                     cleared_at = now()
@@ -73,7 +73,8 @@ public class RegionFaultStore {
                   AND workspace_id = ?
                   AND status = 'ACTIVE'
                 RETURNING id, workspace_id, fault_type, scope, status, parameters_json::text, reason, created_by_actor_id, created_at, cleared_at
-                """, FAULT_MAPPER, faultId, workspaceId);
+                """, FAULT_MAPPER, faultId, workspaceId).stream().findFirst()
+                .orElseThrow(() -> new com.kayledger.api.shared.api.NotFoundException("Regional fault was not found for this workspace."));
     }
 
     private static java.time.Instant nullableInstant(ResultSet rs, String column) throws SQLException {

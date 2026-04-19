@@ -10,7 +10,6 @@ import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -25,6 +24,7 @@ import com.kayledger.api.access.application.AccessContext;
 import com.kayledger.api.region.application.RegionFaultService;
 import com.kayledger.api.region.application.RegionFaultService.FaultCommand;
 import com.kayledger.api.region.application.RegionReplicationService;
+import com.kayledger.api.shared.api.NotFoundException;
 
 @Testcontainers
 @ActiveProfiles("test")
@@ -78,9 +78,10 @@ class RegionFaultIsolationAndTruthfulFreshnessIntegrationTest {
                 "tenant-safe region fault drill"));
 
         assertThat(regionFaultService.active(paymentRead(first))).extracting("id").contains(fault.id());
+        assertThat(fault.scope()).isEqualTo("WORKSPACE");
         assertThat(regionFaultService.active(paymentRead(second))).extracting("id").doesNotContain(fault.id());
         assertThatThrownBy(() -> regionFaultService.clear(paymentWrite(second), fault.id()))
-                .isInstanceOf(EmptyResultDataAccessException.class);
+                .isInstanceOf(NotFoundException.class);
 
         var freshness = regionReplicationService.freshness(RegionReplicationService.PROVIDER_SUMMARY_SNAPSHOT, first.workspaceId());
         assertThat(freshness.readSource()).isEqualTo("LOCAL_SOURCE_OF_TRUTH");

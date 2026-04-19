@@ -136,6 +136,19 @@ public class RegionalRecoveryStore {
                 """, ACTION_MAPPER, resultJson, workspaceId, actionId);
     }
 
+    public RegionalRecoveryAction markActionAwaitingPeerApply(UUID workspaceId, UUID actionId, String resultJson) {
+        return jdbcTemplate.queryForObject("""
+                UPDATE regional_recovery_actions
+                SET status = 'AWAITING_PEER_APPLY',
+                    result_json = ?::jsonb,
+                    failure_reason = NULL
+                WHERE workspace_id = ?
+                  AND id = ?
+                RETURNING id, workspace_id, drift_record_id, action_type, reference_type, reference_id, status,
+                          requested_by_actor_id, result_json::text, failure_reason, created_at, updated_at, completed_at
+                """, ACTION_MAPPER, resultJson, workspaceId, actionId);
+    }
+
     public RegionalRecoveryAction markActionFailed(UUID workspaceId, UUID actionId, String failureReason) {
         return jdbcTemplate.queryForObject("""
                 UPDATE regional_recovery_actions
@@ -195,29 +208,6 @@ public class RegionalRecoveryStore {
                 rs.getString("source_region"),
                 rs.getString("target_region"),
                 rs.getLong("last_applied_sequence")), workspaceId);
-    }
-
-    public boolean hasOwnershipTransferCheckpoint(UUID workspaceId) {
-        Boolean exists = jdbcTemplate.queryForObject("""
-                SELECT EXISTS (
-                    SELECT 1
-                    FROM region_replication_checkpoints
-                    WHERE workspace_id = ?
-                      AND stream_name = 'WORKSPACE_OWNERSHIP_TRANSFER'
-                )
-                """, Boolean.class, workspaceId);
-        return Boolean.TRUE.equals(exists);
-    }
-
-    public boolean hasFailoverHistory(UUID workspaceId) {
-        Boolean exists = jdbcTemplate.queryForObject("""
-                SELECT EXISTS (
-                    SELECT 1
-                    FROM workspace_region_failover_events
-                    WHERE workspace_id = ?
-                )
-                """, Boolean.class, workspaceId);
-        return Boolean.TRUE.equals(exists);
     }
 
     private static Instant instant(ResultSet rs, String column) throws SQLException {

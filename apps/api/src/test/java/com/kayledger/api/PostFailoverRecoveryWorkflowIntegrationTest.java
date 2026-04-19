@@ -114,20 +114,15 @@ class PostFailoverRecoveryWorkflowIntegrationTest {
         assertThat(new RegionStore(regionBJdbc).findOwnership(fixture.workspaceId())).hasValueSatisfying(ownership ->
                 assertThat(ownership.homeRegion()).isEqualTo("region-a"));
 
-        var drift = regionalRecoveryService.scan(context).stream()
-                .filter(record -> RegionalRecoveryService.OWNERSHIP_MISSING_ON_PEER.equals(record.driftType()))
-                .findFirst()
-                .orElseThrow();
-
         try (KafkaConsumer<String, String> consumer = consumer()) {
             consumer.subscribe(List.of("kay-ledger.kay019.failover.replication"));
             consumer.poll(Duration.ofMillis(200));
             var action = regionalRecoveryService.requestRecovery(context, new RecoveryCommand(
-                    drift.id(),
+                    null,
                     RegionalRecoveryService.REPLAY_OWNERSHIP_TRANSFER,
                     "WORKSPACE",
                     fixture.workspaceId().toString()));
-            assertThat(action.status()).isEqualTo("SUCCEEDED");
+            assertThat(action.status()).isEqualTo("AWAITING_PEER_APPLY");
 
             String payload = pollReplicationPayload(consumer);
             regionBReplication(regionBJdbc).apply(payload);
@@ -140,7 +135,7 @@ class PostFailoverRecoveryWorkflowIntegrationTest {
         assertThat(new RegionStore(regionBJdbc).listFailoverEvents(fixture.workspaceId())).hasSize(1);
         assertThat(regionalRecoveryService.listActions(context)).anySatisfy(action -> {
             assertThat(action.actionType()).isEqualTo(RegionalRecoveryService.REPLAY_OWNERSHIP_TRANSFER);
-            assertThat(action.status()).isEqualTo("SUCCEEDED");
+            assertThat(action.status()).isEqualTo("AWAITING_PEER_APPLY");
         });
     }
 
