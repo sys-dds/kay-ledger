@@ -53,7 +53,13 @@ public class InvestigationSearchService {
                     criteria.businessReferenceId(),
                     criteria.subscriptionId(),
                     criteria.providerProfileId(),
-                    criteria.referenceId());
+                    criteria.referenceId(),
+                    criteria.businessReferenceType(),
+                    criteria.status(),
+                    criteria.currencyCode(),
+                    criteria.mismatchType(),
+                    criteria.periodStart(),
+                    criteria.periodEnd());
         }
         Map<String, Object> bool = new LinkedHashMap<>();
         List<Map<String, Object>> filters = new ArrayList<>();
@@ -98,7 +104,7 @@ public class InvestigationSearchService {
 
     private void requireRead(AccessContext context) {
         accessPolicy.requireWorkspaceRole(context, WorkspaceRole.OWNER, WorkspaceRole.ADMIN);
-        accessPolicy.requireScope(context, AccessScope.PAYMENT_READ);
+        accessPolicy.requireScope(context, AccessScope.FINANCE_READ);
     }
 
     private static void addTerm(List<Map<String, Object>> filters, String field, String value) {

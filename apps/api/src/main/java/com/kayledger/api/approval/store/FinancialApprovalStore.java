@@ -173,6 +173,20 @@ public class FinancialApprovalStore {
                 """, REQUEST_MAPPER, workspaceId, requestId);
     }
 
+    public boolean heartbeatExecutionLease(UUID workspaceId, UUID requestId, UUID actorId, int executionAttemptCount, int leaseSeconds) {
+        int updated = jdbcTemplate.update("""
+                UPDATE financial_approval_execution_state
+                SET last_attempt_at = now(),
+                    execution_lease_expires_at = now() + (? * interval '1 second')
+                WHERE workspace_id = ?
+                  AND approval_request_id = ?
+                  AND execution_status = 'IN_PROGRESS'
+                  AND executed_by_actor_id = ?
+                  AND execution_attempt_count = ?
+                """, leaseSeconds, workspaceId, requestId, actorId, executionAttemptCount);
+        return updated > 0;
+    }
+
     public void markExecutionFailed(UUID workspaceId, UUID requestId, UUID actorId, int executionAttemptCount, String reason) {
         jdbcTemplate.update("""
                 UPDATE financial_approval_execution_state

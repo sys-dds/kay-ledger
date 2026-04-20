@@ -19,6 +19,8 @@ import javax.crypto.spec.SecretKeySpec;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.kayledger.api.access.application.AccessContext;
@@ -38,6 +40,8 @@ import com.kayledger.api.shared.messaging.application.OutboxService;
 @Service
 @EnableConfigurationProperties(MerchantFinanceDeliveryProperties.class)
 public class MerchantFinanceEventService {
+
+    private static final Logger log = LoggerFactory.getLogger(MerchantFinanceEventService.class);
 
     public static final int ENVELOPE_VERSION = 1;
 
@@ -235,12 +239,21 @@ public class MerchantFinanceEventService {
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
             String body = snippet(response.body());
             if (response.statusCode() >= 200 && response.statusCode() < 300) {
-                merchantFinanceEventStore.recordDeliverySuccess(work.delivery().workspaceId(), work.delivery().id(), work.delivery().claimOwner(), requestSignature, response.statusCode(), body);
+                if (merchantFinanceEventStore.recordDeliverySuccess(work.delivery().workspaceId(), work.delivery().id(), work.delivery().claimOwner(), requestSignature, response.statusCode(), body).isEmpty()) {
+                    log.warn("Merchant finance delivery success ignored because claim was no longer current. workspaceId={} deliveryId={} claimOwner={}",
+                            work.delivery().workspaceId(), work.delivery().id(), work.delivery().claimOwner());
+                }
             } else {
-                merchantFinanceEventStore.recordDeliveryFailure(work.delivery().workspaceId(), work.delivery().id(), work.delivery().claimOwner(), requestSignature, deliveryProperties.getMaxAttempts(), deliveryProperties.getBackoffSeconds(), response.statusCode(), body, "HTTP " + response.statusCode());
+                if (merchantFinanceEventStore.recordDeliveryFailure(work.delivery().workspaceId(), work.delivery().id(), work.delivery().claimOwner(), requestSignature, deliveryProperties.getMaxAttempts(), deliveryProperties.getBackoffSeconds(), response.statusCode(), body, "HTTP " + response.statusCode()).isEmpty()) {
+                    log.warn("Merchant finance delivery failure ignored because claim was no longer current. workspaceId={} deliveryId={} claimOwner={} responseStatus={}",
+                            work.delivery().workspaceId(), work.delivery().id(), work.delivery().claimOwner(), response.statusCode());
+                }
             }
         } catch (Exception exception) {
-            merchantFinanceEventStore.recordDeliveryFailure(work.delivery().workspaceId(), work.delivery().id(), work.delivery().claimOwner(), requestSignature, deliveryProperties.getMaxAttempts(), deliveryProperties.getBackoffSeconds(), null, null, failureReason(exception));
+            if (merchantFinanceEventStore.recordDeliveryFailure(work.delivery().workspaceId(), work.delivery().id(), work.delivery().claimOwner(), requestSignature, deliveryProperties.getMaxAttempts(), deliveryProperties.getBackoffSeconds(), null, null, failureReason(exception)).isEmpty()) {
+                log.warn("Merchant finance delivery exception ignored because claim was no longer current. workspaceId={} deliveryId={} claimOwner={} failureReason={}",
+                        work.delivery().workspaceId(), work.delivery().id(), work.delivery().claimOwner(), failureReason(exception));
+            }
         }
     }
 

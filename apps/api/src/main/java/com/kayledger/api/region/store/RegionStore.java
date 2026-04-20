@@ -283,7 +283,13 @@ public class RegionStore {
             String businessReferenceId,
             String subscriptionId,
             String providerProfileId,
-            String referenceId) {
+            String referenceId,
+            String businessReferenceType,
+            String status,
+            String currencyCode,
+            String mismatchType,
+            String periodStart,
+            String periodEnd) {
         return jdbcTemplate.query("""
                 SELECT document_id, document_type, reference_type, reference_id, status, payload_json::text,
                        source_region, target_region, replication_event_id, replicated_at
@@ -300,6 +306,12 @@ public class RegionStore {
                   AND (?::text IS NULL OR subscription_id = ?::text)
                   AND (?::text IS NULL OR provider_profile_id = ?::text)
                   AND (?::text IS NULL OR reference_id = ?::text)
+                  AND (?::text IS NULL OR payload_json ->> 'businessReferenceType' = ?::text)
+                  AND (?::text IS NULL OR status = ?::text)
+                  AND (?::text IS NULL OR payload_json ->> 'currencyCode' = ?::text)
+                  AND (?::text IS NULL OR payload_json ->> 'mismatchType' = ?::text)
+                  AND (?::text IS NULL OR payload_json ->> 'periodStart' = ?::text)
+                  AND (?::text IS NULL OR payload_json ->> 'periodEnd' = ?::text)
                 ORDER BY occurred_at DESC NULLS LAST, replicated_at DESC
                 LIMIT 50
                 """, INVESTIGATION_SNAPSHOT_MAPPER,
@@ -313,7 +325,13 @@ public class RegionStore {
                 blankToNull(businessReferenceId), blankToNull(businessReferenceId),
                 blankToNull(subscriptionId), blankToNull(subscriptionId),
                 blankToNull(providerProfileId), blankToNull(providerProfileId),
-                blankToNull(referenceId), blankToNull(referenceId));
+                blankToNull(referenceId), blankToNull(referenceId),
+                blankToNull(businessReferenceType), blankToNull(businessReferenceType),
+                blankToNull(status), blankToNull(status),
+                blankToNull(currencyCode), blankToNull(currencyCode),
+                blankToNull(mismatchType), blankToNull(mismatchType),
+                blankToNull(periodStart), blankToNull(periodStart),
+                blankToNull(periodEnd), blankToNull(periodEnd));
     }
 
     public List<RegionProviderSummarySnapshot> providerSummarySnapshots(String localRegion, UUID workspaceId) {

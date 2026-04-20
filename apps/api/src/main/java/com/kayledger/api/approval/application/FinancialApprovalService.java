@@ -5,7 +5,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
+
+import jakarta.annotation.PreDestroy;
 
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.stereotype.Service;
@@ -46,6 +52,7 @@ public class FinancialApprovalService {
     private final FinancialApprovalProperties properties;
     private final MerchantFinanceEventService merchantFinanceEventService;
     private final TransactionTemplate transactionTemplate;
+    private final ScheduledExecutorService executionHeartbeatExecutor;
 
     public FinancialApprovalService(
             FinancialApprovalStore financialApprovalStore,
@@ -63,6 +70,16 @@ public class FinancialApprovalService {
         this.merchantFinanceEventService = merchantFinanceEventService;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         this.transactionTemplate.setPropagationBehavior(org.springframework.transaction.TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        this.executionHeartbeatExecutor = Executors.newSingleThreadScheduledExecutor(task -> {
+            Thread thread = new Thread(task, "financial-approval-execution-heartbeat");
+            thread.setDaemon(true);
+            return thread;
+        });
+    }
+
+    @PreDestroy
+    void shutdownExecutionHeartbeatExecutor() {
+        executionHeartbeatExecutor.shutdownNow();
     }
 
     @Transactional
@@ -151,6 +168,7 @@ public class FinancialApprovalService {
         FinancialApprovalRequest request = validateApprovedForExecution(context, approvalRequestId, actionType, targetType, targetId);
         ApprovalPolicy policy = policy(actionType);
         FinancialApprovalExecutionState execution = null;
+        ScheduledFuture<?> heartbeat = null;
         try {
             execution = transactionTemplate.execute(status -> financialApprovalStore.markExecutionInProgress(
                     context.workspaceId(),
@@ -158,6 +176,7 @@ public class FinancialApprovalService {
                     context.actorId(),
                     properties.getExecutionLeaseSeconds(),
                     policy.retryAfterFailure()));
+            heartbeat = scheduleExecutionHeartbeat(context, request.id(), execution.executionAttemptCount());
             T result = protectedMutation.get();
             financialApprovalStore.markExecuted(context.workspaceId(), request.id(), context.actorId(), execution.executionAttemptCount());
             return result;
@@ -172,7 +191,26 @@ public class FinancialApprovalService {
                         failureReason(exception)));
             }
             throw exception;
+        } finally {
+            if (heartbeat != null) {
+                heartbeat.cancel(false);
+            }
         }
+    }
+
+    private ScheduledFuture<?> scheduleExecutionHeartbeat(AccessContext context, UUID requestId, int executionAttemptCount) {
+        int leaseSeconds = Math.max(properties.getExecutionLeaseSeconds(), 1);
+        long heartbeatSeconds = Math.max(1, leaseSeconds / 2);
+        return executionHeartbeatExecutor.scheduleAtFixedRate(
+                () -> transactionTemplate.executeWithoutResult(status -> financialApprovalStore.heartbeatExecutionLease(
+                        context.workspaceId(),
+                        requestId,
+                        context.actorId(),
+                        executionAttemptCount,
+                        leaseSeconds)),
+                heartbeatSeconds,
+                heartbeatSeconds,
+                TimeUnit.SECONDS);
     }
 
     private FinancialApprovalRequest validateApprovedForExecution(AccessContext context, UUID approvalRequestId, String actionType, String targetType, UUID targetId) {
