@@ -119,8 +119,7 @@ public class InvestigationIndexingService {
     public ReindexResult replayRegionalSnapshot(UUID workspaceId, String referenceType, UUID referenceId, UUID recoveryActionId) {
         int replayed = 0;
         for (InvestigationDocument document : investigationStore.documentsForReference(workspaceId, referenceType, referenceId)) {
-            regionReplicationService.publishInvestigationDocument(document, recoveryActionId);
-            replayed++;
+            replayed += regionReplicationService.publishInvestigationDocument(document, recoveryActionId);
         }
         return new ReindexResult(replayed, 0);
     }

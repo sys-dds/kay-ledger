@@ -44,6 +44,9 @@ public class RegionalRecoveryStore {
             rs.getObject("requested_by_actor_id", UUID.class),
             rs.getString("result_json"),
             rs.getString("failure_reason"),
+            rs.getString("peer_applied_region"),
+            nullableInstant(rs, "peer_applied_at"),
+            rs.getObject("peer_confirmation_event_id", UUID.class),
             instant(rs, "created_at"),
             instant(rs, "updated_at"),
             nullableInstant(rs, "completed_at"));
@@ -118,7 +121,9 @@ public class RegionalRecoveryStore {
                 )
                 VALUES (?, ?, ?, ?, ?, ?)
                 RETURNING id, workspace_id, drift_record_id, action_type, reference_type, reference_id, status,
-                          requested_by_actor_id, result_json::text, failure_reason, created_at, updated_at, completed_at
+                          requested_by_actor_id, result_json::text, failure_reason,
+                          peer_applied_region, peer_applied_at, peer_confirmation_event_id,
+                          created_at, updated_at, completed_at
                 """, ACTION_MAPPER, workspaceId, driftRecordId, actionType, referenceType, referenceId, actorId);
     }
 
@@ -132,7 +137,9 @@ public class RegionalRecoveryStore {
                 WHERE workspace_id = ?
                   AND id = ?
                 RETURNING id, workspace_id, drift_record_id, action_type, reference_type, reference_id, status,
-                          requested_by_actor_id, result_json::text, failure_reason, created_at, updated_at, completed_at
+                          requested_by_actor_id, result_json::text, failure_reason,
+                          peer_applied_region, peer_applied_at, peer_confirmation_event_id,
+                          created_at, updated_at, completed_at
                 """, ACTION_MAPPER, resultJson, workspaceId, actionId);
     }
 
@@ -145,7 +152,9 @@ public class RegionalRecoveryStore {
                 WHERE workspace_id = ?
                   AND id = ?
                 RETURNING id, workspace_id, drift_record_id, action_type, reference_type, reference_id, status,
-                          requested_by_actor_id, result_json::text, failure_reason, created_at, updated_at, completed_at
+                          requested_by_actor_id, result_json::text, failure_reason,
+                          peer_applied_region, peer_applied_at, peer_confirmation_event_id,
+                          created_at, updated_at, completed_at
                 """, ACTION_MAPPER, resultJson, workspaceId, actionId);
     }
 
@@ -196,7 +205,9 @@ public class RegionalRecoveryStore {
                   AND reference_id = ?
                   AND status = 'AWAITING_PEER_APPLY'
                 RETURNING id, workspace_id, drift_record_id, action_type, reference_type, reference_id, status,
-                          requested_by_actor_id, result_json::text, failure_reason, created_at, updated_at, completed_at
+                          requested_by_actor_id, result_json::text, failure_reason,
+                          peer_applied_region, peer_applied_at, peer_confirmation_event_id,
+                          created_at, updated_at, completed_at
                 """, ACTION_MAPPER, resultJson, appliedRegion, Timestamp.from(appliedAt), confirmationEventId,
                 workspaceId, recoveryActionId, actionType, referenceType, referenceId);
         Optional<RegionalRecoveryAction> action = updated.stream().findFirst();
@@ -214,14 +225,30 @@ public class RegionalRecoveryStore {
                 WHERE workspace_id = ?
                   AND id = ?
                 RETURNING id, workspace_id, drift_record_id, action_type, reference_type, reference_id, status,
-                          requested_by_actor_id, result_json::text, failure_reason, created_at, updated_at, completed_at
+                          requested_by_actor_id, result_json::text, failure_reason,
+                          peer_applied_region, peer_applied_at, peer_confirmation_event_id,
+                          created_at, updated_at, completed_at
                 """, ACTION_MAPPER, truncate(failureReason), workspaceId, actionId);
+    }
+
+    public int expireStaleAwaitingPeerApply(java.time.Duration timeout, String resultJson, String failureReason) {
+        return jdbcTemplate.update("""
+                UPDATE regional_recovery_actions
+                SET status = 'FAILED',
+                    result_json = ?::jsonb,
+                    failure_reason = ?,
+                    completed_at = now()
+                WHERE status = 'AWAITING_PEER_APPLY'
+                  AND created_at < now() - (?::text)::interval
+                """, resultJson, truncate(failureReason), timeout.toSeconds() + " seconds");
     }
 
     public List<RegionalRecoveryAction> listActions(UUID workspaceId) {
         return jdbcTemplate.query("""
                 SELECT id, workspace_id, drift_record_id, action_type, reference_type, reference_id, status,
-                       requested_by_actor_id, result_json::text, failure_reason, created_at, updated_at, completed_at
+                       requested_by_actor_id, result_json::text, failure_reason,
+                       peer_applied_region, peer_applied_at, peer_confirmation_event_id,
+                       created_at, updated_at, completed_at
                 FROM regional_recovery_actions
                 WHERE workspace_id = ?
                 ORDER BY created_at DESC, id
@@ -290,6 +317,93 @@ public class RegionalRecoveryStore {
         return Boolean.TRUE.equals(exists);
     }
 
+    public List<MissingReadSnapshotSurfaceRow> missingReadSnapshotSurfaces(UUID workspaceId, String targetRegion) {
+        return jdbcTemplate.query("""
+                WITH surfaces(stream_name, surface) AS (
+                    VALUES
+                        ('INVESTIGATION_READ_SNAPSHOT', 'investigation read'),
+                        ('PROVIDER_SUMMARY_SNAPSHOT', 'provider summary')
+                ),
+                coverage AS (
+                    SELECT s.stream_name,
+                           s.surface,
+                           c.source_region,
+                           ?::text AS target_region,
+                           c.last_applied_sequence,
+                           c.last_applied_event_id,
+                           CASE
+                               WHEN s.stream_name = 'INVESTIGATION_READ_SNAPSHOT' THEN (
+                                   SELECT count(*)
+                                   FROM region_investigation_read_snapshots ris
+                                   WHERE ris.workspace_id = ?
+                                     AND ris.target_region = ?::text
+                               )
+                               ELSE (
+                                   SELECT count(*)
+                                   FROM region_provider_summary_snapshots rps
+                                   WHERE rps.workspace_id = ?
+                                     AND rps.target_region = ?::text
+                               )
+                           END AS snapshot_row_count,
+                           CASE
+                               WHEN s.stream_name = 'INVESTIGATION_READ_SNAPSHOT' THEN EXISTS (
+                                   SELECT 1
+                                   FROM region_investigation_read_snapshots ris
+                                   WHERE ris.workspace_id = ?
+                                     AND ris.target_region = ?::text
+                                     AND c.last_applied_sequence IS NOT NULL
+                                     AND ris.replication_sequence = c.last_applied_sequence
+                               )
+                               ELSE EXISTS (
+                                   SELECT 1
+                                   FROM region_provider_summary_snapshots rps
+                                   WHERE rps.workspace_id = ?
+                                     AND rps.target_region = ?::text
+                                     AND c.last_applied_sequence IS NOT NULL
+                                     AND rps.replication_sequence = c.last_applied_sequence
+                               )
+                           END AS latest_checkpoint_row_present
+                    FROM surfaces s
+                    LEFT JOIN region_replication_checkpoints c
+                        ON c.workspace_id = ?
+                       AND c.target_region = ?::text
+                       AND c.stream_name = s.stream_name
+                )
+                SELECT stream_name,
+                       surface,
+                       source_region,
+                       target_region,
+                       CASE
+                           WHEN last_applied_sequence IS NULL THEN 'NO_REPLICATION_CHECKPOINT'
+                           WHEN snapshot_row_count = 0 THEN 'NO_SNAPSHOT_ROWS_FOR_CHECKPOINTED_STREAM'
+                           ELSE 'LATEST_CHECKPOINT_ROW_MISSING'
+                       END AS reason,
+                       COALESCE(source_region, 'unknown') || ':' || stream_name || ':' ||
+                           COALESCE(last_applied_sequence::text, 'no-checkpoint') AS reference_id,
+                       last_applied_sequence IS NOT NULL AS checkpoint_present,
+                       snapshot_row_count
+                FROM coverage
+                WHERE last_applied_sequence IS NULL
+                   OR snapshot_row_count = 0
+                   OR latest_checkpoint_row_present = false
+                ORDER BY stream_name
+                """, (rs, rowNum) -> new MissingReadSnapshotSurfaceRow(
+                rs.getString("stream_name"),
+                rs.getString("surface"),
+                rs.getString("source_region"),
+                rs.getString("target_region"),
+                rs.getString("reason"),
+                rs.getString("reference_id"),
+                rs.getBoolean("checkpoint_present"),
+                rs.getLong("snapshot_row_count")),
+                targetRegion,
+                workspaceId, targetRegion,
+                workspaceId, targetRegion,
+                workspaceId, targetRegion,
+                workspaceId, targetRegion,
+                workspaceId, targetRegion);
+    }
+
     private static Instant instant(ResultSet rs, String column) throws SQLException {
         return rs.getTimestamp(column).toInstant();
     }
@@ -310,5 +424,16 @@ public class RegionalRecoveryStore {
     }
 
     public record SnapshotCheckpointDriftRow(String streamName, String sourceRegion, String targetRegion, long lastAppliedSequence) {
+    }
+
+    public record MissingReadSnapshotSurfaceRow(
+            String streamName,
+            String surface,
+            String sourceRegion,
+            String targetRegion,
+            String reason,
+            String referenceId,
+            boolean checkpointPresent,
+            long snapshotRowCount) {
     }
 }

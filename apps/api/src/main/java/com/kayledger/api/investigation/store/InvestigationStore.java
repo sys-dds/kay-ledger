@@ -33,6 +33,7 @@ public class InvestigationStore {
                    'PAYMENT_INTENT' AS business_reference_type,
                    pi.id AS business_reference_id,
                    pi.status,
+                   NULL::text AS mismatch_type,
                    pi.currency_code,
                    pi.gross_amount_minor AS amount_minor,
                    pi.updated_at AS occurred_at
@@ -40,84 +41,94 @@ public class InvestigationStore {
             UNION ALL
             SELECT pa.workspace_id, 'payment_attempt', 'PAYMENT_ATTEMPT', pa.id, pi.provider_profile_id, pi.id,
                    NULL::uuid, NULL::uuid, NULL::uuid, pi.subscription_id, NULL::text, pa.external_reference,
-                   'PAYMENT_INTENT', pi.id, pa.status, pi.currency_code, pa.amount_minor, pa.created_at
+                   'PAYMENT_INTENT', pi.id, pa.status, NULL::text, pi.currency_code, pa.amount_minor, pa.created_at
             FROM payment_attempts pa
             JOIN payment_intents pi ON pi.workspace_id = pa.workspace_id AND pi.id = pa.payment_intent_id
             UNION ALL
             SELECT r.workspace_id, 'refund', 'REFUND', r.id, pi.provider_profile_id, pi.id,
                    r.id, NULL::uuid, NULL::uuid, pi.subscription_id, NULL::text, NULL::text,
-                   'REFUND', r.id, r.status, pi.currency_code, r.amount_minor, r.updated_at
+                   'REFUND', r.id, r.status, NULL::text, pi.currency_code, r.amount_minor, r.updated_at
             FROM refunds r
             JOIN payment_intents pi ON pi.workspace_id = r.workspace_id AND pi.id = r.payment_intent_id
             UNION ALL
             SELECT ra.workspace_id, 'refund_attempt', 'REFUND_ATTEMPT', ra.id, pi.provider_profile_id, pi.id,
                    r.id, NULL::uuid, NULL::uuid, pi.subscription_id, NULL::text, ra.external_reference,
-                   'REFUND', r.id, ra.status, pi.currency_code, r.amount_minor, ra.created_at
+                   'REFUND', r.id, ra.status, NULL::text, pi.currency_code, r.amount_minor, ra.created_at
             FROM refund_attempts ra
             JOIN refunds r ON r.workspace_id = ra.workspace_id AND r.id = ra.refund_id
             JOIN payment_intents pi ON pi.workspace_id = r.workspace_id AND pi.id = r.payment_intent_id
             UNION ALL
             SELECT pr.workspace_id, 'payout', 'PAYOUT_REQUEST', pr.id, pr.provider_profile_id, NULL::uuid,
                    NULL::uuid, pr.id, NULL::uuid, NULL::uuid, NULL::text, NULL::text,
-                   'PAYOUT_REQUEST', pr.id, pr.status, pr.currency_code, pr.requested_amount_minor, pr.updated_at
+                   'PAYOUT_REQUEST', pr.id, pr.status, NULL::text, pr.currency_code, pr.requested_amount_minor, pr.updated_at
             FROM payout_requests pr
             UNION ALL
             SELECT pa.workspace_id, 'payout_attempt', 'PAYOUT_ATTEMPT', pa.id, pr.provider_profile_id, NULL::uuid,
                    NULL::uuid, pr.id, NULL::uuid, NULL::uuid, NULL::text, pa.external_reference,
-                   'PAYOUT_REQUEST', pr.id, pa.status, pr.currency_code, pr.requested_amount_minor, pa.created_at
+                   'PAYOUT_REQUEST', pr.id, pa.status, NULL::text, pr.currency_code, pr.requested_amount_minor, pa.created_at
             FROM payout_attempts pa
             JOIN payout_requests pr ON pr.workspace_id = pa.workspace_id AND pr.id = pa.payout_request_id
             UNION ALL
             SELECT d.workspace_id, 'dispute', 'DISPUTE', d.id, pi.provider_profile_id, pi.id,
                    NULL::uuid, NULL::uuid, d.id, pi.subscription_id, NULL::text, NULL::text,
-                   'DISPUTE', d.id, d.status, pi.currency_code, d.disputed_amount_minor, d.updated_at
+                   'DISPUTE', d.id, d.status, NULL::text, pi.currency_code, d.disputed_amount_minor, d.updated_at
             FROM disputes d
             JOIN payment_intents pi ON pi.workspace_id = d.workspace_id AND pi.id = d.payment_intent_id
             UNION ALL
             SELECT pc.workspace_id, 'provider_callback', 'PROVIDER_CALLBACK', pc.id, NULL::uuid, NULL::uuid,
                    NULL::uuid, NULL::uuid, NULL::uuid, NULL::uuid, pc.provider_event_id, NULL::text,
-                   pc.business_reference_type, pc.business_reference_id, pc.processing_status, NULL::text, NULL::bigint, pc.updated_at
+                   pc.business_reference_type, pc.business_reference_id, pc.processing_status, NULL::text, NULL::text, NULL::bigint, pc.updated_at
             FROM provider_callbacks pc
             UNION ALL
             SELECT rm.workspace_id, 'reconciliation_mismatch', 'RECONCILIATION_MISMATCH', rm.id, NULL::uuid, NULL::uuid,
                    NULL::uuid, NULL::uuid, NULL::uuid, NULL::uuid, NULL::text, NULL::text,
-                   rm.business_reference_type, rm.business_reference_id, rm.repair_status, NULL::text, NULL::bigint, rm.updated_at
+                   rm.business_reference_type, rm.business_reference_id, rm.repair_status, rm.drift_category, NULL::text, NULL::bigint, rm.updated_at
             FROM reconciliation_mismatches rm
             UNION ALL
             SELECT s.workspace_id, 'subscription', 'SUBSCRIPTION', s.id, s.provider_profile_id, NULL::uuid,
                    NULL::uuid, NULL::uuid, NULL::uuid, s.id, NULL::text, NULL::text,
-                   'SUBSCRIPTION', s.id, s.status, NULL::text, NULL::bigint, s.updated_at
+                   'SUBSCRIPTION', s.id, s.status, NULL::text, NULL::text, NULL::bigint, s.updated_at
             FROM subscriptions s
             UNION ALL
             SELECT sc.workspace_id, 'subscription_cycle', 'SUBSCRIPTION_CYCLE', sc.id, sc.provider_profile_id, sc.payment_intent_id,
                    NULL::uuid, NULL::uuid, NULL::uuid, sc.subscription_id, NULL::text, sc.external_reference,
-                   'SUBSCRIPTION_CYCLE', sc.id, sc.status, sc.currency_code, sc.gross_amount_minor, sc.updated_at
+                   'SUBSCRIPTION_CYCLE', sc.id, sc.status, NULL::text, sc.currency_code, sc.gross_amount_minor, sc.updated_at
             FROM subscription_cycles sc
             UNION ALL
             SELECT rf.workspace_id, 'risk_flag', 'RISK_FLAG', rf.id, NULL::uuid, NULL::uuid,
                    NULL::uuid, NULL::uuid, NULL::uuid, NULL::uuid, NULL::text, rf.rule_code,
-                   rf.reference_type, rf.reference_id, rf.status, NULL::text, NULL::bigint, rf.updated_at
+                   rf.reference_type, rf.reference_id, rf.status, NULL::text, NULL::text, NULL::bigint, rf.updated_at
             FROM risk_flags rf
             UNION ALL
             SELECT rr.workspace_id, 'risk_review', 'RISK_REVIEW', rr.id, NULL::uuid, NULL::uuid,
                    NULL::uuid, NULL::uuid, NULL::uuid, NULL::uuid, NULL::text, NULL::text,
-                   'RISK_FLAG', rr.risk_flag_id, rr.status, NULL::text, NULL::bigint, rr.updated_at
+                   'RISK_FLAG', rr.risk_flag_id, rr.status, NULL::text, NULL::text, NULL::bigint, rr.updated_at
             FROM risk_reviews rr
             UNION ALL
             SELECT rd.workspace_id, 'risk_decision', 'RISK_DECISION', rd.id, NULL::uuid, NULL::uuid,
                    NULL::uuid, NULL::uuid, NULL::uuid, NULL::uuid, NULL::text, NULL::text,
-                   rd.reference_type, rd.reference_id, rd.outcome, NULL::text, NULL::bigint, rd.decided_at
+                   rd.reference_type, rd.reference_id, rd.outcome, NULL::text, NULL::text, NULL::bigint, rd.decided_at
             FROM risk_decisions rd
             UNION ALL
             SELECT ej.workspace_id, 'export_job', 'EXPORT_JOB', ej.id, NULL::uuid, NULL::uuid,
                    NULL::uuid, NULL::uuid, NULL::uuid, NULL::uuid, NULL::text, ej.storage_key,
-                   'EXPORT_JOB', ej.id, ej.status, NULL::text, ej.row_count::bigint, ej.updated_at
+                   'EXPORT_JOB', ej.id, ej.status, NULL::text, NULL::text, ej.row_count::bigint, ej.updated_at
             FROM export_jobs ej
             UNION ALL
             SELECT ea.workspace_id, 'export_artifact', 'EXPORT_ARTIFACT', ea.id, NULL::uuid, NULL::uuid,
                    NULL::uuid, NULL::uuid, NULL::uuid, NULL::uuid, NULL::text, ea.storage_key,
-                   'EXPORT_JOB', ea.export_job_id, 'STORED', NULL::text, ea.byte_size::bigint, ea.created_at
+                   'EXPORT_JOB', ea.export_job_id, 'STORED', NULL::text, NULL::text, ea.byte_size::bigint, ea.created_at
             FROM export_artifacts ea
+            UNION ALL
+            SELECT prr.workspace_id, 'provider_reconciliation_run', 'PROVIDER_RECONCILIATION_RUN', prr.id, prr.provider_profile_id, NULL::uuid,
+                   NULL::uuid, NULL::uuid, NULL::uuid, NULL::uuid, NULL::text, prr.source_reference,
+                   'PROVIDER_TRUTH_IMPORT', prr.truth_import_id, prr.status, NULL::text, prr.currency_code, prr.unresolved_item_count::bigint, prr.updated_at
+            FROM provider_reconciliation_runs prr
+            UNION ALL
+            SELECT pri.workspace_id, 'provider_reconciliation_item', 'PROVIDER_RECONCILIATION_ITEM', pri.id, pri.provider_profile_id, NULL::uuid,
+                   NULL::uuid, NULL::uuid, NULL::uuid, NULL::uuid, NULL::text, pri.source_reference,
+                   'PROVIDER_RECONCILIATION_RUN', pri.reconciliation_run_id, pri.status, pri.mismatch_type, pri.currency_code, NULL::bigint, pri.updated_at
+            FROM provider_reconciliation_items pri
             """;
 
     private final JdbcTemplate jdbcTemplate;
@@ -281,6 +292,7 @@ public class InvestigationStore {
         data.put("businessReferenceType", rs.getString("business_reference_type"));
         data.put("businessReferenceId", rs.getObject("business_reference_id", UUID.class));
         data.put("status", rs.getString("status"));
+        data.put("mismatchType", rs.getString("mismatch_type"));
         data.put("currencyCode", rs.getString("currency_code"));
         data.put("amountMinor", nullableLong(rs, "amount_minor"));
         data.put("occurredAt", occurredAt);
@@ -301,6 +313,7 @@ public class InvestigationStore {
                 rs.getString("business_reference_type"),
                 rs.getObject("business_reference_id", UUID.class),
                 rs.getString("status"),
+                rs.getString("mismatch_type"),
                 rs.getString("currency_code"),
                 nullableLong(rs, "amount_minor"),
                 occurredAt,

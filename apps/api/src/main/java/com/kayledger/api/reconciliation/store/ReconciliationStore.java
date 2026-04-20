@@ -4,6 +4,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -12,43 +13,96 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
 
-import com.kayledger.api.reconciliation.model.ReconciliationMismatch;
+import com.kayledger.api.reconciliation.model.ProviderTruthImport;
+import com.kayledger.api.reconciliation.model.ProviderTruthSnapshot;
+import com.kayledger.api.reconciliation.model.ReconciliationItem;
 import com.kayledger.api.reconciliation.model.ReconciliationRun;
 
 @Repository
 public class ReconciliationStore {
 
-    private static final RowMapper<ReconciliationRun> RUN_MAPPER = (rs, rowNum) -> new ReconciliationRun(
+    private static final RowMapper<ProviderTruthImport> IMPORT_MAPPER = (rs, rowNum) -> new ProviderTruthImport(
             rs.getObject("id", UUID.class),
             rs.getObject("workspace_id", UUID.class),
-            rs.getObject("provider_config_id", UUID.class),
-            rs.getString("run_type"),
+            rs.getObject("provider_profile_id", UUID.class),
+            rs.getString("currency_code"),
+            rs.getObject("statement_period_start", LocalDate.class),
+            rs.getObject("statement_period_end", LocalDate.class),
+            rs.getString("source_reference"),
+            rs.getString("source_type"),
             rs.getString("status"),
-            rs.getString("temporal_workflow_id"),
-            rs.getString("temporal_run_id"),
-            rs.getString("trigger_mode"),
-            rs.getString("failure_reason"),
-            rs.getInt("mismatch_count"),
-            instant(rs, "requested_at"),
-            nullableInstant(rs, "started_at"),
-            nullableInstant(rs, "completed_at"),
+            rs.getObject("imported_by_actor_id", UUID.class),
+            instant(rs, "imported_at"),
             instant(rs, "created_at"),
             instant(rs, "updated_at"));
 
-    private static final RowMapper<ReconciliationMismatch> MISMATCH_MAPPER = (rs, rowNum) -> new ReconciliationMismatch(
+    private static final RowMapper<ProviderTruthSnapshot> SNAPSHOT_MAPPER = (rs, rowNum) -> new ProviderTruthSnapshot(
+            rs.getObject("id", UUID.class),
+            rs.getObject("workspace_id", UUID.class),
+            rs.getObject("truth_import_id", UUID.class),
+            rs.getObject("provider_profile_id", UUID.class),
+            rs.getString("currency_code"),
+            rs.getObject("statement_period_start", LocalDate.class),
+            rs.getObject("statement_period_end", LocalDate.class),
+            rs.getString("source_reference"),
+            rs.getLong("settled_gross_amount_minor"),
+            rs.getLong("fee_amount_minor"),
+            rs.getLong("net_earnings_amount_minor"),
+            rs.getLong("payout_succeeded_amount_minor"),
+            rs.getLong("refund_amount_minor"),
+            rs.getLong("active_dispute_exposure_amount_minor"),
+            rs.getLong("settled_subscription_net_revenue_amount_minor"),
+            rs.getString("provider_payload_json"),
+            instant(rs, "created_at"),
+            instant(rs, "updated_at"));
+
+    private static final RowMapper<ReconciliationRun> RUN_MAPPER = (rs, rowNum) -> new ReconciliationRun(
+            rs.getObject("id", UUID.class),
+            rs.getObject("workspace_id", UUID.class),
+            rs.getObject("truth_import_id", UUID.class),
+            rs.getObject("provider_profile_id", UUID.class),
+            rs.getString("currency_code"),
+            rs.getObject("statement_period_start", LocalDate.class),
+            rs.getObject("statement_period_end", LocalDate.class),
+            rs.getString("source_reference"),
+            rs.getString("status"),
+            rs.getObject("started_by_actor_id", UUID.class),
+            instant(rs, "started_at"),
+            nullableInstant(rs, "completed_at"),
+            rs.getInt("unresolved_item_count"),
+            rs.getInt("resolved_item_count"),
+            instant(rs, "created_at"),
+            instant(rs, "updated_at"));
+
+    private static final RowMapper<ReconciliationItem> ITEM_MAPPER = (rs, rowNum) -> new ReconciliationItem(
             rs.getObject("id", UUID.class),
             rs.getObject("workspace_id", UUID.class),
             rs.getObject("reconciliation_run_id", UUID.class),
-            rs.getObject("provider_callback_id", UUID.class),
-            rs.getString("business_reference_type"),
-            rs.getObject("business_reference_id", UUID.class),
-            rs.getString("drift_category"),
-            rs.getString("internal_state"),
-            rs.getString("provider_state"),
-            rs.getString("suggested_action"),
-            rs.getString("repair_status"),
-            rs.getString("repair_note"),
-            nullableInstant(rs, "repaired_at"),
+            rs.getObject("truth_import_id", UUID.class),
+            rs.getObject("provider_profile_id", UUID.class),
+            rs.getString("currency_code"),
+            rs.getString("source_reference"),
+            rs.getString("mismatch_type"),
+            rs.getObject("internal_settled_gross_amount_minor", Long.class),
+            rs.getObject("provider_settled_gross_amount_minor", Long.class),
+            rs.getObject("internal_fee_amount_minor", Long.class),
+            rs.getObject("provider_fee_amount_minor", Long.class),
+            rs.getObject("internal_net_earnings_amount_minor", Long.class),
+            rs.getObject("provider_net_earnings_amount_minor", Long.class),
+            rs.getObject("internal_payout_succeeded_amount_minor", Long.class),
+            rs.getObject("provider_payout_succeeded_amount_minor", Long.class),
+            rs.getObject("internal_refund_amount_minor", Long.class),
+            rs.getObject("provider_refund_amount_minor", Long.class),
+            rs.getObject("internal_active_dispute_exposure_amount_minor", Long.class),
+            rs.getObject("provider_active_dispute_exposure_amount_minor", Long.class),
+            rs.getObject("internal_settled_subscription_net_revenue_amount_minor", Long.class),
+            rs.getObject("provider_settled_subscription_net_revenue_amount_minor", Long.class),
+            rs.getString("detail_json"),
+            rs.getString("status"),
+            rs.getString("resolution_outcome"),
+            rs.getString("resolution_note"),
+            rs.getObject("resolved_by_actor_id", UUID.class),
+            nullableInstant(rs, "resolved_at"),
             instant(rs, "created_at"),
             instant(rs, "updated_at"));
 
@@ -58,250 +112,224 @@ public class ReconciliationStore {
         this.jdbcTemplate = jdbcTemplate;
     }
 
-    public ReconciliationRun createRun(UUID workspaceId, String runType) {
+    public ProviderTruthImport upsertProviderTruthImport(UUID workspaceId, UUID providerProfileId, String currencyCode, LocalDate periodStart, LocalDate periodEnd, String sourceReference, UUID actorId) {
         return jdbcTemplate.queryForObject("""
-                INSERT INTO reconciliation_runs (workspace_id, run_type, started_at)
-                VALUES (?, ?, now())
+                INSERT INTO provider_reconciliation_truth_imports (
+                    workspace_id, provider_profile_id, currency_code, statement_period_start, statement_period_end,
+                    source_reference, imported_by_actor_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (workspace_id, provider_profile_id, currency_code, statement_period_start, statement_period_end, source_reference)
+                DO UPDATE SET imported_by_actor_id = EXCLUDED.imported_by_actor_id,
+                              status = 'RECORDED'
                 RETURNING *
-                """, RUN_MAPPER, workspaceId, runType);
+                """, IMPORT_MAPPER, workspaceId, providerProfileId, currencyCode, periodStart, periodEnd, sourceReference, actorId);
     }
 
-    public ReconciliationRun createRequestedRun(UUID workspaceId, String runType) {
+    public ProviderTruthSnapshot upsertProviderTruthSnapshot(ProviderTruthImport truthImport, ProviderTruthSnapshotDraft draft) {
         return jdbcTemplate.queryForObject("""
-                INSERT INTO reconciliation_runs (workspace_id, run_type, status)
-                VALUES (?, ?, 'REQUESTED')
-                RETURNING *
-                """, RUN_MAPPER, workspaceId, runType);
+                INSERT INTO provider_reconciliation_truth_snapshots (
+                    workspace_id, truth_import_id, provider_profile_id, currency_code,
+                    statement_period_start, statement_period_end, source_reference,
+                    settled_gross_amount_minor, fee_amount_minor, net_earnings_amount_minor,
+                    payout_succeeded_amount_minor, refund_amount_minor, active_dispute_exposure_amount_minor,
+                    settled_subscription_net_revenue_amount_minor, provider_payload_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb)
+                ON CONFLICT (workspace_id, truth_import_id, provider_profile_id, currency_code)
+                DO UPDATE SET settled_gross_amount_minor = EXCLUDED.settled_gross_amount_minor,
+                              fee_amount_minor = EXCLUDED.fee_amount_minor,
+                              net_earnings_amount_minor = EXCLUDED.net_earnings_amount_minor,
+                              payout_succeeded_amount_minor = EXCLUDED.payout_succeeded_amount_minor,
+                              refund_amount_minor = EXCLUDED.refund_amount_minor,
+                              active_dispute_exposure_amount_minor = EXCLUDED.active_dispute_exposure_amount_minor,
+                              settled_subscription_net_revenue_amount_minor = EXCLUDED.settled_subscription_net_revenue_amount_minor,
+                              provider_payload_json = EXCLUDED.provider_payload_json
+                RETURNING id, workspace_id, truth_import_id, provider_profile_id, currency_code,
+                          statement_period_start, statement_period_end, source_reference,
+                          settled_gross_amount_minor, fee_amount_minor, net_earnings_amount_minor,
+                          payout_succeeded_amount_minor, refund_amount_minor, active_dispute_exposure_amount_minor,
+                          settled_subscription_net_revenue_amount_minor, provider_payload_json::text, created_at, updated_at
+                """, SNAPSHOT_MAPPER,
+                truthImport.workspaceId(), truthImport.id(), truthImport.providerProfileId(), truthImport.currencyCode(),
+                truthImport.statementPeriodStart(), truthImport.statementPeriodEnd(), truthImport.sourceReference(),
+                draft.settledGrossAmountMinor(), draft.feeAmountMinor(), draft.netEarningsAmountMinor(),
+                draft.payoutSucceededAmountMinor(), draft.refundAmountMinor(), draft.activeDisputeExposureAmountMinor(),
+                draft.settledSubscriptionNetRevenueAmountMinor(), draft.providerPayloadJson());
     }
 
-    public ReconciliationRun attachWorkflow(UUID workspaceId, UUID runId, String workflowId, String temporalRunId) {
-        return jdbcTemplate.queryForObject("""
-                UPDATE reconciliation_runs
-                SET temporal_workflow_id = ?,
-                    temporal_run_id = ?
-                WHERE workspace_id = ?
-                  AND id = ?
-                RETURNING *
-                """, RUN_MAPPER, workflowId, temporalRunId, workspaceId, runId);
-    }
-
-    public ReconciliationRun markRunning(UUID workspaceId, UUID runId) {
-        return jdbcTemplate.queryForObject("""
-                UPDATE reconciliation_runs
-                SET status = 'RUNNING',
-                    started_at = COALESCE(started_at, now()),
-                    failure_reason = NULL
-                WHERE workspace_id = ?
-                  AND id = ?
-                  AND status IN ('REQUESTED', 'RUNNING')
-                RETURNING *
-                """, RUN_MAPPER, workspaceId, runId);
-    }
-
-    public ReconciliationRun completeRun(UUID workspaceId, UUID runId, int mismatchCount) {
-        return jdbcTemplate.queryForObject("""
-                UPDATE reconciliation_runs
-                SET status = 'COMPLETED',
-                    started_at = COALESCE(started_at, now()),
-                    completed_at = now(),
-                    mismatch_count = ?,
-                    failure_reason = NULL
-                WHERE workspace_id = ?
-                  AND id = ?
-                RETURNING *
-                """, RUN_MAPPER, mismatchCount, workspaceId, runId);
-    }
-
-    public ReconciliationRun completeRun(UUID workspaceId, UUID runId) {
-        return completeRun(workspaceId, runId, countMismatches(workspaceId, runId));
-    }
-
-    public ReconciliationRun markFailed(UUID workspaceId, UUID runId, String failureReason) {
-        return jdbcTemplate.queryForObject("""
-                UPDATE reconciliation_runs
-                SET status = 'FAILED',
-                    completed_at = now(),
-                    failure_reason = ?
-                WHERE workspace_id = ?
-                  AND id = ?
-                RETURNING *
-                """, RUN_MAPPER, truncate(failureReason), workspaceId, runId);
-    }
-
-    public ReconciliationRun findRun(UUID workspaceId, UUID runId) {
-        return jdbcTemplate.queryForObject("""
+    public Optional<ProviderTruthImport> findProviderTruthImport(UUID workspaceId, UUID truthImportId) {
+        return jdbcTemplate.query("""
                 SELECT *
-                FROM reconciliation_runs
+                FROM provider_reconciliation_truth_imports
                 WHERE workspace_id = ?
                   AND id = ?
-                """, RUN_MAPPER, workspaceId, runId);
+                """, IMPORT_MAPPER, workspaceId, truthImportId).stream().findFirst();
+    }
+
+    public Optional<ProviderTruthSnapshot> findProviderTruthSnapshot(UUID workspaceId, UUID truthImportId) {
+        return jdbcTemplate.query("""
+                SELECT id, workspace_id, truth_import_id, provider_profile_id, currency_code,
+                       statement_period_start, statement_period_end, source_reference,
+                       settled_gross_amount_minor, fee_amount_minor, net_earnings_amount_minor,
+                       payout_succeeded_amount_minor, refund_amount_minor, active_dispute_exposure_amount_minor,
+                       settled_subscription_net_revenue_amount_minor, provider_payload_json::text, created_at, updated_at
+                FROM provider_reconciliation_truth_snapshots
+                WHERE workspace_id = ?
+                  AND truth_import_id = ?
+                """, SNAPSHOT_MAPPER, workspaceId, truthImportId).stream().findFirst();
+    }
+
+    public ReconciliationRun createRun(ProviderTruthImport truthImport, UUID actorId) {
+        return jdbcTemplate.queryForObject("""
+                INSERT INTO provider_reconciliation_runs (
+                    workspace_id, truth_import_id, provider_profile_id, currency_code,
+                    statement_period_start, statement_period_end, source_reference, started_by_actor_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                RETURNING *
+                """, RUN_MAPPER, truthImport.workspaceId(), truthImport.id(), truthImport.providerProfileId(), truthImport.currencyCode(),
+                truthImport.statementPeriodStart(), truthImport.statementPeriodEnd(), truthImport.sourceReference(), actorId);
+    }
+
+    public ReconciliationItem createItem(ReconciliationRun run, ReconciliationItemDraft draft) {
+        return jdbcTemplate.queryForObject("""
+                INSERT INTO provider_reconciliation_items (
+                    workspace_id, reconciliation_run_id, truth_import_id, provider_profile_id, currency_code, source_reference,
+                    mismatch_type,
+                    internal_settled_gross_amount_minor, provider_settled_gross_amount_minor,
+                    internal_fee_amount_minor, provider_fee_amount_minor,
+                    internal_net_earnings_amount_minor, provider_net_earnings_amount_minor,
+                    internal_payout_succeeded_amount_minor, provider_payout_succeeded_amount_minor,
+                    internal_refund_amount_minor, provider_refund_amount_minor,
+                    internal_active_dispute_exposure_amount_minor, provider_active_dispute_exposure_amount_minor,
+                    internal_settled_subscription_net_revenue_amount_minor, provider_settled_subscription_net_revenue_amount_minor,
+                    detail_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb)
+                RETURNING *, detail_json::text
+                """, ITEM_MAPPER,
+                run.workspaceId(), run.id(), run.truthImportId(), run.providerProfileId(), run.currencyCode(), run.sourceReference(),
+                draft.mismatchType(),
+                draft.internalSettledGrossAmountMinor(), draft.providerSettledGrossAmountMinor(),
+                draft.internalFeeAmountMinor(), draft.providerFeeAmountMinor(),
+                draft.internalNetEarningsAmountMinor(), draft.providerNetEarningsAmountMinor(),
+                draft.internalPayoutSucceededAmountMinor(), draft.providerPayoutSucceededAmountMinor(),
+                draft.internalRefundAmountMinor(), draft.providerRefundAmountMinor(),
+                draft.internalActiveDisputeExposureAmountMinor(), draft.providerActiveDisputeExposureAmountMinor(),
+                draft.internalSettledSubscriptionNetRevenueAmountMinor(), draft.providerSettledSubscriptionNetRevenueAmountMinor(),
+                draft.detailJson());
+    }
+
+    public ReconciliationRun completeRun(UUID workspaceId, UUID runId, int unresolvedItemCount) {
+        return jdbcTemplate.queryForObject("""
+                UPDATE provider_reconciliation_runs
+                SET status = CASE WHEN ? = 0 THEN 'MATCHED' ELSE 'MISMATCHED' END,
+                    unresolved_item_count = ?,
+                    completed_at = now()
+                WHERE workspace_id = ?
+                  AND id = ?
+                RETURNING *
+                """, RUN_MAPPER, unresolvedItemCount, unresolvedItemCount, workspaceId, runId);
+    }
+
+    public void markImportReconciled(UUID workspaceId, UUID truthImportId) {
+        jdbcTemplate.update("""
+                UPDATE provider_reconciliation_truth_imports
+                SET status = 'RECONCILED'
+                WHERE workspace_id = ?
+                  AND id = ?
+                """, workspaceId, truthImportId);
     }
 
     public List<ReconciliationRun> listRuns(UUID workspaceId) {
         return jdbcTemplate.query("""
                 SELECT *
-                FROM reconciliation_runs
+                FROM provider_reconciliation_runs
                 WHERE workspace_id = ?
-                ORDER BY COALESCE(started_at, requested_at) DESC, id
+                ORDER BY started_at DESC, id
                 """, RUN_MAPPER, workspaceId);
     }
 
-    public ReconciliationMismatch createMismatch(
-            UUID workspaceId,
-            UUID runId,
-            UUID providerCallbackId,
-            String referenceType,
-            UUID referenceId,
-            String driftCategory,
-            String internalState,
-            String providerState,
-            String suggestedAction) {
-        return jdbcTemplate.queryForObject("""
-                INSERT INTO reconciliation_mismatches (
-                    workspace_id, reconciliation_run_id, provider_callback_id,
-                    business_reference_type, business_reference_id, drift_category,
-                    internal_state, provider_state, suggested_action
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                RETURNING *
-                """, MISMATCH_MAPPER, workspaceId, runId, providerCallbackId, referenceType, referenceId, driftCategory, internalState, providerState, suggestedAction);
-    }
-
-    public int createEntityCentricMismatches(UUID workspaceId, UUID runId) {
-        Integer failedCallbacks = jdbcTemplate.queryForObject("""
-                WITH inserted AS (
-                    INSERT INTO reconciliation_mismatches (
-                        workspace_id, reconciliation_run_id, provider_callback_id,
-                        business_reference_type, business_reference_id, drift_category,
-                        internal_state, provider_state, suggested_action
-                    )
-                    SELECT workspace_id, ?, id, business_reference_type, business_reference_id,
-                           'FAILED_CALLBACK_BACKLOG', processing_status, callback_type, 'MANUAL_REVIEW'
-                    FROM provider_callbacks
-                    WHERE workspace_id = ?
-                      AND processing_status = 'FAILED'
-                    RETURNING 1
-                )
-                SELECT count(*) FROM inserted
-                """, Integer.class, runId, workspaceId);
-        Integer paymentProjectionDrift = jdbcTemplate.queryForObject("""
-                WITH inserted AS (
-                    INSERT INTO reconciliation_mismatches (
-                        workspace_id, reconciliation_run_id, provider_callback_id,
-                        business_reference_type, business_reference_id, drift_category,
-                        internal_state, provider_state, suggested_action
-                    )
-                    SELECT pi.workspace_id, ?, NULL, 'PAYMENT_INTENT', pi.id,
-                           CASE WHEN pp.payment_intent_id IS NULL THEN 'MISSING_PROJECTION' ELSE 'STATE_MISMATCH' END,
-                           pi.status, COALESCE(pp.latest_payment_status, 'MISSING_PROJECTION'), 'MANUAL_REVIEW'
-                    FROM payment_intents pi
-                    LEFT JOIN payment_projection pp ON pp.workspace_id = pi.workspace_id
-                     AND pp.payment_intent_id = pi.id
-                    WHERE pi.workspace_id = ?
-                      AND (pp.payment_intent_id IS NULL OR pp.latest_payment_status <> pi.status)
-                    RETURNING 1
-                )
-                SELECT count(*) FROM inserted
-                """, Integer.class, runId, workspaceId);
-        Integer paymentJournalDrift = jdbcTemplate.queryForObject("""
-                WITH inserted AS (
-                    INSERT INTO reconciliation_mismatches (
-                        workspace_id, reconciliation_run_id, provider_callback_id,
-                        business_reference_type, business_reference_id, drift_category,
-                        internal_state, provider_state, suggested_action
-                    )
-                    SELECT pi.workspace_id, ?, NULL, 'PAYMENT_INTENT', pi.id,
-                           'MISSING_JOURNAL', pi.status, 'MISSING_SETTLEMENT_JOURNAL', 'MANUAL_REVIEW'
-                    FROM payment_intents pi
-                    WHERE pi.workspace_id = ?
-                      AND pi.status = 'SETTLED'
-                      AND NOT EXISTS (
-                          SELECT 1
-                          FROM payment_attempts pa
-                          WHERE pa.workspace_id = pi.workspace_id
-                            AND pa.payment_intent_id = pi.id
-                            AND pa.attempt_type = 'SETTLE'
-                            AND pa.status = 'SUCCEEDED'
-                            AND pa.journal_entry_id IS NOT NULL
-                      )
-                    RETURNING 1
-                )
-                SELECT count(*) FROM inserted
-                """, Integer.class, runId, workspaceId);
-        Integer refundJournalDrift = jdbcTemplate.queryForObject("""
-                WITH inserted AS (
-                    INSERT INTO reconciliation_mismatches (
-                        workspace_id, reconciliation_run_id, provider_callback_id,
-                        business_reference_type, business_reference_id, drift_category,
-                        internal_state, provider_state, suggested_action
-                    )
-                    SELECT workspace_id, ?, NULL, 'REFUND', id,
-                           'MISSING_JOURNAL', status, 'MISSING_REFUND_JOURNAL', 'MANUAL_REVIEW'
-                    FROM refunds
-                    WHERE workspace_id = ?
-                      AND status = 'SUCCEEDED'
-                      AND journal_entry_id IS NULL
-                    RETURNING 1
-                )
-                SELECT count(*) FROM inserted
-                """, Integer.class, runId, workspaceId);
-        return count(failedCallbacks) + count(paymentProjectionDrift) + count(paymentJournalDrift) + count(refundJournalDrift);
-    }
-
-    public List<ReconciliationMismatch> listMismatches(UUID workspaceId) {
+    public Optional<ReconciliationRun> findRun(UUID workspaceId, UUID runId) {
         return jdbcTemplate.query("""
                 SELECT *
-                FROM reconciliation_mismatches
+                FROM provider_reconciliation_runs
                 WHERE workspace_id = ?
-                ORDER BY CASE WHEN suggested_action = 'APPLY_PROVIDER_STATE' THEN 0 ELSE 1 END,
-                         CASE WHEN drift_category = 'STATE_MISMATCH' THEN 0 ELSE 1 END,
-                         created_at DESC,
-                         id
-                """, MISMATCH_MAPPER, workspaceId);
+                  AND id = ?
+                """, RUN_MAPPER, workspaceId, runId).stream().findFirst();
     }
 
-    public int countMismatches(UUID workspaceId, UUID runId) {
-        Integer value = jdbcTemplate.queryForObject("""
-                SELECT count(*)
-                FROM reconciliation_mismatches
+    public List<ReconciliationItem> listItems(UUID workspaceId, UUID runId, boolean unresolvedOnly) {
+        return jdbcTemplate.query("""
+                SELECT *, detail_json::text
+                FROM provider_reconciliation_items
                 WHERE workspace_id = ?
                   AND reconciliation_run_id = ?
-                """, Integer.class, workspaceId, runId);
-        return count(value);
+                  AND (? = false OR status = 'OPEN')
+                ORDER BY created_at, id
+                """, ITEM_MAPPER, workspaceId, runId, unresolvedOnly);
     }
 
-    public Optional<ReconciliationMismatch> findMismatch(UUID workspaceId, UUID mismatchId) {
+    public Optional<ReconciliationItem> findItem(UUID workspaceId, UUID itemId) {
         return jdbcTemplate.query("""
-                SELECT *
-                FROM reconciliation_mismatches
+                SELECT *, detail_json::text
+                FROM provider_reconciliation_items
                 WHERE workspace_id = ?
                   AND id = ?
-                """, MISMATCH_MAPPER, workspaceId, mismatchId).stream().findFirst();
+                """, ITEM_MAPPER, workspaceId, itemId).stream().findFirst();
     }
 
-    public ReconciliationMismatch markRepair(UUID workspaceId, UUID mismatchId, String note) {
+    public ReconciliationItem resolveItem(UUID workspaceId, UUID itemId, UUID actorId, String resolutionOutcome, String resolutionNote) {
         return jdbcTemplate.queryForObject("""
-                UPDATE reconciliation_mismatches
-                SET repair_status = 'MARKED',
-                    repair_note = ?
+                UPDATE provider_reconciliation_items
+                SET status = 'RESOLVED',
+                    resolution_outcome = ?,
+                    resolution_note = ?,
+                    resolved_by_actor_id = ?,
+                    resolved_at = now()
                 WHERE workspace_id = ?
                   AND id = ?
-                  AND repair_status = 'OPEN'
-                RETURNING *
-                """, MISMATCH_MAPPER, note, workspaceId, mismatchId);
+                  AND status = 'OPEN'
+                RETURNING *, detail_json::text
+                """, ITEM_MAPPER, resolutionOutcome, resolutionNote, actorId, workspaceId, itemId);
     }
 
-    public ReconciliationMismatch markApplied(UUID workspaceId, UUID mismatchId, String note) {
+    public ReconciliationItem reopenItem(UUID workspaceId, UUID itemId) {
         return jdbcTemplate.queryForObject("""
-                UPDATE reconciliation_mismatches
-                SET repair_status = 'APPLIED',
-                    repair_note = ?,
-                    repaired_at = now()
+                UPDATE provider_reconciliation_items
+                SET status = 'OPEN',
+                    resolution_outcome = NULL,
+                    resolution_note = NULL,
+                    resolved_by_actor_id = NULL,
+                    resolved_at = NULL
                 WHERE workspace_id = ?
                   AND id = ?
-                  AND repair_status IN ('OPEN', 'MARKED')
-                RETURNING *
-                """, MISMATCH_MAPPER, note, workspaceId, mismatchId);
+                  AND status = 'RESOLVED'
+                RETURNING *, detail_json::text
+                """, ITEM_MAPPER, workspaceId, itemId);
+    }
+
+    public void refreshRunCounts(UUID workspaceId, UUID runId) {
+        jdbcTemplate.update("""
+                UPDATE provider_reconciliation_runs
+                SET unresolved_item_count = (
+                        SELECT count(*)
+                        FROM provider_reconciliation_items
+                        WHERE workspace_id = ?
+                          AND reconciliation_run_id = ?
+                          AND status = 'OPEN'
+                    ),
+                    resolved_item_count = (
+                        SELECT count(*)
+                        FROM provider_reconciliation_items
+                        WHERE workspace_id = ?
+                          AND reconciliation_run_id = ?
+                          AND status = 'RESOLVED'
+                    )
+                WHERE workspace_id = ?
+                  AND id = ?
+                """, workspaceId, runId, workspaceId, runId, workspaceId, runId);
     }
 
     private static Instant instant(ResultSet rs, String column) throws SQLException {
@@ -313,14 +341,33 @@ public class ReconciliationStore {
         return timestamp == null ? null : timestamp.toInstant();
     }
 
-    private static int count(Integer value) {
-        return value == null ? 0 : value;
+    public record ProviderTruthSnapshotDraft(
+            long settledGrossAmountMinor,
+            long feeAmountMinor,
+            long netEarningsAmountMinor,
+            long payoutSucceededAmountMinor,
+            long refundAmountMinor,
+            long activeDisputeExposureAmountMinor,
+            long settledSubscriptionNetRevenueAmountMinor,
+            String providerPayloadJson) {
     }
 
-    private static String truncate(String value) {
-        if (value == null) {
-            return null;
-        }
-        return value.length() <= 1000 ? value : value.substring(0, 1000);
+    public record ReconciliationItemDraft(
+            String mismatchType,
+            Long internalSettledGrossAmountMinor,
+            Long providerSettledGrossAmountMinor,
+            Long internalFeeAmountMinor,
+            Long providerFeeAmountMinor,
+            Long internalNetEarningsAmountMinor,
+            Long providerNetEarningsAmountMinor,
+            Long internalPayoutSucceededAmountMinor,
+            Long providerPayoutSucceededAmountMinor,
+            Long internalRefundAmountMinor,
+            Long providerRefundAmountMinor,
+            Long internalActiveDisputeExposureAmountMinor,
+            Long providerActiveDisputeExposureAmountMinor,
+            Long internalSettledSubscriptionNetRevenueAmountMinor,
+            Long providerSettledSubscriptionNetRevenueAmountMinor,
+            String detailJson) {
     }
 }

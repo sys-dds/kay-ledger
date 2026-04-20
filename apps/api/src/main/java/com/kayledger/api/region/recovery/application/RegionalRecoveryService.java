@@ -1,5 +1,6 @@
 package com.kayledger.api.region.recovery.application;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -35,6 +36,7 @@ public class RegionalRecoveryService {
     public static final String REDRIVE_DELAYED_PROVIDER_CALLBACK = "REDRIVE_DELAYED_PROVIDER_CALLBACK";
     public static final String REPLAY_INVESTIGATION_SNAPSHOT = "REPLAY_INVESTIGATION_SNAPSHOT";
     public static final String REPLAY_PROVIDER_SUMMARY_SNAPSHOT = "REPLAY_PROVIDER_SUMMARY_SNAPSHOT";
+    private static final Duration AWAITING_PEER_APPLY_TIMEOUT = Duration.ofHours(1);
 
     private final RegionalRecoveryStore recoveryStore;
     private final RegionService regionService;
@@ -67,6 +69,7 @@ public class RegionalRecoveryService {
     @Transactional
     public List<RegionalDriftRecord> scan(AccessContext context) {
         requireWrite(context);
+        expireStaleAwaitingPeerApply();
         UUID workspaceId = context.workspaceId();
         for (var row : recoveryStore.delayedCallbacks(workspaceId)) {
             recoveryStore.upsertOpenDrift(
@@ -89,25 +92,19 @@ public class RegionalRecoveryService {
                     json(Map.of("streamName", drift.streamName(), "lastAppliedSequence", drift.lastAppliedSequence())));
         }
         if (!regionService.isLocalOwner(workspaceId)) {
-            if (!recoveryStore.hasProviderSummarySnapshotRows(workspaceId, regionService.localRegionId())) {
+            for (var missing : recoveryStore.missingReadSnapshotSurfaces(workspaceId, regionService.localRegionId())) {
                 recoveryStore.upsertOpenDrift(
                         workspaceId,
                         REGIONAL_READ_SNAPSHOT_MISSING,
-                        null,
-                        regionService.localRegionId(),
-                        RegionReplicationService.PROVIDER_SUMMARY_SNAPSHOT,
-                        workspaceId.toString(),
-                        json(Map.of("surface", "provider summary")));
-            }
-            if (!recoveryStore.hasInvestigationSnapshotRows(workspaceId, regionService.localRegionId())) {
-                recoveryStore.upsertOpenDrift(
-                        workspaceId,
-                        REGIONAL_READ_SNAPSHOT_MISSING,
-                        null,
-                        regionService.localRegionId(),
-                        RegionReplicationService.INVESTIGATION_READ_SNAPSHOT,
-                        workspaceId.toString(),
-                        json(Map.of("surface", "investigation read")));
+                        missing.sourceRegion(),
+                        missing.targetRegion(),
+                        missing.streamName(),
+                        missing.referenceId(),
+                        json(Map.of(
+                                "surface", missing.surface(),
+                                "reason", missing.reason(),
+                                "checkpointPresent", missing.checkpointPresent(),
+                                "snapshotRowCount", missing.snapshotRowCount())));
             }
         }
         return recoveryStore.listUnresolvedDrift(workspaceId);
@@ -125,6 +122,7 @@ public class RegionalRecoveryService {
 
     public List<RegionalRecoveryAction> listActions(AccessContext context) {
         requireRead(context);
+        expireStaleAwaitingPeerApply();
         return recoveryStore.listActions(context.workspaceId());
     }
 
@@ -157,7 +155,13 @@ public class RegionalRecoveryService {
             if (outcome.completed()) {
                 return recoveryStore.markActionSucceeded(context.workspaceId(), action.id(), json(Map.of("status", "applied")));
             }
-            return recoveryStore.markActionAwaitingPeerApply(context.workspaceId(), action.id(), json(Map.of("status", "replay_published", "completionBoundary", "peer_apply")));
+            if (outcome.peerMessagesPublished() <= 0) {
+                throw new BadRequestException("Recovery replay emitted zero peer replication messages.");
+            }
+            return recoveryStore.markActionAwaitingPeerApply(context.workspaceId(), action.id(), json(Map.of(
+                    "status", "replay_published",
+                    "completionBoundary", "peer_apply",
+                    "peerMessagesPublished", outcome.peerMessagesPublished())));
         } catch (RuntimeException exception) {
             recoveryStore.markActionFailed(context.workspaceId(), action.id(), exception.getMessage());
             throw exception;
@@ -167,32 +171,38 @@ public class RegionalRecoveryService {
     private RecoveryOutcome applyRecovery(AccessContext context, RegionalRecoveryAction action) {
         return switch (action.actionType()) {
             case REPLAY_OWNERSHIP_TRANSFER -> {
-                replayOwnershipTransfer(context, action.id());
-                yield RecoveryOutcome.awaitingPeerApply();
+                int published = replayOwnershipTransfer(context, action.id());
+                yield RecoveryOutcome.awaitingPeerApply(published);
             }
             case REDRIVE_DELAYED_PROVIDER_CALLBACK -> {
                 providerCallbackService.redriveDelayedCallback(context, UUID.fromString(action.referenceId()));
                 yield RecoveryOutcome.complete();
             }
             case REPLAY_INVESTIGATION_SNAPSHOT -> {
-                investigationIndexingService.replayRegionalSnapshot(context.workspaceId(), action.referenceType(), UUID.fromString(action.referenceId()), action.id());
-                yield RecoveryOutcome.awaitingPeerApply();
+                InvestigationIndexingService.ReindexResult result = investigationIndexingService.replayRegionalSnapshot(context.workspaceId(), action.referenceType(), UUID.fromString(action.referenceId()), action.id());
+                if (result.indexed() <= 0) {
+                    throw new BadRequestException("No investigation documents are available for regional replay.");
+                }
+                yield RecoveryOutcome.awaitingPeerApply(result.indexed());
             }
             case REPLAY_PROVIDER_SUMMARY_SNAPSHOT -> {
-                reportingService.replayProviderSummarySnapshot(context.workspaceId(), action.id());
-                yield RecoveryOutcome.awaitingPeerApply();
+                int published = reportingService.replayProviderSummarySnapshot(context.workspaceId(), action.id());
+                if (published <= 0) {
+                    throw new BadRequestException("No provider summary rows are available for regional replay.");
+                }
+                yield RecoveryOutcome.awaitingPeerApply(published);
             }
             default -> throw new BadRequestException("actionType is invalid.");
         };
     }
 
-    private void replayOwnershipTransfer(AccessContext context, UUID recoveryActionId) {
+    private int replayOwnershipTransfer(AccessContext context, UUID recoveryActionId) {
         List<WorkspaceRegionFailoverEvent> events = regionService.failoverEvents(context.workspaceId());
         if (events.isEmpty()) {
             throw new BadRequestException("No failover event is available to replay.");
         }
         WorkspaceRegionFailoverEvent latest = events.get(0);
-        regionReplicationService.publishOwnershipTransfer(
+        return regionReplicationService.publishOwnershipTransfer(
                 context.workspaceId(),
                 latest.fromRegion(),
                 latest.toRegion(),
@@ -201,6 +211,13 @@ public class RegionalRecoveryService {
                 latest.triggerMode(),
                 context.actorId(),
                 recoveryActionId);
+    }
+
+    private void expireStaleAwaitingPeerApply() {
+        recoveryStore.expireStaleAwaitingPeerApply(
+                AWAITING_PEER_APPLY_TIMEOUT,
+                json(Map.of("status", "peer_apply_expired", "timeoutSeconds", AWAITING_PEER_APPLY_TIMEOUT.toSeconds())),
+                "Peer apply confirmation was not received before the recovery timeout.");
     }
 
     private void requireRead(AccessContext context) {
@@ -235,13 +252,13 @@ public class RegionalRecoveryService {
     public record RecoveryCommand(UUID driftRecordId, String actionType, String referenceType, String referenceId) {
     }
 
-    private record RecoveryOutcome(boolean completed) {
+    private record RecoveryOutcome(boolean completed, int peerMessagesPublished) {
         private static RecoveryOutcome complete() {
-            return new RecoveryOutcome(true);
+            return new RecoveryOutcome(true, 0);
         }
 
-        private static RecoveryOutcome awaitingPeerApply() {
-            return new RecoveryOutcome(false);
+        private static RecoveryOutcome awaitingPeerApply(int peerMessagesPublished) {
+            return new RecoveryOutcome(false, peerMessagesPublished);
         }
     }
 }

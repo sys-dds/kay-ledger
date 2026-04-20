@@ -41,7 +41,7 @@ public class InvestigationSearchService {
     public List<InvestigationSearchHit> search(AccessContext context, SearchCommand command) {
         requireRead(context);
         if (!regionService.isLocalOwner(context.workspaceId())) {
-            SearchCommand criteria = command == null ? new SearchCommand(null, null, null, null, null, null, null, null, null, null) : command;
+            SearchCommand criteria = command == null ? SearchCommand.empty() : command;
             return regionReplicationService.searchInvestigationSnapshots(
                     context.workspaceId(),
                     criteria.paymentId(),
@@ -69,6 +69,9 @@ public class InvestigationSearchService {
             addTerm(filters, "subscriptionId", command.subscriptionId());
             addTerm(filters, "providerProfileId", command.providerProfileId());
             addTerm(filters, "referenceId", command.referenceId());
+            addTerm(filters, "status", command.status());
+            addTerm(filters, "currencyCode", command.currencyCode());
+            addTerm(filters, "mismatchType", command.mismatchType());
         }
         bool.put("filter", filters);
         Map<String, Object> query = Map.of(
@@ -79,15 +82,15 @@ public class InvestigationSearchService {
     }
 
     public List<InvestigationSearchHit> byReference(AccessContext context, String referenceId) {
-        return search(context, new SearchCommand(null, null, null, null, null, null, null, null, null, referenceId));
+        return search(context, SearchCommand.empty().withReferenceId(referenceId));
     }
 
     public List<InvestigationSearchHit> byProviderEvent(AccessContext context, String providerEventId) {
-        return search(context, new SearchCommand(null, null, null, null, providerEventId, null, null, null, null, null));
+        return search(context, SearchCommand.empty().withProviderEventId(providerEventId));
     }
 
     public List<InvestigationSearchHit> byExternalReference(AccessContext context, String externalReference) {
-        return search(context, new SearchCommand(null, null, null, null, null, externalReference, null, null, null, null));
+        return search(context, SearchCommand.empty().withExternalReference(externalReference));
     }
 
     private void requireRead(AccessContext context) {
@@ -115,6 +118,38 @@ public class InvestigationSearchService {
             String businessReferenceId,
             String subscriptionId,
             String providerProfileId,
-            String referenceId) {
+            String referenceId,
+            String status,
+            String currencyCode,
+            String mismatchType) {
+        public SearchCommand(
+                String paymentId,
+                String refundId,
+                String payoutId,
+                String disputeId,
+                String providerEventId,
+                String externalReference,
+                String businessReferenceId,
+                String subscriptionId,
+                String providerProfileId,
+                String referenceId) {
+            this(paymentId, refundId, payoutId, disputeId, providerEventId, externalReference, businessReferenceId, subscriptionId, providerProfileId, referenceId, null, null, null);
+        }
+
+        private static SearchCommand empty() {
+            return new SearchCommand(null, null, null, null, null, null, null, null, null, null, null, null, null);
+        }
+
+        private SearchCommand withReferenceId(String referenceId) {
+            return new SearchCommand(paymentId, refundId, payoutId, disputeId, providerEventId, externalReference, businessReferenceId, subscriptionId, providerProfileId, referenceId, status, currencyCode, mismatchType);
+        }
+
+        private SearchCommand withProviderEventId(String providerEventId) {
+            return new SearchCommand(paymentId, refundId, payoutId, disputeId, providerEventId, externalReference, businessReferenceId, subscriptionId, providerProfileId, referenceId, status, currencyCode, mismatchType);
+        }
+
+        private SearchCommand withExternalReference(String externalReference) {
+            return new SearchCommand(paymentId, refundId, payoutId, disputeId, providerEventId, externalReference, businessReferenceId, subscriptionId, providerProfileId, referenceId, status, currencyCode, mismatchType);
+        }
     }
 }

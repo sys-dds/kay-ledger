@@ -4,25 +4,18 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.util.UUID;
 
-public record ReconciliationRun(
+public record ProviderTruthImport(
         UUID id,
         UUID workspaceId,
-        UUID truthImportId,
         UUID providerProfileId,
         String currencyCode,
         LocalDate statementPeriodStart,
         LocalDate statementPeriodEnd,
         String sourceReference,
+        String sourceType,
         String status,
-        UUID startedByActorId,
-        Instant startedAt,
-        Instant completedAt,
-        int unresolvedItemCount,
-        int resolvedItemCount,
+        UUID importedByActorId,
+        Instant importedAt,
         Instant createdAt,
         Instant updatedAt) {
-
-    public int mismatchCount() {
-        return unresolvedItemCount + resolvedItemCount;
-    }
 }

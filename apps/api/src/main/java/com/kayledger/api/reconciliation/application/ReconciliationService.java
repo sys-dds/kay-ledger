@@ -1,189 +1,118 @@
 package com.kayledger.api.reconciliation.application;
 
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.beans.factory.ObjectProvider;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.kayledger.api.access.application.AccessContext;
 import com.kayledger.api.access.application.AccessPolicy;
 import com.kayledger.api.access.model.AccessScope;
 import com.kayledger.api.access.model.WorkspaceRole;
 import com.kayledger.api.investigation.application.InvestigationIndexingService;
-import com.kayledger.api.payment.model.PaymentIntent;
-import com.kayledger.api.payment.model.PayoutRequest;
-import com.kayledger.api.payment.model.RefundRecord;
-import com.kayledger.api.payment.application.PaymentService;
-import com.kayledger.api.payment.store.PaymentStore;
-import com.kayledger.api.provider.model.ProviderCallback;
-import com.kayledger.api.provider.store.ProviderStore;
-import com.kayledger.api.reconciliation.model.ReconciliationMismatch;
+import com.kayledger.api.provider.model.ProviderStatementAmounts;
+import com.kayledger.api.provider.model.ProviderStatementTruth;
+import com.kayledger.api.reconciliation.model.ProviderTruthImport;
+import com.kayledger.api.reconciliation.model.ProviderTruthSnapshot;
+import com.kayledger.api.reconciliation.model.ReconciliationItem;
+import com.kayledger.api.reconciliation.model.ReconciliationMismatchType;
 import com.kayledger.api.reconciliation.model.ReconciliationRun;
 import com.kayledger.api.reconciliation.store.ReconciliationStore;
+import com.kayledger.api.reconciliation.store.ReconciliationStore.ProviderTruthSnapshotDraft;
+import com.kayledger.api.reconciliation.store.ReconciliationStore.ReconciliationItemDraft;
 import com.kayledger.api.region.application.RegionService;
-import com.kayledger.api.risk.application.RiskService;
+import com.kayledger.api.reporting.model.ProviderFinancialSummary;
+import com.kayledger.api.reporting.store.ReportingStore;
 import com.kayledger.api.shared.api.BadRequestException;
-import com.kayledger.api.shared.api.InternalFailureException;
 import com.kayledger.api.shared.api.NotFoundException;
-import com.kayledger.api.temporal.application.OperatorWorkflowRecord;
-import com.kayledger.api.temporal.application.OperatorWorkflowService;
-import com.kayledger.api.temporal.application.OperatorWorkflowStarter;
-import com.kayledger.api.temporal.workflow.OperatorWorkflowInput;
-import com.kayledger.api.temporal.workflow.ReconciliationOperatorWorkflow;
-
-import io.temporal.client.WorkflowClient;
 
 @Service
 public class ReconciliationService {
 
-    private static final String STATE_MISMATCH = "STATE_MISMATCH";
-    private static final String MISSING_INTERNAL_REFERENCE = "MISSING_INTERNAL_REFERENCE";
-    private static final String APPLY_PROVIDER_STATE = "APPLY_PROVIDER_STATE";
-    private static final String MANUAL_REVIEW = "MANUAL_REVIEW";
-
     private final ReconciliationStore reconciliationStore;
-    private final ProviderStore providerStore;
-    private final PaymentStore paymentStore;
-    private final PaymentService paymentService;
+    private final ReportingStore reportingStore;
     private final AccessPolicy accessPolicy;
+    private final RegionService regionService;
     private final ObjectMapper objectMapper;
     private final InvestigationIndexingService investigationIndexingService;
-    private final RiskService riskService;
-    private final ObjectProvider<OperatorWorkflowStarter> operatorWorkflowStarter;
-    private final OperatorWorkflowService operatorWorkflowService;
-    private final RegionService regionService;
 
     public ReconciliationService(
             ReconciliationStore reconciliationStore,
-            ProviderStore providerStore,
-            PaymentStore paymentStore,
-            PaymentService paymentService,
+            ReportingStore reportingStore,
             AccessPolicy accessPolicy,
+            RegionService regionService,
             ObjectMapper objectMapper,
-            InvestigationIndexingService investigationIndexingService,
-            RiskService riskService,
-            ObjectProvider<OperatorWorkflowStarter> operatorWorkflowStarter,
-            OperatorWorkflowService operatorWorkflowService,
-            RegionService regionService) {
+            InvestigationIndexingService investigationIndexingService) {
         this.reconciliationStore = reconciliationStore;
-        this.providerStore = providerStore;
-        this.paymentStore = paymentStore;
-        this.paymentService = paymentService;
+        this.reportingStore = reportingStore;
         this.accessPolicy = accessPolicy;
+        this.regionService = regionService;
         this.objectMapper = objectMapper;
         this.investigationIndexingService = investigationIndexingService;
-        this.riskService = riskService;
-        this.operatorWorkflowStarter = operatorWorkflowStarter;
-        this.operatorWorkflowService = operatorWorkflowService;
-        this.regionService = regionService;
     }
 
-    @Transactional(noRollbackFor = InternalFailureException.class)
-    public ReconciliationRun startRun(AccessContext context, RunReconciliationCommand command) {
-        requireWrite(context);
-        String runType = command == null || command.runType() == null ? "FULL" : command.runType();
-        ReconciliationRun run = reconciliationStore.createRequestedRun(context.workspaceId(), runType);
-        OperatorWorkflowRecord workflow = null;
-        try {
-            workflow = operatorWorkflowService.createRequested(
-                    context.workspaceId(),
-                    OperatorWorkflowService.RECONCILIATION,
-                    OperatorWorkflowService.RECONCILIATION_RUN,
-                    run.id(),
-                    OperatorWorkflowService.API,
-                    context.actorId(),
-                    1,
-                    "Reconciliation requested.");
-            OperatorWorkflowStarter workflowStarter = operatorWorkflowStarter.getIfAvailable();
-            if (workflowStarter == null) {
-                throw new IllegalStateException("Temporal workflow starter bean is missing.");
-            }
-            ReconciliationRun requestedRun = run;
-            OperatorWorkflowRecord requestedWorkflow = workflow;
-            String temporalRunId = workflowStarter.start(workflow.workflowId(), (client, options) -> {
-                ReconciliationOperatorWorkflow reconciliationWorkflow = client.newWorkflowStub(ReconciliationOperatorWorkflow.class, options);
-                return WorkflowClient.start(reconciliationWorkflow::run, new OperatorWorkflowInput(context.workspaceId(), requestedRun.id(), requestedWorkflow.workflowId()));
-            });
-            operatorWorkflowService.attachRun(context.workspaceId(), workflow.workflowId(), temporalRunId);
-            return reconciliationStore.attachWorkflow(context.workspaceId(), run.id(), workflow.workflowId(), temporalRunId);
-        } catch (Exception exception) {
-            reconciliationStore.markFailed(context.workspaceId(), run.id(), exception.getMessage());
-            if (workflow != null) {
-                operatorWorkflowService.markFailed(context.workspaceId(), workflow.workflowId(), exception.getMessage());
-            }
-            throw new InternalFailureException("Reconciliation orchestration could not be started.", exception);
+    @Transactional
+    public ProviderTruthImport recordProviderTruth(AccessContext context, ProviderStatementTruth truth) {
+        requireWrite(context, "provider truth import");
+        if (truth == null) {
+            throw new BadRequestException("provider truth is required.");
         }
-    }
-
-    @Transactional(noRollbackFor = InternalFailureException.class)
-    public ReconciliationRun run(AccessContext context, RunReconciliationCommand command) {
-        requireWrite(context);
-        String runType = command == null || command.runType() == null ? "FULL" : command.runType();
-        ReconciliationRun run = reconciliationStore.createRun(context.workspaceId(), runType);
-        return executeRun(context.workspaceId(), run.id());
-    }
-
-    @Transactional(noRollbackFor = InternalFailureException.class)
-    public ReconciliationRun executeRunForWorkflow(UUID workspaceId, UUID runId) {
-        return executeRun(workspaceId, runId);
-    }
-
-    private ReconciliationRun executeRun(UUID workspaceId, UUID runId) {
-        ReconciliationRun run = reconciliationStore.markRunning(workspaceId, runId);
-        try {
-        markWorkflowProgress(workspaceId, run, 2, 4, "Scanning applied provider callbacks.");
-        for (ProviderCallback callback : providerStore.listCallbacks(workspaceId)) {
-            if (!"APPLIED".equals(callback.processingStatus())) {
-                continue;
-            }
-            String providerState = providerState(callback.callbackType());
-            String internalState = internalState(workspaceId, callback);
-            if (!providerState.equals(internalState)) {
-                String driftCategory = driftCategory(internalState);
-                reconciliationStore.createMismatch(
-                        workspaceId,
-                        run.id(),
-                        callback.id(),
-                        callback.businessReferenceType(),
-                        callback.businessReferenceId(),
-                        driftCategory,
-                        internalState,
-                        providerState,
-                        suggestedAction(driftCategory, callback.businessReferenceType()));
-                continue;
-            }
-            Long providerAmount = providerAmount(callback);
-            Long internalAmount = internalAmount(workspaceId, callback);
-            if (providerAmount != null && internalAmount != null && !providerAmount.equals(internalAmount)) {
-                reconciliationStore.createMismatch(
-                        workspaceId,
-                        run.id(),
-                        callback.id(),
-                        callback.businessReferenceType(),
-                        callback.businessReferenceId(),
-                        "AMOUNT_MISMATCH",
-                        internalState + ":" + internalAmount,
-                        providerState + ":" + providerAmount,
-                        MANUAL_REVIEW);
-            }
+        String currencyCode = requireCurrency(truth.currencyCode());
+        String sourceReference = requireText(truth.sourceReference(), "sourceReference");
+        if (truth.providerProfileId() == null || truth.statementPeriodStart() == null || truth.statementPeriodEnd() == null) {
+            throw new BadRequestException("providerProfileId and statement period are required.");
         }
-        markWorkflowProgress(workspaceId, run, 3, 4, "Creating projection and journal drift mismatches.");
-        reconciliationStore.createEntityCentricMismatches(workspaceId, run.id());
-        markWorkflowProgress(workspaceId, run, 4, 4, "Evaluating risk follow-up for reconciliation mismatches.");
-        riskService.evaluateMismatchBurst(workspaceId);
-        int mismatchCount = reconciliationStore.countMismatches(workspaceId, run.id());
-        ReconciliationRun completed = reconciliationStore.completeRun(workspaceId, run.id(), mismatchCount);
-        reindexRun(workspaceId, completed.id());
+        ProviderTruthImport truthImport = reconciliationStore.upsertProviderTruthImport(
+                context.workspaceId(),
+                truth.providerProfileId(),
+                currencyCode,
+                truth.statementPeriodStart(),
+                truth.statementPeriodEnd(),
+                sourceReference,
+                context.actorId());
+        if (truth.amounts() != null) {
+            ProviderStatementAmounts amounts = truth.amounts();
+            reconciliationStore.upsertProviderTruthSnapshot(truthImport, new ProviderTruthSnapshotDraft(
+                    amounts.settledGrossAmountMinor(),
+                    amounts.feeAmountMinor(),
+                    amounts.netEarningsAmountMinor(),
+                    amounts.payoutSucceededAmountMinor(),
+                    amounts.refundAmountMinor(),
+                    amounts.activeDisputeExposureAmountMinor(),
+                    amounts.settledSubscriptionNetRevenueAmountMinor(),
+                    json(truth.providerPayload() == null ? Map.of() : truth.providerPayload())));
+        }
+        return truthImport;
+    }
+
+    @Transactional
+    public ReconciliationRun createRunFromProviderTruth(AccessContext context, UUID truthImportId) {
+        requireWrite(context, "provider reconciliation run");
+        ProviderTruthImport truthImport = reconciliationStore.findProviderTruthImport(context.workspaceId(), truthImportId)
+                .orElseThrow(() -> new NotFoundException("Provider truth import was not found."));
+        ReconciliationRun run = reconciliationStore.createRun(truthImport, context.actorId());
+        Optional<ProviderTruthSnapshot> providerTruth = reconciliationStore.findProviderTruthSnapshot(context.workspaceId(), truthImport.id());
+        Optional<ProviderFinancialSummary> internalSummary = reportingStore.listProviderSummaries(context.workspaceId())
+                .stream()
+                .filter(summary -> Objects.equals(summary.providerProfileId(), truthImport.providerProfileId()))
+                .filter(summary -> truthImport.currencyCode().equals(summary.currencyCode()))
+                .findFirst();
+
+        int itemCount = compare(run, internalSummary.orElse(null), providerTruth.orElse(null));
+        ReconciliationRun completed = reconciliationStore.completeRun(context.workspaceId(), run.id(), itemCount);
+        reconciliationStore.markImportReconciled(context.workspaceId(), truthImport.id());
+        indexReference(context.workspaceId(), "PROVIDER_RECONCILIATION_RUN", completed.id());
+        for (ReconciliationItem item : reconciliationStore.listItems(context.workspaceId(), completed.id(), false)) {
+            indexReference(context.workspaceId(), "PROVIDER_RECONCILIATION_ITEM", item.id());
+        }
         return completed;
-        } catch (RuntimeException exception) {
-            reconciliationStore.markFailed(workspaceId, run.id(), exception.getMessage());
-            throw new InternalFailureException("Reconciliation run failed; operator review is required.", exception);
-        }
     }
 
     public List<ReconciliationRun> listRuns(AccessContext context) {
@@ -191,166 +120,184 @@ public class ReconciliationService {
         return reconciliationStore.listRuns(context.workspaceId());
     }
 
-    public List<ReconciliationMismatch> listMismatches(AccessContext context) {
+    public ReconciliationRun runDetails(AccessContext context, UUID runId) {
         requireRead(context);
-        return reconciliationStore.listMismatches(context.workspaceId());
+        return reconciliationStore.findRun(context.workspaceId(), runId)
+                .orElseThrow(() -> new NotFoundException("Provider reconciliation run was not found."));
     }
 
-    public Map<String, Object> investigationReference(AccessContext context, UUID mismatchId) {
+    public ReconciliationRun executeRunForWorkflow(UUID workspaceId, UUID runId) {
+        return reconciliationStore.findRun(workspaceId, runId)
+                .orElseThrow(() -> new NotFoundException("Provider reconciliation run was not found."));
+    }
+
+    public ReconciliationRun startRun(AccessContext context, RunReconciliationCommand command) {
+        if (command == null || command.truthImportId() == null) {
+            throw new BadRequestException("truthImportId is required.");
+        }
+        return createRunFromProviderTruth(context, command.truthImportId());
+    }
+
+    public List<ReconciliationItem> listItems(AccessContext context, UUID runId, boolean unresolvedOnly) {
         requireRead(context);
-        ReconciliationMismatch mismatch = reconciliationStore.findMismatch(context.workspaceId(), mismatchId)
-                .orElseThrow(() -> new NotFoundException("Reconciliation mismatch was not found."));
-        return Map.of(
-                "referenceType", "RECONCILIATION_MISMATCH",
-                "referenceId", mismatch.id(),
-                "businessReferenceType", mismatch.businessReferenceType(),
-                "businessReferenceId", mismatch.businessReferenceId(),
-                "driftCategory", mismatch.driftCategory());
+        runDetails(context, runId);
+        return reconciliationStore.listItems(context.workspaceId(), runId, unresolvedOnly);
     }
 
     @Transactional
-    public ReconciliationMismatch markRepair(AccessContext context, UUID mismatchId, RepairCommand command) {
-        requireWrite(context);
-        return reconciliationStore.markRepair(context.workspaceId(), mismatchId, command == null ? null : command.note());
+    public ReconciliationItem resolveItem(AccessContext context, UUID itemId, String resolutionOutcome, String resolutionNote) {
+        requireWrite(context, "provider reconciliation resolution");
+        requireText(resolutionNote, "resolutionNote");
+        String outcome = resolutionOutcome == null || resolutionOutcome.isBlank() ? "OPERATOR_ACCEPTED" : resolutionOutcome.trim();
+        ReconciliationItem existing = reconciliationStore.findItem(context.workspaceId(), itemId)
+                .orElseThrow(() -> new NotFoundException("Provider reconciliation item was not found."));
+        if (!"OPEN".equals(existing.status())) {
+            throw new BadRequestException("Provider reconciliation item is not open.");
+        }
+        ReconciliationItem resolved = reconciliationStore.resolveItem(context.workspaceId(), itemId, context.actorId(), outcome, resolutionNote.trim());
+        reconciliationStore.refreshRunCounts(context.workspaceId(), resolved.reconciliationRunId());
+        indexReference(context.workspaceId(), "PROVIDER_RECONCILIATION_ITEM", resolved.id());
+        indexReference(context.workspaceId(), "PROVIDER_RECONCILIATION_RUN", resolved.reconciliationRunId());
+        return resolved;
     }
 
     @Transactional
-    public ReconciliationMismatch applyRepair(AccessContext context, UUID mismatchId, RepairCommand command) {
-        requireWrite(context);
-        ReconciliationMismatch mismatch = reconciliationStore.findMismatch(context.workspaceId(), mismatchId)
-                .orElseThrow(() -> new NotFoundException("Reconciliation mismatch was not found."));
-        if (!STATE_MISMATCH.equals(mismatch.driftCategory()) || !APPLY_PROVIDER_STATE.equals(mismatch.suggestedAction())) {
-            throw new BadRequestException("Mismatch does not have a safe automatic repair action.");
+    public ReconciliationItem reopenItem(AccessContext context, UUID itemId, String reason) {
+        requireWrite(context, "provider reconciliation reopen");
+        requireText(reason, "reason");
+        ReconciliationItem existing = reconciliationStore.findItem(context.workspaceId(), itemId)
+                .orElseThrow(() -> new NotFoundException("Provider reconciliation item was not found."));
+        if (!"RESOLVED".equals(existing.status())) {
+            throw new BadRequestException("Provider reconciliation item is not resolved.");
         }
-        applyProviderState(context.workspaceId(), mismatch);
-        ReconciliationMismatch applied = reconciliationStore.markApplied(context.workspaceId(), mismatch.id(), command == null ? "Applied provider state." : command.note());
-        reindexMismatch(context.workspaceId(), applied);
-        return applied;
+        ReconciliationItem reopened = reconciliationStore.reopenItem(context.workspaceId(), itemId);
+        reconciliationStore.refreshRunCounts(context.workspaceId(), reopened.reconciliationRunId());
+        indexReference(context.workspaceId(), "PROVIDER_RECONCILIATION_ITEM", reopened.id());
+        indexReference(context.workspaceId(), "PROVIDER_RECONCILIATION_RUN", reopened.reconciliationRunId());
+        return reopened;
     }
 
-    private void reindexRun(UUID workspaceId, UUID runId) {
-        try {
-            reconciliationStore.listMismatches(workspaceId).stream()
-                    .filter(mismatch -> runId.equals(mismatch.reconciliationRunId()))
-                    .forEach(mismatch -> reindexMismatch(workspaceId, mismatch));
-        } catch (RuntimeException ignored) {
-            // Search indexing can be safely re-driven; reconciliation truth remains in PostgreSQL.
+    private int compare(ReconciliationRun run, ProviderFinancialSummary internalSummary, ProviderTruthSnapshot providerTruth) {
+        if (internalSummary == null && providerTruth == null) {
+            return 0;
         }
-    }
-
-    private void reindexMismatch(UUID workspaceId, ReconciliationMismatch mismatch) {
-        try {
-            investigationIndexingService.indexReference(workspaceId, "RECONCILIATION_MISMATCH", mismatch.id());
-            investigationIndexingService.indexReference(workspaceId, mismatch.businessReferenceType(), mismatch.businessReferenceId());
-        } catch (RuntimeException ignored) {
-            // Search indexing can be safely re-driven; reconciliation truth remains in PostgreSQL.
+        if (internalSummary == null) {
+            createItem(run, ReconciliationMismatchType.MISSING_INTERNAL_SUMMARY, null, providerTruth, null, null);
+            return 1;
         }
-    }
-
-    private void markWorkflowProgress(UUID workspaceId, ReconciliationRun run, int current, int total, String message) {
-        if (run.temporalWorkflowId() != null) {
-            operatorWorkflowService.markProgress(workspaceId, run.temporalWorkflowId(), current, total, message);
+        if (providerTruth == null) {
+            createItem(run, ReconciliationMismatchType.MISSING_PROVIDER_TRUTH, internalSummary, null, null, null);
+            return 1;
         }
+
+        int itemCount = 0;
+        itemCount += compareAmount(run, ReconciliationMismatchType.SETTLED_GROSS_MISMATCH, internalSummary, providerTruth,
+                "settledGrossAmountMinor", internalSummary.settledGrossAmountMinor(), providerTruth.settledGrossAmountMinor());
+        itemCount += compareAmount(run, ReconciliationMismatchType.FEE_MISMATCH, internalSummary, providerTruth,
+                "feeAmountMinor", internalSummary.feeAmountMinor(), providerTruth.feeAmountMinor());
+        itemCount += compareAmount(run, ReconciliationMismatchType.NET_EARNINGS_MISMATCH, internalSummary, providerTruth,
+                "netEarningsAmountMinor", internalSummary.netEarningsAmountMinor(), providerTruth.netEarningsAmountMinor());
+        itemCount += compareAmount(run, ReconciliationMismatchType.PAYOUT_MISMATCH, internalSummary, providerTruth,
+                "payoutSucceededAmountMinor", internalSummary.payoutSucceededAmountMinor(), providerTruth.payoutSucceededAmountMinor());
+        itemCount += compareAmount(run, ReconciliationMismatchType.REFUND_MISMATCH, internalSummary, providerTruth,
+                "refundAmountMinor", internalSummary.refundAmountMinor(), providerTruth.refundAmountMinor());
+        itemCount += compareAmount(run, ReconciliationMismatchType.DISPUTE_EXPOSURE_MISMATCH, internalSummary, providerTruth,
+                "activeDisputeExposureAmountMinor", internalSummary.activeDisputeExposureAmountMinor(), providerTruth.activeDisputeExposureAmountMinor());
+        itemCount += compareAmount(run, ReconciliationMismatchType.SUBSCRIPTION_REVENUE_MISMATCH, internalSummary, providerTruth,
+                "settledSubscriptionNetRevenueAmountMinor", internalSummary.settledSubscriptionNetRevenueAmountMinor(), providerTruth.settledSubscriptionNetRevenueAmountMinor());
+        return itemCount;
     }
 
-    private void applyProviderState(UUID workspaceId, ReconciliationMismatch mismatch) {
-        switch (mismatch.businessReferenceType()) {
-            case "PAYMENT_INTENT" -> paymentService.applyProviderPaymentTruth(workspaceId, mismatch.businessReferenceId(), mismatch.providerState(), 0, "reconciliation:" + mismatch.id());
-            case "PAYOUT_REQUEST" -> paymentService.applyProviderPayoutTruth(workspaceId, mismatch.businessReferenceId(), mismatch.providerState(), "reconciliation:" + mismatch.id(), "reconciliation provider-state repair");
-            case "REFUND" -> paymentService.applyProviderRefundTruth(workspaceId, mismatch.businessReferenceId(), mismatch.providerState(), "reconciliation:" + mismatch.id(), "reconciliation provider-state repair");
-            default -> throw new BadRequestException("Unsupported mismatch reference type.");
+    private int compareAmount(ReconciliationRun run, ReconciliationMismatchType mismatchType, ProviderFinancialSummary internalSummary, ProviderTruthSnapshot providerTruth, String fieldName, long internalValue, long providerValue) {
+        if (internalValue == providerValue) {
+            return 0;
         }
+        createItem(run, mismatchType, internalSummary, providerTruth, fieldName, new AmountPair(internalValue, providerValue));
+        return 1;
     }
 
-    private static String driftCategory(String internalState) {
-        return "MISSING".equals(internalState) ? MISSING_INTERNAL_REFERENCE : STATE_MISMATCH;
+    private void createItem(ReconciliationRun run, ReconciliationMismatchType mismatchType, ProviderFinancialSummary internalSummary, ProviderTruthSnapshot providerTruth, String fieldName, AmountPair amountPair) {
+        reconciliationStore.createItem(run, new ReconciliationItemDraft(
+                mismatchType.name(),
+                internalSummary == null ? null : internalSummary.settledGrossAmountMinor(),
+                providerTruth == null ? null : providerTruth.settledGrossAmountMinor(),
+                internalSummary == null ? null : internalSummary.feeAmountMinor(),
+                providerTruth == null ? null : providerTruth.feeAmountMinor(),
+                internalSummary == null ? null : internalSummary.netEarningsAmountMinor(),
+                providerTruth == null ? null : providerTruth.netEarningsAmountMinor(),
+                internalSummary == null ? null : internalSummary.payoutSucceededAmountMinor(),
+                providerTruth == null ? null : providerTruth.payoutSucceededAmountMinor(),
+                internalSummary == null ? null : internalSummary.refundAmountMinor(),
+                providerTruth == null ? null : providerTruth.refundAmountMinor(),
+                internalSummary == null ? null : internalSummary.activeDisputeExposureAmountMinor(),
+                providerTruth == null ? null : providerTruth.activeDisputeExposureAmountMinor(),
+                internalSummary == null ? null : internalSummary.settledSubscriptionNetRevenueAmountMinor(),
+                providerTruth == null ? null : providerTruth.settledSubscriptionNetRevenueAmountMinor(),
+                detailJson(mismatchType, fieldName, amountPair)));
     }
 
-    private static String suggestedAction(String driftCategory, String referenceType) {
-        if (!STATE_MISMATCH.equals(driftCategory)) {
-            return MANUAL_REVIEW;
+    private String detailJson(ReconciliationMismatchType mismatchType, String fieldName, AmountPair amountPair) {
+        Map<String, Object> detail = new LinkedHashMap<>();
+        detail.put("mismatchType", mismatchType.name());
+        if (fieldName != null) {
+            detail.put("field", fieldName);
+            detail.put("internalValue", amountPair.internalValue());
+            detail.put("providerValue", amountPair.providerValue());
         }
-        return switch (referenceType) {
-            case "PAYMENT_INTENT", "PAYOUT_REQUEST", "REFUND" -> APPLY_PROVIDER_STATE;
-            default -> MANUAL_REVIEW;
-        };
-    }
-
-    private String internalState(UUID workspaceId, ProviderCallback callback) {
-        return switch (callback.businessReferenceType()) {
-            case "PAYMENT_INTENT" -> paymentStore.find(workspaceId, callback.businessReferenceId())
-                    .map(PaymentIntent::status)
-                    .orElse("MISSING");
-            case "PAYOUT_REQUEST" -> paymentStore.findPayout(workspaceId, callback.businessReferenceId())
-                    .map(PayoutRequest::status)
-                    .orElse("MISSING");
-            case "REFUND" -> paymentStore.findRefund(workspaceId, callback.businessReferenceId())
-                    .map(RefundRecord::status)
-                    .orElse("MISSING");
-            default -> "MISSING";
-        };
-    }
-
-    private Long internalAmount(UUID workspaceId, ProviderCallback callback) {
-        return switch (callback.businessReferenceType()) {
-            case "PAYMENT_INTENT" -> paymentStore.find(workspaceId, callback.businessReferenceId())
-                    .map(intent -> switch (callback.callbackType()) {
-                        case "PAYMENT_AUTHORIZED" -> intent.authorizedAmountMinor();
-                        case "PAYMENT_CAPTURED" -> intent.capturedAmountMinor();
-                        case "PAYMENT_SETTLED" -> intent.settledAmountMinor();
-                        default -> intent.grossAmountMinor();
-                    })
-                    .orElse(null);
-            case "PAYOUT_REQUEST" -> paymentStore.findPayout(workspaceId, callback.businessReferenceId())
-                    .map(PayoutRequest::requestedAmountMinor)
-                    .orElse(null);
-            case "REFUND" -> paymentStore.findRefund(workspaceId, callback.businessReferenceId())
-                    .map(RefundRecord::amountMinor)
-                    .orElse(null);
-            default -> null;
-        };
-    }
-
-    private Long providerAmount(ProviderCallback callback) {
-        try {
-            Map<String, Object> payload = objectMapper.readValue(callback.payloadJson(), new TypeReference<>() {
-            });
-            Object amount = payload.get("amountMinor");
-            if (amount == null) {
-                return null;
-            }
-            return Long.valueOf(amount.toString());
-        } catch (Exception exception) {
-            return null;
-        }
-    }
-
-    private String providerState(String callbackType) {
-        return switch (callbackType) {
-            case "PAYMENT_AUTHORIZED" -> "AUTHORIZED";
-            case "PAYMENT_CAPTURED" -> "CAPTURED";
-            case "PAYMENT_SETTLED" -> "SETTLED";
-            case "PAYMENT_FAILED" -> "FAILED";
-            case "REFUND_SUCCEEDED", "PAYOUT_SUCCEEDED" -> "SUCCEEDED";
-            case "REFUND_FAILED", "PAYOUT_FAILED" -> "FAILED";
-            default -> throw new BadRequestException("Unsupported callback type.");
-        };
+        return json(detail);
     }
 
     private void requireRead(AccessContext context) {
         accessPolicy.requireWorkspaceRole(context, WorkspaceRole.OWNER, WorkspaceRole.ADMIN);
-        accessPolicy.requireScope(context, AccessScope.PAYMENT_READ);
+        accessPolicy.requireScope(context, AccessScope.FINANCE_READ);
     }
 
-    private void requireWrite(AccessContext context) {
+    private void requireWrite(AccessContext context, String operation) {
         accessPolicy.requireWorkspaceRole(context, WorkspaceRole.OWNER, WorkspaceRole.ADMIN);
-        accessPolicy.requireScope(context, AccessScope.PAYMENT_WRITE);
-        regionService.requireOwnedForWrite(context, "reconciliation run start");
+        accessPolicy.requireScope(context, AccessScope.FINANCE_WRITE);
+        regionService.requireOwnedForWrite(context, operation);
     }
 
-    public record RunReconciliationCommand(String runType) {
+    private String json(Object value) {
+        try {
+            return objectMapper.writeValueAsString(value);
+        } catch (Exception exception) {
+            throw new BadRequestException("provider reconciliation details could not be serialized.");
+        }
     }
 
-    public record RepairCommand(String note) {
+    private void indexReference(UUID workspaceId, String referenceType, UUID referenceId) {
+        try {
+            investigationIndexingService.indexReference(workspaceId, referenceType, referenceId);
+        } catch (RuntimeException ignored) {
+            // Reconciliation truth is durable in PostgreSQL and can be replayed by investigation reindex.
+        }
+    }
+
+    private static String requireCurrency(String currencyCode) {
+        if (currencyCode == null || !currencyCode.trim().matches("^[A-Za-z]{3}$")) {
+            throw new BadRequestException("currencyCode must be a three-letter currency code.");
+        }
+        return currencyCode.trim().toUpperCase(Locale.ROOT);
+    }
+
+    private static String requireText(String value, String fieldName) {
+        if (value == null || value.isBlank()) {
+            throw new BadRequestException(fieldName + " is required.");
+        }
+        return value.trim();
+    }
+
+    private record AmountPair(long internalValue, long providerValue) {
+    }
+
+    public record RunReconciliationCommand(String scope, UUID truthImportId) {
+        public RunReconciliationCommand(UUID truthImportId) {
+            this(null, truthImportId);
+        }
+
+        public RunReconciliationCommand(String scope) {
+            this(scope, null);
+        }
     }
 }

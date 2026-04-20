@@ -1,7 +1,6 @@
 package com.kayledger.api.reconciliation.api;
 
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 
 import org.springframework.http.ResponseEntity;
@@ -11,19 +10,20 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.kayledger.api.access.application.AccessContext;
 import com.kayledger.api.access.application.AccessContextResolver;
+import com.kayledger.api.reconciliation.api.ReconciliationRequests.CreateReconciliationRunRequest;
+import com.kayledger.api.reconciliation.api.ReconciliationRequests.ProviderTruthImportRequest;
+import com.kayledger.api.reconciliation.api.ReconciliationRequests.ReopenReconciliationItemRequest;
+import com.kayledger.api.reconciliation.api.ReconciliationRequests.ResolveReconciliationItemRequest;
 import com.kayledger.api.reconciliation.application.ReconciliationService;
-import com.kayledger.api.reconciliation.application.ReconciliationService.RepairCommand;
-import com.kayledger.api.reconciliation.application.ReconciliationService.RunReconciliationCommand;
-import com.kayledger.api.reconciliation.model.ReconciliationMismatch;
+import com.kayledger.api.reconciliation.model.ReconciliationItem;
 import com.kayledger.api.reconciliation.model.ReconciliationRun;
+import com.kayledger.api.shared.api.BadRequestException;
 import com.kayledger.api.shared.idempotency.IdempotencyService;
-import com.kayledger.api.temporal.application.OperatorWorkflowQueryService;
-import com.kayledger.api.temporal.application.OperatorWorkflowService;
-import com.kayledger.api.temporal.model.OperatorWorkflowStatus;
 
 @RestController
 @RequestMapping("/api/reconciliation")
@@ -32,26 +32,46 @@ public class ReconciliationController {
     private final AccessContextResolver accessContextResolver;
     private final ReconciliationService reconciliationService;
     private final IdempotencyService idempotencyService;
-    private final OperatorWorkflowQueryService operatorWorkflowQueryService;
 
     public ReconciliationController(
             AccessContextResolver accessContextResolver,
             ReconciliationService reconciliationService,
-            IdempotencyService idempotencyService,
-            OperatorWorkflowQueryService operatorWorkflowQueryService) {
+            IdempotencyService idempotencyService) {
         this.accessContextResolver = accessContextResolver;
         this.reconciliationService = reconciliationService;
         this.idempotencyService = idempotencyService;
-        this.operatorWorkflowQueryService = operatorWorkflowQueryService;
     }
 
-    @PostMapping("/runs")
-    ResponseEntity<Object> run(
+    @PostMapping("/provider-truth-imports")
+    ResponseEntity<Object> recordProviderTruth(
             @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
             @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
             @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
-            @RequestBody(required = false) RunReconciliationCommand request) {
+            @RequestBody ProviderTruthImportRequest request) {
         AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
+        if (request == null) {
+            throw new BadRequestException("provider truth import request is required.");
+        }
+        return idempotencyService.run(
+                idempotencyKey,
+                "WORKSPACE",
+                context.workspaceId(),
+                context.actorId(),
+                "POST /api/reconciliation/provider-truth-imports",
+                IdempotencyService.fingerprint(workspaceSlug, actorKey, request),
+                () -> reconciliationService.recordProviderTruth(context, request.toTruth()));
+    }
+
+    @PostMapping("/runs")
+    ResponseEntity<Object> createRun(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @RequestBody CreateReconciliationRunRequest request) {
+        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
+        if (request == null || request.truthImportId() == null) {
+            throw new BadRequestException("truthImportId is required.");
+        }
         return idempotencyService.run(
                 idempotencyKey,
                 "WORKSPACE",
@@ -59,80 +79,81 @@ public class ReconciliationController {
                 context.actorId(),
                 "POST /api/reconciliation/runs",
                 IdempotencyService.fingerprint(workspaceSlug, actorKey, request),
-                () -> reconciliationService.startRun(context, request));
+                () -> reconciliationService.createRunFromProviderTruth(context, request.truthImportId()));
     }
 
     @GetMapping("/runs")
     List<ReconciliationRun> listRuns(
             @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
             @RequestHeader(value = "X-Actor-Key", required = false) String actorKey) {
-        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
-        return reconciliationService.listRuns(context);
+        return reconciliationService.listRuns(accessContextResolver.resolveWorkspace(workspaceSlug, actorKey));
     }
 
-    @GetMapping("/runs/{runId}/workflow")
-    OperatorWorkflowStatus runWorkflow(
+    @GetMapping("/runs/{runId}")
+    ReconciliationRun runDetails(
             @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
             @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
             @PathVariable UUID runId) {
-        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
-        return operatorWorkflowQueryService.findByReference(
-                context,
-                OperatorWorkflowService.RECONCILIATION,
-                OperatorWorkflowService.RECONCILIATION_RUN,
-                runId);
+        return reconciliationService.runDetails(accessContextResolver.resolveWorkspace(workspaceSlug, actorKey), runId);
     }
 
-    @GetMapping("/mismatches")
-    List<ReconciliationMismatch> listMismatches(
-            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
-            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey) {
-        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
-        return reconciliationService.listMismatches(context);
-    }
-
-    @GetMapping("/mismatches/{mismatchId}/investigation")
-    Map<String, Object> mismatchInvestigation(
+    @GetMapping("/runs/{runId}/items")
+    List<ReconciliationItem> listRunItems(
             @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
             @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
-            @PathVariable UUID mismatchId) {
-        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
-        return reconciliationService.investigationReference(context, mismatchId);
+            @PathVariable UUID runId,
+            @RequestParam(value = "unresolvedOnly", defaultValue = "false") boolean unresolvedOnly) {
+        return reconciliationService.listItems(accessContextResolver.resolveWorkspace(workspaceSlug, actorKey), runId, unresolvedOnly);
     }
 
-    @PostMapping("/mismatches/{mismatchId}/mark-repair")
-    ResponseEntity<Object> markRepair(
+    @GetMapping("/items")
+    List<ReconciliationItem> listItems(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @RequestParam("runId") UUID runId,
+            @RequestParam(value = "unresolvedOnly", defaultValue = "false") boolean unresolvedOnly) {
+        return reconciliationService.listItems(accessContextResolver.resolveWorkspace(workspaceSlug, actorKey), runId, unresolvedOnly);
+    }
+
+    @PostMapping("/items/{itemId}/resolve")
+    ResponseEntity<Object> resolveItem(
             @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
             @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
             @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
-            @PathVariable UUID mismatchId,
-            @RequestBody(required = false) RepairCommand request) {
+            @PathVariable UUID itemId,
+            @RequestBody ResolveReconciliationItemRequest request) {
         AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
+        if (request == null) {
+            throw new BadRequestException("resolution request is required.");
+        }
         return idempotencyService.run(
                 idempotencyKey,
                 "WORKSPACE",
                 context.workspaceId(),
                 context.actorId(),
-                "POST /api/reconciliation/mismatches/{mismatchId}/mark-repair",
-                IdempotencyService.fingerprint(workspaceSlug, actorKey, mismatchId, request),
-                () -> reconciliationService.markRepair(context, mismatchId, request));
+                "POST /api/reconciliation/items/{itemId}/resolve",
+                IdempotencyService.fingerprint(workspaceSlug, actorKey, itemId, request),
+                () -> reconciliationService.resolveItem(context, itemId, request.resolutionOutcome(), request.resolutionNote()));
     }
 
-    @PostMapping("/mismatches/{mismatchId}/apply-repair")
-    ResponseEntity<Object> applyRepair(
+    @PostMapping("/items/{itemId}/reopen")
+    ResponseEntity<Object> reopenItem(
             @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
             @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
             @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
-            @PathVariable UUID mismatchId,
-            @RequestBody(required = false) RepairCommand request) {
+            @PathVariable UUID itemId,
+            @RequestBody ReopenReconciliationItemRequest request) {
         AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
+        if (request == null) {
+            throw new BadRequestException("reopen request is required.");
+        }
         return idempotencyService.run(
                 idempotencyKey,
                 "WORKSPACE",
                 context.workspaceId(),
                 context.actorId(),
-                "POST /api/reconciliation/mismatches/{mismatchId}/apply-repair",
-                IdempotencyService.fingerprint(workspaceSlug, actorKey, mismatchId, request),
-                () -> reconciliationService.applyRepair(context, mismatchId, request));
+                "POST /api/reconciliation/items/{itemId}/reopen",
+                IdempotencyService.fingerprint(workspaceSlug, actorKey, itemId, request),
+                () -> reconciliationService.reopenItem(context, itemId, request.reason()));
     }
 }
