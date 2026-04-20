@@ -18,6 +18,7 @@ import com.kayledger.api.evidence.application.FinanceEvidenceService;
 import com.kayledger.api.evidence.application.FinanceEvidenceService.EvidencePackDetails;
 import com.kayledger.api.evidence.application.FinanceEvidenceService.GenerateEvidencePackCommand;
 import com.kayledger.api.evidence.model.FinanceEvidenceExport;
+import com.kayledger.api.evidence.model.FinanceEvidenceArtifact;
 import com.kayledger.api.evidence.model.FinanceEvidencePack;
 import com.kayledger.api.shared.api.BadRequestException;
 import com.kayledger.api.shared.idempotency.IdempotencyService;
@@ -95,6 +96,14 @@ public class FinanceEvidenceController {
             @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
             @PathVariable UUID packId) {
         return financeEvidenceService.listExports(accessContextResolver.resolveWorkspace(workspaceSlug, actorKey), packId);
+    }
+
+    @GetMapping("/exports/{exportId}/artifact")
+    FinanceEvidenceArtifact exportArtifact(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @PathVariable UUID exportId) {
+        return financeEvidenceService.exportArtifact(accessContextResolver.resolveWorkspace(workspaceSlug, actorKey), exportId);
     }
 
     public record GenerateExportRequest(String artifactFormat) {

@@ -3,19 +3,15 @@ package com.kayledger.api.evidence.model;
 import java.time.Instant;
 import java.util.UUID;
 
-public record FinanceEvidenceExport(
+public record FinanceEvidenceArtifact(
         UUID id,
         UUID workspaceId,
         UUID evidencePackId,
-        UUID artifactId,
-        int exportVersion,
-        String exportStatus,
         String artifactFormat,
-        String artifactReference,
+        String artifactBody,
         long artifactSizeBytes,
         String checksumAlgorithm,
         String checksumValue,
         UUID generatedByActorId,
-        Instant generatedAt,
         Instant createdAt) {
 }

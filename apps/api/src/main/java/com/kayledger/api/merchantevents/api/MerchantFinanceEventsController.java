@@ -85,4 +85,15 @@ public class MerchantFinanceEventsController {
                 IdempotencyService.fingerprint(workspaceSlug, actorKey, deliveryId),
                 () -> merchantFinanceEventService.redriveDelivery(context, deliveryId));
     }
+
+    @PostMapping("/deliveries/process-due")
+    ProcessDueDeliveriesResponse processDueDeliveries(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey) {
+        AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
+        return new ProcessDueDeliveriesResponse(merchantFinanceEventService.processDueDeliveries(context));
+    }
+
+    record ProcessDueDeliveriesResponse(int processedCount) {
+    }
 }

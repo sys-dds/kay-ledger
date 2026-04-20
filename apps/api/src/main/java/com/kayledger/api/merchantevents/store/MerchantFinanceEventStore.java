@@ -53,10 +53,13 @@ public class MerchantFinanceEventStore {
             rs.getObject("endpoint_id", UUID.class),
             rs.getString("delivery_status"),
             rs.getInt("attempt_count"),
+            nullableInstant(rs, "first_attempt_at"),
             nullableInstant(rs, "last_attempt_at"),
             nullableInstant(rs, "next_attempt_at"),
             nullableInteger(rs, "response_status"),
             rs.getString("response_body"),
+            rs.getString("final_failure_reason"),
+            rs.getString("parked_reason"),
             rs.getString("signature_algorithm"),
             rs.getString("signature_value"),
             rs.getString("dedupe_key"),
@@ -139,14 +142,96 @@ public class MerchantFinanceEventStore {
                 UPDATE merchant_finance_event_deliveries
                 SET delivery_status = ?,
                     attempt_count = attempt_count + 1,
+                    first_attempt_at = COALESCE(first_attempt_at, now()),
                     last_attempt_at = now(),
                     next_attempt_at = CASE WHEN ? = 'FAILED' THEN now() + interval '5 minutes' ELSE NULL END,
                     response_status = ?,
-                    response_body = ?
+                    response_body = ?,
+                    final_failure_reason = CASE WHEN ? = 'FAILED' THEN ? ELSE NULL END,
+                    parked_reason = NULL
                 WHERE workspace_id = ?
                   AND id = ?
                 RETURNING *
-                """, DELIVERY_MAPPER, status, status, responseStatus, responseBody, workspaceId, deliveryId);
+                """, DELIVERY_MAPPER, status, status, responseStatus, responseBody, status, responseBody, workspaceId, deliveryId);
+    }
+
+    public List<DeliveryWork> claimDueDeliveries(int limit, int maxAttempts) {
+        return jdbcTemplate.query("""
+                SELECT d.*,
+                       e.event_type,
+                       e.source_reference_type,
+                       e.source_reference_id,
+                       e.payload_json::text AS payload_json,
+                       e.event_key,
+                       e.occurred_at,
+                       endpoint.endpoint_url
+                FROM merchant_finance_event_deliveries d
+                JOIN merchant_finance_events e
+                  ON e.workspace_id = d.workspace_id
+                 AND e.id = d.merchant_finance_event_id
+                JOIN merchant_finance_event_endpoints endpoint
+                  ON endpoint.workspace_id = d.workspace_id
+                 AND endpoint.id = d.endpoint_id
+                 AND endpoint.status = 'ACTIVE'
+                WHERE (
+                    d.delivery_status = 'PENDING'
+                    OR (d.delivery_status = 'FAILED' AND d.attempt_count < ?)
+                  )
+                  AND (d.next_attempt_at IS NULL OR d.next_attempt_at <= now())
+                ORDER BY d.created_at, d.id
+                LIMIT ?
+                FOR UPDATE OF d SKIP LOCKED
+                """, DELIVERY_WORK_MAPPER, maxAttempts, limit);
+    }
+
+    public MerchantFinanceEventDelivery recordDeliverySuccess(UUID workspaceId, UUID deliveryId, int responseStatus, String responseBody) {
+        return jdbcTemplate.queryForObject("""
+                UPDATE merchant_finance_event_deliveries
+                SET delivery_status = 'SUCCEEDED',
+                    attempt_count = attempt_count + 1,
+                    first_attempt_at = COALESCE(first_attempt_at, now()),
+                    last_attempt_at = now(),
+                    next_attempt_at = NULL,
+                    response_status = ?,
+                    response_body = ?,
+                    final_failure_reason = NULL,
+                    parked_reason = NULL
+                WHERE workspace_id = ?
+                  AND id = ?
+                RETURNING *
+                """, DELIVERY_MAPPER, responseStatus, responseBody, workspaceId, deliveryId);
+    }
+
+    public MerchantFinanceEventDelivery recordDeliveryFailure(UUID workspaceId, UUID deliveryId, int maxAttempts, long backoffSeconds, Integer responseStatus, String responseBody, String failureReason) {
+        return jdbcTemplate.queryForObject("""
+                UPDATE merchant_finance_event_deliveries
+                SET delivery_status = CASE WHEN attempt_count + 1 >= ? THEN 'PARKED' ELSE 'FAILED' END,
+                    attempt_count = attempt_count + 1,
+                    first_attempt_at = COALESCE(first_attempt_at, now()),
+                    last_attempt_at = now(),
+                    next_attempt_at = CASE WHEN attempt_count + 1 >= ? THEN NULL ELSE now() + (? * interval '1 second') END,
+                    response_status = ?,
+                    response_body = ?,
+                    final_failure_reason = ?,
+                    parked_reason = CASE WHEN attempt_count + 1 >= ? THEN ? ELSE NULL END
+                WHERE workspace_id = ?
+                  AND id = ?
+                RETURNING *
+                """, DELIVERY_MAPPER, maxAttempts, maxAttempts, backoffSeconds, responseStatus, responseBody, failureReason, maxAttempts, failureReason, workspaceId, deliveryId);
+    }
+
+    public MerchantFinanceEventDelivery redriveDelivery(UUID workspaceId, UUID deliveryId) {
+        return jdbcTemplate.queryForObject("""
+                UPDATE merchant_finance_event_deliveries
+                SET delivery_status = 'PENDING',
+                    next_attempt_at = now(),
+                    final_failure_reason = NULL,
+                    parked_reason = NULL
+                WHERE workspace_id = ?
+                  AND id = ?
+                  AND delivery_status IN ('FAILED', 'PARKED')
+                RETURNING *
+                """, DELIVERY_MAPPER, workspaceId, deliveryId);
     }
 
     private static Instant instant(ResultSet rs, String column) throws SQLException {
@@ -166,5 +251,26 @@ public class MerchantFinanceEventStore {
     private static String[] stringArray(ResultSet rs, String column) throws SQLException {
         Array array = rs.getArray(column);
         return array == null ? new String[0] : (String[]) array.getArray();
+    }
+
+    private static final RowMapper<DeliveryWork> DELIVERY_WORK_MAPPER = (rs, rowNum) -> new DeliveryWork(
+            DELIVERY_MAPPER.mapRow(rs, rowNum),
+            rs.getString("event_type"),
+            rs.getString("source_reference_type"),
+            rs.getObject("source_reference_id", UUID.class),
+            rs.getString("payload_json"),
+            rs.getString("event_key"),
+            instant(rs, "occurred_at"),
+            rs.getString("endpoint_url"));
+
+    public record DeliveryWork(
+            MerchantFinanceEventDelivery delivery,
+            String eventType,
+            String sourceReferenceType,
+            UUID sourceReferenceId,
+            String payloadJson,
+            String eventKey,
+            Instant occurredAt,
+            String endpointUrl) {
     }
 }

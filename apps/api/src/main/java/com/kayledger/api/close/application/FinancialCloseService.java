@@ -95,13 +95,18 @@ public class FinancialCloseService {
             throw new BadRequestException("Only open accounting periods can be closed.");
         }
         if (financialApprovalService.closeRequiresApproval()) {
-            financialApprovalService.requireApprovedForExecution(
+            return financialApprovalService.executeApproved(
                     context,
                     approvalRequestId,
                     FinancialApprovalService.ACTION_FINANCIAL_PERIOD_CLOSE,
                     "ACCOUNTING_PERIOD",
-                    existing.id());
+                    existing.id(),
+                    () -> closeApprovedPeriod(context, existing, closeReason));
         }
+        return closeApprovedPeriod(context, existing, closeReason);
+    }
+
+    private CloseResult closeApprovedPeriod(AccessContext context, AccountingPeriod existing, String closeReason) {
         AccountingPeriod closed = financialCloseStore.closePeriod(context.workspaceId(), existing.id(), context.actorId(), closeReason);
         financialCloseStore.createCloseRecord(context.workspaceId(), closed.id(), context.actorId(), closeReason);
         List<FinalizedProviderStatement> statements = reportingStore.listProviderSummariesForPeriod(context.workspaceId(), closed.periodStart(), closed.periodEnd())
@@ -119,7 +124,7 @@ public class FinancialCloseService {
                     MerchantFinanceEventService.EVENT_FINALIZED_STATEMENT_AVAILABLE,
                     "FINALIZED_PROVIDER_STATEMENT",
                     statement.id(),
-                    statementPayload(statement));
+                statementPayload(statement));
         }
         return new CloseResult(closed, statements);
     }
@@ -137,13 +142,17 @@ public class FinancialCloseService {
         if (!"CLOSED".equals(existing.status())) {
             throw new BadRequestException("Only closed accounting periods can be reopened.");
         }
-        financialApprovalService.requireApprovedForExecution(
+        return financialApprovalService.executeApproved(
                 context,
                 approvalRequestId,
                 FinancialApprovalService.ACTION_FINANCIAL_PERIOD_REOPEN,
                 "ACCOUNTING_PERIOD",
-                existing.id());
-        AccountingPeriod reopened = financialCloseStore.reopenPeriod(context.workspaceId(), existing.id(), context.actorId(), reason.trim());
+                existing.id(),
+                () -> reopenApprovedPeriod(context, existing, reason.trim()));
+    }
+
+    private AccountingPeriod reopenApprovedPeriod(AccessContext context, AccountingPeriod existing, String reopenReason) {
+        AccountingPeriod reopened = financialCloseStore.reopenPeriod(context.workspaceId(), existing.id(), context.actorId(), reopenReason);
         indexReference(context.workspaceId(), "ACCOUNTING_PERIOD", reopened.id());
         merchantFinanceEventService.emit(
                 context.workspaceId(),

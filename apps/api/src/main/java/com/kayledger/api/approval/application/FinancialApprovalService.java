@@ -3,11 +3,14 @@ package com.kayledger.api.approval.application;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.function.Supplier;
 
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.kayledger.api.access.application.AccessContext;
@@ -41,6 +44,7 @@ public class FinancialApprovalService {
     private final ObjectMapper objectMapper;
     private final FinancialApprovalProperties properties;
     private final MerchantFinanceEventService merchantFinanceEventService;
+    private final TransactionTemplate transactionTemplate;
 
     public FinancialApprovalService(
             FinancialApprovalStore financialApprovalStore,
@@ -48,13 +52,16 @@ public class FinancialApprovalService {
             RegionService regionService,
             ObjectMapper objectMapper,
             FinancialApprovalProperties properties,
-            MerchantFinanceEventService merchantFinanceEventService) {
+            MerchantFinanceEventService merchantFinanceEventService,
+            org.springframework.transaction.PlatformTransactionManager transactionManager) {
         this.financialApprovalStore = financialApprovalStore;
         this.accessPolicy = accessPolicy;
         this.regionService = regionService;
         this.objectMapper = objectMapper;
         this.properties = properties;
         this.merchantFinanceEventService = merchantFinanceEventService;
+        this.transactionTemplate = new TransactionTemplate(transactionManager);
+        this.transactionTemplate.setPropagationBehavior(org.springframework.transaction.TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     }
 
     @Transactional
@@ -67,6 +74,8 @@ public class FinancialApprovalService {
         String targetType = requireText(command.targetType(), "targetType");
         String reason = requireText(command.reason(), "reason");
         String currencyCode = command.currencyCode() == null || command.currencyCode().isBlank() ? null : command.currencyCode().trim().toUpperCase();
+        ApprovalPolicy policy = policy(actionType);
+        policy.validate(targetType, command.targetId(), command.providerProfileId(), currencyCode, command.amountMinor());
         return financialApprovalStore.createRequest(
                 context.workspaceId(),
                 actionType,
@@ -129,10 +138,29 @@ public class FinancialApprovalService {
     }
 
     public void requireApprovedForExecution(AccessContext context, UUID approvalRequestId, String actionType, String targetType, UUID targetId) {
+        validateApprovedForExecution(context, approvalRequestId, actionType, targetType, targetId);
+    }
+
+    public <T> T executeApproved(AccessContext context, UUID approvalRequestId, String actionType, String targetType, UUID targetId, Supplier<T> protectedMutation) {
+        FinancialApprovalRequest request = validateApprovedForExecution(context, approvalRequestId, actionType, targetType, targetId);
+        try {
+            transactionTemplate.executeWithoutResult(status -> financialApprovalStore.markExecutionInProgress(context.workspaceId(), request.id(), context.actorId()));
+            T result = protectedMutation.get();
+            financialApprovalStore.markExecuted(context.workspaceId(), request.id(), context.actorId());
+            return result;
+        } catch (RuntimeException exception) {
+            transactionTemplate.executeWithoutResult(status -> financialApprovalStore.markExecutionFailed(context.workspaceId(), request.id(), failureReason(exception)));
+            throw exception;
+        }
+    }
+
+    private FinancialApprovalRequest validateApprovedForExecution(AccessContext context, UUID approvalRequestId, String actionType, String targetType, UUID targetId) {
         if (approvalRequestId == null) {
             throw new BadRequestException(actionType + " requires an approved financial approval request.");
         }
         FinancialApprovalRequest request = request(context.workspaceId(), approvalRequestId);
+        ApprovalPolicy policy = policy(actionType);
+        policy.validate(targetType, request.targetId(), request.providerProfileId(), request.currencyCode(), request.amountMinor());
         if (!actionType.equals(request.actionType()) || !targetType.equals(request.targetType())) {
             financialApprovalStore.markBlocked(context.workspaceId(), request.id(), "Approval request target does not match the attempted finance action.");
             throw new BadRequestException("Approval request does not match this finance action.");
@@ -152,7 +180,17 @@ public class FinancialApprovalService {
             financialApprovalStore.markBlocked(context.workspaceId(), request.id(), "Maker and checker must be different actors.");
             throw new BadRequestException("Maker and checker must be different actors.");
         }
-        financialApprovalStore.markExecuted(context.workspaceId(), request.id(), context.actorId());
+        FinancialApprovalExecutionState execution = financialApprovalStore.executionState(context.workspaceId(), request.id()).orElse(null);
+        if (execution != null && "EXECUTED".equals(execution.executionStatus())) {
+            throw new BadRequestException(actionType + " approval has already been consumed.");
+        }
+        if (execution != null && "IN_PROGRESS".equals(execution.executionStatus())) {
+            throw new BadRequestException(actionType + " approval execution is already in progress.");
+        }
+        if (execution != null && "FAILED".equals(execution.executionStatus()) && !policy.retryAfterFailure()) {
+            throw new BadRequestException(actionType + " approval cannot be retried after execution failure.");
+        }
+        return request;
     }
 
     public boolean closeRequiresApproval() {
@@ -217,6 +255,55 @@ public class FinancialApprovalService {
         payload.put("currencyCode", command.currencyCode());
         payload.put("amountMinor", command.amountMinor());
         return payload;
+    }
+
+    private static String failureReason(RuntimeException exception) {
+        String message = exception.getMessage();
+        if (message == null || message.isBlank()) {
+            return exception.getClass().getSimpleName();
+        }
+        return message.length() > 1000 ? message.substring(0, 1000) : message;
+    }
+
+    private static ApprovalPolicy policy(String actionType) {
+        return switch (actionType) {
+            case ACTION_FINANCIAL_PERIOD_CLOSE -> new ApprovalPolicy(actionType, Set.of("ACCOUNTING_PERIOD"), false, false, true, true, true);
+            case ACTION_FINANCIAL_PERIOD_REOPEN -> new ApprovalPolicy(actionType, Set.of("ACCOUNTING_PERIOD"), false, false, true, true, true);
+            case ACTION_PAYOUT_OPERATOR_SUCCESS, ACTION_PAYOUT_OPERATOR_RETRY, ACTION_PAYOUT_OPERATOR_FAILURE -> new ApprovalPolicy(actionType, Set.of("PAYOUT_REQUEST"), true, true, true, true, true);
+            case ACTION_LARGE_REFUND_OR_REVERSAL -> new ApprovalPolicy(actionType, Set.of("PAYMENT_INTENT"), true, true, true, true, true);
+            case ACTION_DISPUTE_RESOLUTION -> new ApprovalPolicy(actionType, Set.of("DISPUTE"), true, true, true, true, true);
+            default -> throw new BadRequestException("Unsupported financial approval action type.");
+        };
+    }
+
+    private record ApprovalPolicy(
+            String actionType,
+            Set<String> targetTypes,
+            boolean providerRequired,
+            boolean amountCurrencyRequired,
+            boolean operatorOnly,
+            boolean oneShotConsumable,
+            boolean retryAfterFailure) {
+
+        void validate(String targetType, UUID targetId, UUID providerProfileId, String currencyCode, Long amountMinor) {
+            if (!targetTypes.contains(targetType)) {
+                throw new BadRequestException("Approval action " + actionType + " does not support target type " + targetType + ".");
+            }
+            if (targetId == null) {
+                throw new BadRequestException("targetId is required for " + actionType + ".");
+            }
+            if (providerRequired && providerProfileId == null) {
+                throw new BadRequestException("providerProfileId is required for " + actionType + ".");
+            }
+            if (amountCurrencyRequired) {
+                if (currencyCode == null || currencyCode.isBlank()) {
+                    throw new BadRequestException("currencyCode is required for " + actionType + ".");
+                }
+                if (amountMinor == null || amountMinor <= 0) {
+                    throw new BadRequestException("amountMinor must be greater than zero for " + actionType + ".");
+                }
+            }
+        }
     }
 
     private static String requireText(String value, String fieldName) {

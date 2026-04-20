@@ -3,15 +3,21 @@ package com.kayledger.api;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.net.InetSocketAddress;
+import java.security.MessageDigest;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
+import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -51,7 +57,9 @@ import com.kayledger.api.shared.api.NotFoundException;
         "kay-ledger.region.replication-consumer-enabled=false",
         "kay-ledger.region.replication-producer-enabled=true",
         "kay-ledger.search.opensearch.endpoint=http://localhost:1",
-        "kay-ledger.object-storage.endpoint=http://localhost:1"
+        "kay-ledger.object-storage.endpoint=http://localhost:1",
+        "kay-ledger.merchant-finance.delivery.max-attempts=2",
+        "kay-ledger.merchant-finance.delivery.backoff-seconds=1"
 })
 class Kay023Kay024Kay025FinanceControlPlaneProofAndExternalizationIntegrationTest {
 
@@ -102,10 +110,33 @@ class Kay023Kay024Kay025FinanceControlPlaneProofAndExternalizationIntegrationTes
     InvestigationStore investigationStore;
 
     @Test
-    void invariant_finance_control_plane_proof_and_externalization_are_durable_and_tenant_safe() {
+    void invariant_finance_control_plane_proof_and_externalization_are_durable_and_tenant_safe() throws Exception {
         Fixture fixture = ownedFixture("kay023-main");
-        merchantFinanceEventService.configureEndpoint(financeWrite(fixture), new MerchantFinanceEventService.ConfigureEndpointCommand(
-                fixture.providerProfileId(), "https://merchant.example.test/finance-events", "kay023-secret", new String[0]));
+        AtomicInteger successDeliveries = new AtomicInteger();
+        AtomicInteger redriveDeliveries = new AtomicInteger();
+        AtomicBoolean redriveEndpointHealthy = new AtomicBoolean(false);
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/success", exchange -> {
+            successDeliveries.incrementAndGet();
+            byte[] response = "delivered".getBytes();
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.createContext("/retry", exchange -> {
+            int status = redriveEndpointHealthy.get() ? 200 : 500;
+            redriveDeliveries.incrementAndGet();
+            byte[] response = (status == 200 ? "redriven" : "retry later").getBytes();
+            exchange.sendResponseHeaders(status, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+        String baseUrl = "http://127.0.0.1:" + server.getAddress().getPort();
+        var successEndpoint = merchantFinanceEventService.configureEndpoint(financeWrite(fixture), new MerchantFinanceEventService.ConfigureEndpointCommand(
+                fixture.providerProfileId(), baseUrl + "/success", "kay023-secret", new String[] {MerchantFinanceEventService.EVENT_FINALIZED_STATEMENT_AVAILABLE}));
+        var retryEndpoint = merchantFinanceEventService.configureEndpoint(financeWrite(fixture), new MerchantFinanceEventService.ConfigureEndpointCommand(
+                fixture.providerProfileId(), baseUrl + "/retry", "kay023-retry-secret", new String[] {MerchantFinanceEventService.EVENT_APPROVAL_REJECTED}));
 
         LocalDate periodStart = LocalDate.now().minusDays(10);
         LocalDate periodEnd = periodStart.plusDays(1);
@@ -130,6 +161,8 @@ class Kay023Kay024Kay025FinanceControlPlaneProofAndExternalizationIntegrationTes
         var close = financialCloseService.closePeriod(financeWrite(fixture), closePeriod.id(), "Evidence close.");
         assertThat(close.finalizedStatements()).hasSize(1);
         assertThat(close.finalizedStatements().getFirst().settledGrossAmountMinor()).isEqualTo(10000);
+        assertThat(merchantFinanceEventService.processDueDeliveries()).isGreaterThanOrEqualTo(1);
+        assertThat(successDeliveries.get()).isEqualTo(1);
 
         var emptyClosedPeriod = financialCloseService.openPeriod(financeWrite(fixture), LocalDate.now(), LocalDate.now());
         financialCloseService.closePeriod(financeWrite(fixture), emptyClosedPeriod.id(), "Empty close blocks the accounting window.");
@@ -154,18 +187,65 @@ class Kay023Kay024Kay025FinanceControlPlaneProofAndExternalizationIntegrationTes
                 .hasMessageContaining("Maker and checker");
         financialApprovalService.approve(financeWriteChecker(fixture), reopenApproval.id(), "Checker approved late correction.");
         financialCloseService.reopenPeriod(financeWrite(fixture), emptyClosedPeriod.id(), "Late correction approved.", reopenApproval.id());
-        assertThat(financialApprovalService.history(financeRead(fixture), reopenApproval.id()).decisions()).hasSize(1);
+        var reopenHistory = financialApprovalService.history(financeRead(fixture), reopenApproval.id());
+        assertThat(reopenHistory.decisions()).hasSize(1);
+        assertThat(reopenHistory.executionState().executionStatus()).isEqualTo("EXECUTED");
+
+        UUID failedPayoutId = seedFailedPayout(fixture, 3000);
+        var payoutApproval = financialApprovalService.createRequest(financeWrite(fixture), new CreateApprovalRequestCommand(
+                FinancialApprovalService.ACTION_PAYOUT_OPERATOR_SUCCESS,
+                "PAYOUT_REQUEST",
+                failedPayoutId,
+                fixture.providerProfileId(),
+                "USD",
+                3000L,
+                "Operator payout override requires approval."));
+        financialApprovalService.approve(financeWriteChecker(fixture), payoutApproval.id(), "Payout override approved.");
+        assertThatThrownBy(() -> paymentService.markPayoutSucceeded(paymentWrite(fixture), failedPayoutId, new PaymentService.PayoutMutationCommand(null, "failed-exec", payoutApproval.id())))
+                .isInstanceOf(BadRequestException.class)
+                .hasMessageContaining("Only requested or processing payouts can succeed");
+        var failedExecution = financialApprovalService.history(financeRead(fixture), payoutApproval.id());
+        assertThat(failedExecution.request().status()).isEqualTo("APPROVED");
+        assertThat(failedExecution.executionState().executionStatus()).isEqualTo("FAILED");
+        jdbcTemplate.update("UPDATE payout_requests SET status = 'REQUESTED', failure_reason = NULL WHERE workspace_id = ? AND id = ?", fixture.workspaceId(), failedPayoutId);
+        paymentService.markPayoutSucceeded(paymentWrite(fixture), failedPayoutId, new PaymentService.PayoutMutationCommand(null, "retry-exec", payoutApproval.id()));
+        var successfulRetryExecution = financialApprovalService.history(financeRead(fixture), payoutApproval.id());
+        assertThat(successfulRetryExecution.request().status()).isEqualTo("EXECUTED");
+        assertThat(successfulRetryExecution.executionState().executionStatus()).isEqualTo("EXECUTED");
 
         var evidencePack = financeEvidenceService.generatePack(financeWrite(fixture), new FinanceEvidenceService.GenerateEvidencePackCommand(
                 FinanceEvidenceService.TYPE_FINALIZED_PROVIDER_STATEMENT,
                 close.finalizedStatements().getFirst().id()));
         var export = financeEvidenceService.generateExport(financeWrite(fixture), evidencePack.id(), "JSON");
+        var secondExport = financeEvidenceService.generateExport(financeWrite(fixture), evidencePack.id(), "JSON");
+        var artifact = financeEvidenceService.exportArtifact(financeRead(fixture), export.id());
+        var secondArtifact = financeEvidenceService.exportArtifact(financeRead(fixture), secondExport.id());
         assertThat(export.checksumAlgorithm()).isEqualTo("SHA-256");
         assertThat(export.checksumValue()).hasSize(64);
+        assertThat(secondExport.id()).isNotEqualTo(export.id());
+        assertThat(secondExport.artifactId()).isNotEqualTo(export.artifactId());
+        assertThat(artifact.id()).isEqualTo(export.artifactId());
+        assertThat(artifact.checksumValue()).isEqualTo(sha256(artifact.artifactBody()));
+        assertThat(secondArtifact.id()).isEqualTo(secondExport.artifactId());
+
+        UUID rejectedSourceId = UUID.randomUUID();
+        merchantFinanceEventService.emit(fixture.workspaceId(), fixture.providerProfileId(), "USD", null, MerchantFinanceEventService.EVENT_APPROVAL_REJECTED, "FINANCIAL_APPROVAL_REQUEST", rejectedSourceId, Map.of("approvalRequestId", rejectedSourceId), Instant.now().minusSeconds(60));
+        assertThat(merchantFinanceEventService.processDueDeliveries()).isGreaterThanOrEqualTo(1);
+        assertThat(deliveryForEndpoint(fixture, retryEndpoint.id()).deliveryStatus()).isEqualTo("FAILED");
+        jdbcTemplate.update("UPDATE merchant_finance_event_deliveries SET next_attempt_at = now() WHERE workspace_id = ? AND endpoint_id = ?", fixture.workspaceId(), retryEndpoint.id());
+        assertThat(merchantFinanceEventService.processDueDeliveries()).isGreaterThanOrEqualTo(1);
+        assertThat(deliveryForEndpoint(fixture, retryEndpoint.id()).deliveryStatus()).isEqualTo("PARKED");
+        redriveEndpointHealthy.set(true);
+        merchantFinanceEventService.redriveDelivery(financeWrite(fixture), deliveryForEndpoint(fixture, retryEndpoint.id()).id());
+        assertThat(merchantFinanceEventService.processDueDeliveries()).isGreaterThanOrEqualTo(1);
+        var redrivenDelivery = deliveryForEndpoint(fixture, retryEndpoint.id());
+        assertThat(redrivenDelivery.deliveryStatus()).isEqualTo("SUCCEEDED");
+        assertThat(redrivenDelivery.attemptCount()).isEqualTo(3);
+        assertThat(redriveDeliveries.get()).isEqualTo(3);
 
         var deliveries = merchantFinanceEventService.listDeliveries(financeRead(fixture));
         assertThat(deliveries).isNotEmpty();
-        merchantFinanceEventService.redriveDelivery(financeWrite(fixture), deliveries.getFirst().id());
+        assertThat(deliveryForEndpoint(fixture, successEndpoint.id()).deliveryStatus()).isEqualTo("SUCCEEDED");
 
         assertThat(investigationStore.documentsForWorkspace(fixture.workspaceId()))
                 .anyMatch(document -> "FINANCIAL_APPROVAL_REQUEST".equals(document.referenceType()) && reopenApproval.id().equals(document.referenceId()))
@@ -179,6 +259,7 @@ class Kay023Kay024Kay025FinanceControlPlaneProofAndExternalizationIntegrationTes
                 .isInstanceOf(NotFoundException.class);
         assertThat(investigationStore.documentsForWorkspace(other.workspaceId()))
                 .noneMatch(document -> evidencePack.id().equals(document.referenceId()) || reopenApproval.id().equals(document.referenceId()));
+        server.stop(0);
     }
 
     private Fixture ownedFixture(String slug) {
@@ -196,6 +277,7 @@ class Kay023Kay024Kay025FinanceControlPlaneProofAndExternalizationIntegrationTes
         jdbcTemplate.update("INSERT INTO customer_profiles (id, workspace_id, actor_id, display_name) VALUES (?, ?, ?, 'Customer')", fixture.customerProfileId(), fixture.workspaceId(), fixture.customerActorId());
         jdbcTemplate.update("INSERT INTO workspace_region_ownership (workspace_id, home_region, ownership_epoch) VALUES (?, 'region-a', 1)", fixture.workspaceId());
         seedOffering(fixture);
+        seedFinancialAccounts(fixture);
         return fixture;
     }
 
@@ -204,6 +286,18 @@ class Kay023Kay024Kay025FinanceControlPlaneProofAndExternalizationIntegrationTes
                 INSERT INTO offerings (id, workspace_id, provider_profile_id, title, status, duration_minutes, offer_type, min_notice_minutes, max_notice_days, slot_interval_minutes)
                 VALUES (?, ?, ?, 'KAY023 Offering', 'PUBLISHED', 60, 'SCHEDULED_TIME', 0, 30, 30)
                 """, fixture.offeringId(), fixture.workspaceId(), fixture.providerProfileId());
+    }
+
+    private void seedFinancialAccounts(Fixture fixture) {
+        seedFinancialAccount(fixture, "PAYOUT_CLEARING", "LIABILITY");
+        seedFinancialAccount(fixture, "CASH_PLACEHOLDER", "ASSET");
+    }
+
+    private void seedFinancialAccount(Fixture fixture, String purpose, String type) {
+        jdbcTemplate.update("""
+                INSERT INTO financial_accounts (id, workspace_id, account_code, account_name, account_type, account_purpose, currency_code)
+                VALUES (?, ?, ?, ?, ?, ?, 'USD')
+                """, UUID.randomUUID(), fixture.workspaceId(), purpose + "-USD", purpose, type, purpose);
     }
 
     private void seedSettledPayment(Fixture fixture, long gross, long fee, String reference, LocalDateTime effectiveAt) {
@@ -230,6 +324,26 @@ class Kay023Kay024Kay025FinanceControlPlaneProofAndExternalizationIntegrationTes
                 VALUES (?, ?, ?, ?, 'CAPTURED', 'USD', ?, ?, ?, ?, ?, 0, ?)
                 """, paymentIntentId, fixture.workspaceId(), bookingId, fixture.providerProfileId(), gross, fee, gross - fee, gross, gross, reference);
         return paymentIntentId;
+    }
+
+    private UUID seedFailedPayout(Fixture fixture, long amountMinor) {
+        UUID payoutId = UUID.randomUUID();
+        jdbcTemplate.update("""
+                INSERT INTO payout_requests (id, workspace_id, provider_profile_id, currency_code, requested_amount_minor, status, failure_reason)
+                VALUES (?, ?, ?, 'USD', ?, 'FAILED', 'provider failed')
+                """, payoutId, fixture.workspaceId(), fixture.providerProfileId(), amountMinor);
+        return payoutId;
+    }
+
+    private com.kayledger.api.merchantevents.model.MerchantFinanceEventDelivery deliveryForEndpoint(Fixture fixture, UUID endpointId) {
+        return merchantFinanceEventService.listDeliveries(financeRead(fixture)).stream()
+                .filter(delivery -> endpointId.equals(delivery.endpointId()))
+                .findFirst()
+                .orElseThrow();
+    }
+
+    private static String sha256(String body) throws Exception {
+        return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(body.getBytes()));
     }
 
     private UUID seedBooking(Fixture fixture) {
