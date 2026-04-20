@@ -106,11 +106,15 @@ class RegionOwnershipTruthAndWorkspaceScopedLagIntegrationTest {
         RegionReplicationService regionBReplication = regionBReplication(regionBJdbc);
         Fixture owned = fixture(jdbcTemplate, "kay018-owned");
         Fixture other = fixture(jdbcTemplate, "kay018-other");
+        Fixture replicated = fixture(jdbcTemplate, "kay018-replicated");
         Fixture missing = fixture(jdbcTemplate, "kay018-missing");
         fixture(regionBJdbc, owned);
         fixture(regionBJdbc, other);
+        fixture(regionBJdbc, replicated);
         jdbcTemplate.update("INSERT INTO workspace_region_ownership (workspace_id, home_region, ownership_epoch) VALUES (?, 'region-a', 1)", owned.workspaceId());
         jdbcTemplate.update("INSERT INTO workspace_region_ownership (workspace_id, home_region, ownership_epoch) VALUES (?, 'region-a', 1)", other.workspaceId());
+        jdbcTemplate.update("INSERT INTO workspace_region_ownership (workspace_id, home_region, ownership_epoch) VALUES (?, 'region-a', 1)", replicated.workspaceId());
+        regionBJdbc.update("INSERT INTO workspace_region_ownership (workspace_id, home_region, ownership_epoch) VALUES (?, 'region-a', 1)", replicated.workspaceId());
 
         assertThatThrownBy(() -> regionService.requireOwnedForWrite(UUID.randomUUID(), "missing ownership drill"))
                 .isInstanceOf(ForbiddenException.class)
@@ -141,9 +145,10 @@ class RegionOwnershipTruthAndWorkspaceScopedLagIntegrationTest {
             assertThat(ownership.ownershipEpoch()).isEqualTo(failover.newEpoch());
         });
 
-        ProviderFinancialSummary ownedSummary = summary(owned.workspaceId(), owned.providerProfileId(), 9000, Instant.now());
-        regionBReplication.apply(objectMapper.writeValueAsString(event(RegionReplicationService.PROVIDER_SUMMARY_SNAPSHOT, owned.workspaceId(), 9, Map.of("summary", ownedSummary))));
-        assertThat(regionBReplication.freshness(RegionReplicationService.PROVIDER_SUMMARY_SNAPSHOT, owned.workspaceId()).readSource()).isEqualTo("REPLICATED_SNAPSHOT");
+        assertThat(regionBReplication.freshness(RegionReplicationService.PROVIDER_SUMMARY_SNAPSHOT, owned.workspaceId()).readSource()).isEqualTo("LOCAL_SOURCE_OF_TRUTH");
+        ProviderFinancialSummary replicatedSummary = summary(replicated.workspaceId(), replicated.providerProfileId(), 9000, Instant.now());
+        regionBReplication.apply(objectMapper.writeValueAsString(event(RegionReplicationService.PROVIDER_SUMMARY_SNAPSHOT, replicated.workspaceId(), 9, Map.of("summary", replicatedSummary))));
+        assertThat(regionBReplication.freshness(RegionReplicationService.PROVIDER_SUMMARY_SNAPSHOT, replicated.workspaceId()).readSource()).isEqualTo("REPLICATED_SNAPSHOT");
         assertThat(regionBReplication.freshness(RegionReplicationService.PROVIDER_SUMMARY_SNAPSHOT, other.workspaceId()).readSource()).isEqualTo("NO_REPLICATED_CHECKPOINT");
 
         assertThatThrownBy(() -> reportingService.refreshAndListSummaries(financeReadOnly(other)))

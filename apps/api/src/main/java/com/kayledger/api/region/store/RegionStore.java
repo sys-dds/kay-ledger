@@ -162,7 +162,7 @@ public class RegionStore {
                 """, FAILOVER_MAPPER, workspaceId);
     }
 
-    public void upsertInvestigationSnapshot(RegionReplicationEvent event, com.kayledger.api.investigation.model.InvestigationDocument document, String payloadJson, long lagMillis) {
+    public boolean upsertInvestigationSnapshot(RegionReplicationEvent event, com.kayledger.api.investigation.model.InvestigationDocument document, String payloadJson, long lagMillis) {
         int applied = jdbcTemplate.update("""
                 INSERT INTO region_investigation_read_snapshots (
                     workspace_id, source_region, target_region, replication_event_id,
@@ -220,9 +220,10 @@ public class RegionStore {
         if (applied > 0) {
             upsertReplicationCheckpoint(event, lagMillis);
         }
+        return applied > 0;
     }
 
-    public void upsertProviderSummarySnapshot(RegionReplicationEvent event, ProviderFinancialSummary summary, long lagMillis) {
+    public boolean upsertProviderSummarySnapshot(RegionReplicationEvent event, ProviderFinancialSummary summary, long lagMillis) {
         int applied = jdbcTemplate.update("""
                 INSERT INTO region_provider_summary_snapshots (
                     workspace_id, source_region, target_region, replication_event_id,
@@ -267,6 +268,7 @@ public class RegionStore {
         if (applied > 0) {
             upsertReplicationCheckpoint(event, lagMillis);
         }
+        return applied > 0;
     }
 
     public List<RegionInvestigationSnapshot> searchInvestigationSnapshots(

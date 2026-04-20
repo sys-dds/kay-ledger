@@ -149,6 +149,62 @@ public class RegionalRecoveryStore {
                 """, ACTION_MAPPER, resultJson, workspaceId, actionId);
     }
 
+    public void recordPeerConfirmation(
+            UUID workspaceId,
+            UUID recoveryActionId,
+            String actionType,
+            String referenceType,
+            String referenceId,
+            String appliedRegion,
+            String sourceRegion,
+            UUID applyEventId,
+            UUID confirmationEventId,
+            Instant appliedAt) {
+        jdbcTemplate.update("""
+                INSERT INTO regional_recovery_action_confirmations (
+                    workspace_id, recovery_action_id, action_type, reference_type, reference_id,
+                    applied_region, source_region, apply_event_id, confirmation_event_id, applied_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (workspace_id, recovery_action_id, applied_region, apply_event_id) DO NOTHING
+                """, workspaceId, recoveryActionId, actionType, referenceType, referenceId, appliedRegion, sourceRegion, applyEventId, confirmationEventId, Timestamp.from(appliedAt));
+    }
+
+    public Optional<RegionalRecoveryAction> completeActionFromPeerConfirmation(
+            UUID workspaceId,
+            UUID recoveryActionId,
+            String actionType,
+            String referenceType,
+            String referenceId,
+            String appliedRegion,
+            UUID confirmationEventId,
+            Instant appliedAt,
+            String resultJson) {
+        List<RegionalRecoveryAction> updated = jdbcTemplate.query("""
+                UPDATE regional_recovery_actions
+                SET status = 'SUCCEEDED',
+                    result_json = ?::jsonb,
+                    failure_reason = NULL,
+                    completed_at = now(),
+                    peer_applied_region = ?,
+                    peer_applied_at = ?,
+                    peer_confirmation_event_id = ?
+                WHERE workspace_id = ?
+                  AND id = ?
+                  AND action_type = ?
+                  AND reference_type = ?
+                  AND reference_id = ?
+                  AND status = 'AWAITING_PEER_APPLY'
+                RETURNING id, workspace_id, drift_record_id, action_type, reference_type, reference_id, status,
+                          requested_by_actor_id, result_json::text, failure_reason, created_at, updated_at, completed_at
+                """, ACTION_MAPPER, resultJson, appliedRegion, Timestamp.from(appliedAt), confirmationEventId,
+                workspaceId, recoveryActionId, actionType, referenceType, referenceId);
+        Optional<RegionalRecoveryAction> action = updated.stream().findFirst();
+        action.map(RegionalRecoveryAction::driftRecordId)
+                .ifPresent(driftRecordId -> resolveDrift(workspaceId, driftRecordId));
+        return action;
+    }
+
     public RegionalRecoveryAction markActionFailed(UUID workspaceId, UUID actionId, String failureReason) {
         return jdbcTemplate.queryForObject("""
                 UPDATE regional_recovery_actions
@@ -208,6 +264,30 @@ public class RegionalRecoveryStore {
                 rs.getString("source_region"),
                 rs.getString("target_region"),
                 rs.getLong("last_applied_sequence")), workspaceId);
+    }
+
+    public boolean hasInvestigationSnapshotRows(UUID workspaceId, String targetRegion) {
+        Boolean exists = jdbcTemplate.queryForObject("""
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM region_investigation_read_snapshots
+                    WHERE workspace_id = ?
+                      AND target_region = ?
+                )
+                """, Boolean.class, workspaceId, targetRegion);
+        return Boolean.TRUE.equals(exists);
+    }
+
+    public boolean hasProviderSummarySnapshotRows(UUID workspaceId, String targetRegion) {
+        Boolean exists = jdbcTemplate.queryForObject("""
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM region_provider_summary_snapshots
+                    WHERE workspace_id = ?
+                      AND target_region = ?
+                )
+                """, Boolean.class, workspaceId, targetRegion);
+        return Boolean.TRUE.equals(exists);
     }
 
     private static Instant instant(ResultSet rs, String column) throws SQLException {

@@ -145,9 +145,17 @@ class Kay015TemporalOperatorWorkflowsIntegrationTest {
         assertThat(operatorWorkflowQueryService.list(paymentContext(beta), OperatorWorkflowService.INVESTIGATION_REINDEX)).isEmpty();
     }
 
-    private void assertWorkflow(AccessContext context, String workflowType, String referenceType, UUID referenceId, String status) {
-        assertThat(operatorWorkflowQueryService.findByReference(context, workflowType, referenceType, referenceId).status())
-                .isEqualTo(status);
+    private void assertWorkflow(AccessContext context, String workflowType, String referenceType, UUID referenceId, String status) throws Exception {
+        Instant deadline = Instant.now().plus(Duration.ofSeconds(20));
+        String actual = null;
+        while (Instant.now().isBefore(deadline)) {
+            actual = operatorWorkflowQueryService.findByReference(context, workflowType, referenceType, referenceId).status();
+            if (status.equals(actual)) {
+                return;
+            }
+            Thread.sleep(200);
+        }
+        assertThat(actual).isEqualTo(status);
     }
 
     private void awaitStatus(String table, UUID id, String expected) throws Exception {

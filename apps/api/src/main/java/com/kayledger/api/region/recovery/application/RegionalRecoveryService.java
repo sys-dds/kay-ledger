@@ -88,16 +88,27 @@ public class RegionalRecoveryService {
                     workspaceId + ":" + drift.lastAppliedSequence(),
                     json(Map.of("streamName", drift.streamName(), "lastAppliedSequence", drift.lastAppliedSequence())));
         }
-        if (!regionService.isLocalOwner(workspaceId)
-                && regionReplicationService.providerSummarySnapshots(workspaceId).isEmpty()) {
-            recoveryStore.upsertOpenDrift(
-                    workspaceId,
-                    REGIONAL_READ_SNAPSHOT_MISSING,
-                    null,
-                    regionService.localRegionId(),
-                    RegionReplicationService.PROVIDER_SUMMARY_SNAPSHOT,
-                    workspaceId.toString(),
-                    json(Map.of("surface", "provider summary")));
+        if (!regionService.isLocalOwner(workspaceId)) {
+            if (!recoveryStore.hasProviderSummarySnapshotRows(workspaceId, regionService.localRegionId())) {
+                recoveryStore.upsertOpenDrift(
+                        workspaceId,
+                        REGIONAL_READ_SNAPSHOT_MISSING,
+                        null,
+                        regionService.localRegionId(),
+                        RegionReplicationService.PROVIDER_SUMMARY_SNAPSHOT,
+                        workspaceId.toString(),
+                        json(Map.of("surface", "provider summary")));
+            }
+            if (!recoveryStore.hasInvestigationSnapshotRows(workspaceId, regionService.localRegionId())) {
+                recoveryStore.upsertOpenDrift(
+                        workspaceId,
+                        REGIONAL_READ_SNAPSHOT_MISSING,
+                        null,
+                        regionService.localRegionId(),
+                        RegionReplicationService.INVESTIGATION_READ_SNAPSHOT,
+                        workspaceId.toString(),
+                        json(Map.of("surface", "investigation read")));
+            }
         }
         return recoveryStore.listUnresolvedDrift(workspaceId);
     }
@@ -156,7 +167,7 @@ public class RegionalRecoveryService {
     private RecoveryOutcome applyRecovery(AccessContext context, RegionalRecoveryAction action) {
         return switch (action.actionType()) {
             case REPLAY_OWNERSHIP_TRANSFER -> {
-                replayOwnershipTransfer(context);
+                replayOwnershipTransfer(context, action.id());
                 yield RecoveryOutcome.awaitingPeerApply();
             }
             case REDRIVE_DELAYED_PROVIDER_CALLBACK -> {
@@ -164,18 +175,18 @@ public class RegionalRecoveryService {
                 yield RecoveryOutcome.complete();
             }
             case REPLAY_INVESTIGATION_SNAPSHOT -> {
-                investigationIndexingService.indexReference(context.workspaceId(), action.referenceType(), UUID.fromString(action.referenceId()));
+                investigationIndexingService.replayRegionalSnapshot(context.workspaceId(), action.referenceType(), UUID.fromString(action.referenceId()), action.id());
                 yield RecoveryOutcome.awaitingPeerApply();
             }
             case REPLAY_PROVIDER_SUMMARY_SNAPSHOT -> {
-                reportingService.refreshAndListSummaries(context);
+                reportingService.replayProviderSummarySnapshot(context.workspaceId(), action.id());
                 yield RecoveryOutcome.awaitingPeerApply();
             }
             default -> throw new BadRequestException("actionType is invalid.");
         };
     }
 
-    private void replayOwnershipTransfer(AccessContext context) {
+    private void replayOwnershipTransfer(AccessContext context, UUID recoveryActionId) {
         List<WorkspaceRegionFailoverEvent> events = regionService.failoverEvents(context.workspaceId());
         if (events.isEmpty()) {
             throw new BadRequestException("No failover event is available to replay.");
@@ -188,7 +199,8 @@ public class RegionalRecoveryService {
                 latest.priorEpoch(),
                 latest.newEpoch(),
                 latest.triggerMode(),
-                context.actorId());
+                context.actorId(),
+                recoveryActionId);
     }
 
     private void requireRead(AccessContext context) {
