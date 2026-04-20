@@ -173,7 +173,13 @@ public class RegionReplicationService {
             String businessReferenceId,
             String subscriptionId,
             String providerProfileId,
-            String referenceId) {
+            String referenceId,
+            String businessReferenceType,
+            String status,
+            String currencyCode,
+            String mismatchType,
+            String periodStart,
+            String periodEnd) {
         return regionStore.searchInvestigationSnapshots(
                         regionProperties.getLocalRegionId(),
                         workspaceId,
@@ -186,7 +192,13 @@ public class RegionReplicationService {
                         businessReferenceId,
                         subscriptionId,
                         providerProfileId,
-                        referenceId)
+                        referenceId,
+                        businessReferenceType,
+                        status,
+                        currencyCode,
+                        mismatchType,
+                        periodStart,
+                        periodEnd)
                 .stream()
                 .map(this::toHit)
                 .toList();

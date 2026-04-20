@@ -5,7 +5,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
+
+import jakarta.annotation.PreDestroy;
 
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.stereotype.Service;
@@ -21,6 +27,7 @@ import com.kayledger.api.approval.model.FinancialApprovalDecision;
 import com.kayledger.api.approval.model.FinancialApprovalExecutionState;
 import com.kayledger.api.approval.model.FinancialApprovalRequest;
 import com.kayledger.api.approval.store.FinancialApprovalStore;
+import com.kayledger.api.approval.store.FinancialApprovalStore.ApprovalExecutionRuntimeSummary;
 import com.kayledger.api.merchantevents.application.MerchantFinanceEventService;
 import com.kayledger.api.region.application.RegionService;
 import com.kayledger.api.shared.api.BadRequestException;
@@ -45,6 +52,7 @@ public class FinancialApprovalService {
     private final FinancialApprovalProperties properties;
     private final MerchantFinanceEventService merchantFinanceEventService;
     private final TransactionTemplate transactionTemplate;
+    private final ScheduledExecutorService executionHeartbeatExecutor;
 
     public FinancialApprovalService(
             FinancialApprovalStore financialApprovalStore,
@@ -62,6 +70,16 @@ public class FinancialApprovalService {
         this.merchantFinanceEventService = merchantFinanceEventService;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         this.transactionTemplate.setPropagationBehavior(org.springframework.transaction.TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        this.executionHeartbeatExecutor = Executors.newSingleThreadScheduledExecutor(task -> {
+            Thread thread = new Thread(task, "financial-approval-execution-heartbeat");
+            thread.setDaemon(true);
+            return thread;
+        });
+    }
+
+    @PreDestroy
+    void shutdownExecutionHeartbeatExecutor() {
+        executionHeartbeatExecutor.shutdownNow();
     }
 
     @Transactional
@@ -101,6 +119,11 @@ public class FinancialApprovalService {
                 request,
                 financialApprovalStore.listDecisions(context.workspaceId(), request.id()),
                 financialApprovalStore.executionState(context.workspaceId(), request.id()).orElse(null));
+    }
+
+    public ApprovalExecutionRuntimeSummary executionRuntimeSummary(AccessContext context) {
+        requireRead(context);
+        return financialApprovalStore.executionRuntimeSummary(context.workspaceId());
     }
 
     @Transactional
@@ -143,15 +166,51 @@ public class FinancialApprovalService {
 
     public <T> T executeApproved(AccessContext context, UUID approvalRequestId, String actionType, String targetType, UUID targetId, Supplier<T> protectedMutation) {
         FinancialApprovalRequest request = validateApprovedForExecution(context, approvalRequestId, actionType, targetType, targetId);
+        ApprovalPolicy policy = policy(actionType);
+        FinancialApprovalExecutionState execution = null;
+        ScheduledFuture<?> heartbeat = null;
         try {
-            transactionTemplate.executeWithoutResult(status -> financialApprovalStore.markExecutionInProgress(context.workspaceId(), request.id(), context.actorId()));
+            execution = transactionTemplate.execute(status -> financialApprovalStore.markExecutionInProgress(
+                    context.workspaceId(),
+                    request.id(),
+                    context.actorId(),
+                    properties.getExecutionLeaseSeconds(),
+                    policy.retryAfterFailure()));
+            heartbeat = scheduleExecutionHeartbeat(context, request.id(), execution.executionAttemptCount());
             T result = protectedMutation.get();
-            financialApprovalStore.markExecuted(context.workspaceId(), request.id(), context.actorId());
+            financialApprovalStore.markExecuted(context.workspaceId(), request.id(), context.actorId(), execution.executionAttemptCount());
             return result;
         } catch (RuntimeException exception) {
-            transactionTemplate.executeWithoutResult(status -> financialApprovalStore.markExecutionFailed(context.workspaceId(), request.id(), failureReason(exception)));
+            FinancialApprovalExecutionState claimedExecution = execution;
+            if (claimedExecution != null) {
+                transactionTemplate.executeWithoutResult(status -> financialApprovalStore.markExecutionFailed(
+                        context.workspaceId(),
+                        request.id(),
+                        context.actorId(),
+                        claimedExecution.executionAttemptCount(),
+                        failureReason(exception)));
+            }
             throw exception;
+        } finally {
+            if (heartbeat != null) {
+                heartbeat.cancel(false);
+            }
         }
+    }
+
+    private ScheduledFuture<?> scheduleExecutionHeartbeat(AccessContext context, UUID requestId, int executionAttemptCount) {
+        int leaseSeconds = Math.max(properties.getExecutionLeaseSeconds(), 1);
+        long heartbeatSeconds = Math.max(1, leaseSeconds / 2);
+        return executionHeartbeatExecutor.scheduleAtFixedRate(
+                () -> transactionTemplate.executeWithoutResult(status -> financialApprovalStore.heartbeatExecutionLease(
+                        context.workspaceId(),
+                        requestId,
+                        context.actorId(),
+                        executionAttemptCount,
+                        leaseSeconds)),
+                heartbeatSeconds,
+                heartbeatSeconds,
+                TimeUnit.SECONDS);
     }
 
     private FinancialApprovalRequest validateApprovedForExecution(AccessContext context, UUID approvalRequestId, String actionType, String targetType, UUID targetId) {
@@ -191,6 +250,16 @@ public class FinancialApprovalService {
             throw new BadRequestException(actionType + " approval cannot be retried after execution failure.");
         }
         return request;
+    }
+
+    @Transactional
+    public ApprovalExecutionRecoveryResult recoverStaleExecutions(AccessContext context) {
+        requireWrite(context, "financial approval execution recovery");
+        int recovered = financialApprovalStore.recoverStaleExecutions(
+                context.workspaceId(),
+                properties.getExecutionLeaseSeconds(),
+                "Approval execution lease expired before protected finance action completed.");
+        return new ApprovalExecutionRecoveryResult(recovered);
     }
 
     public boolean closeRequiresApproval() {
@@ -327,5 +396,8 @@ public class FinancialApprovalService {
             FinancialApprovalRequest request,
             List<FinancialApprovalDecision> decisions,
             FinancialApprovalExecutionState executionState) {
+    }
+
+    public record ApprovalExecutionRecoveryResult(int recoveredCount) {
     }
 }

@@ -11,6 +11,7 @@ public class MerchantFinanceDeliveryProperties {
     private long backoffSeconds = 60;
     private int responseBodyMaxChars = 2000;
     private int timeoutSeconds = 5;
+    private int leaseSeconds = 60;
 
     public boolean isScheduledEnabled() {
         return scheduledEnabled;
@@ -58,5 +59,13 @@ public class MerchantFinanceDeliveryProperties {
 
     public void setTimeoutSeconds(int timeoutSeconds) {
         this.timeoutSeconds = Math.max(1, timeoutSeconds);
+    }
+
+    public int getLeaseSeconds() {
+        return leaseSeconds;
+    }
+
+    public void setLeaseSeconds(int leaseSeconds) {
+        this.leaseSeconds = Math.max(5, leaseSeconds);
     }
 }

@@ -14,6 +14,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import com.kayledger.api.access.application.AccessContext;
 import com.kayledger.api.access.application.AccessContextResolver;
+import com.kayledger.api.approval.application.FinancialApprovalService;
 import com.kayledger.api.merchantevents.application.MerchantFinanceEventService;
 import com.kayledger.api.merchantevents.application.MerchantFinanceEventService.ConfigureEndpointCommand;
 import com.kayledger.api.merchantevents.model.MerchantFinanceEndpoint;
@@ -27,11 +28,13 @@ public class MerchantFinanceEventsController {
 
     private final AccessContextResolver accessContextResolver;
     private final MerchantFinanceEventService merchantFinanceEventService;
+    private final FinancialApprovalService financialApprovalService;
     private final IdempotencyService idempotencyService;
 
-    public MerchantFinanceEventsController(AccessContextResolver accessContextResolver, MerchantFinanceEventService merchantFinanceEventService, IdempotencyService idempotencyService) {
+    public MerchantFinanceEventsController(AccessContextResolver accessContextResolver, MerchantFinanceEventService merchantFinanceEventService, FinancialApprovalService financialApprovalService, IdempotencyService idempotencyService) {
         this.accessContextResolver = accessContextResolver;
         this.merchantFinanceEventService = merchantFinanceEventService;
+        this.financialApprovalService = financialApprovalService;
         this.idempotencyService = idempotencyService;
     }
 
@@ -94,6 +97,66 @@ public class MerchantFinanceEventsController {
         return new ProcessDueDeliveriesResponse(merchantFinanceEventService.processDueDeliveries(context));
     }
 
+    @GetMapping("/runtime")
+    Object runtime(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey) {
+        return merchantFinanceEventService.runtimeSummary(accessContextResolver.resolveWorkspace(workspaceSlug, actorKey));
+    }
+
+    @PostMapping("/runtime/pause")
+    Object pauseRuntime(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @RequestBody RuntimePauseRequest request) {
+        return merchantFinanceEventService.pauseRuntime(accessContextResolver.resolveWorkspace(workspaceSlug, actorKey), request == null ? null : request.reason());
+    }
+
+    @PostMapping("/runtime/resume")
+    Object resumeRuntime(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey) {
+        return merchantFinanceEventService.resumeRuntime(accessContextResolver.resolveWorkspace(workspaceSlug, actorKey));
+    }
+
+    @PostMapping("/runtime/reclaim-stale")
+    Object reclaimStale(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey) {
+        return merchantFinanceEventService.reclaimStaleClaims(accessContextResolver.resolveWorkspace(workspaceSlug, actorKey));
+    }
+
+    @PostMapping("/runtime/requeue-parked")
+    Object requeueParked(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey) {
+        return merchantFinanceEventService.requeueParked(accessContextResolver.resolveWorkspace(workspaceSlug, actorKey));
+    }
+
+    @PostMapping("/runtime/requeue-failed")
+    Object requeueFailed(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey) {
+        return merchantFinanceEventService.requeueFailed(accessContextResolver.resolveWorkspace(workspaceSlug, actorKey));
+    }
+
+    @GetMapping("/runtime/approval-executions")
+    Object approvalExecutionRuntime(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey) {
+        return financialApprovalService.executionRuntimeSummary(accessContextResolver.resolveWorkspace(workspaceSlug, actorKey));
+    }
+
+    @PostMapping("/runtime/approval-executions/recover-stale")
+    Object recoverStaleApprovalExecutions(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey) {
+        return financialApprovalService.recoverStaleExecutions(accessContextResolver.resolveWorkspace(workspaceSlug, actorKey));
+    }
+
     record ProcessDueDeliveriesResponse(int processedCount) {
+    }
+
+    record RuntimePauseRequest(String reason) {
     }
 }

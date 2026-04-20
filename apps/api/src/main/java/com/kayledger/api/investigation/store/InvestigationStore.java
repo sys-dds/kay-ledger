@@ -156,6 +156,20 @@ public class InvestigationStore {
             FROM financial_approval_decisions fad
             JOIN financial_approval_requests far ON far.workspace_id = fad.workspace_id AND far.id = fad.approval_request_id
             UNION ALL
+            SELECT faes.workspace_id, 'financial_approval_execution', 'FINANCIAL_APPROVAL_EXECUTION', faes.id, far.provider_profile_id, NULL::uuid,
+                   NULL::uuid, NULL::uuid, NULL::uuid, NULL::uuid, NULL::text, far.action_type,
+                   'FINANCIAL_APPROVAL_REQUEST', far.id, faes.execution_status,
+                   CASE
+                       WHEN faes.execution_status = 'IN_PROGRESS'
+                            AND faes.execution_lease_expires_at IS NOT NULL
+                            AND faes.execution_lease_expires_at <= now() THEN 'STALE_APPROVAL_EXECUTION'
+                       WHEN faes.execution_status = 'FAILED' THEN 'FAILED_APPROVAL_EXECUTION'
+                       ELSE far.action_type
+                   END,
+                   far.currency_code, far.amount_minor, NULL::date, NULL::date, faes.updated_at
+            FROM financial_approval_execution_state faes
+            JOIN financial_approval_requests far ON far.workspace_id = faes.workspace_id AND far.id = faes.approval_request_id
+            UNION ALL
             SELECT fep.workspace_id, 'finance_evidence_pack', 'FINANCE_EVIDENCE_PACK', fep.id,
                    COALESCE(fps.provider_profile_id, prr.provider_profile_id, pti.provider_profile_id, far.provider_profile_id), NULL::uuid,
                    NULL::uuid, NULL::uuid, NULL::uuid, NULL::uuid, NULL::text, fep.source_reference,
@@ -187,6 +201,23 @@ public class InvestigationStore {
             LEFT JOIN provider_reconciliation_truth_imports pti ON pti.workspace_id = fep.workspace_id AND pti.id = fep.provider_truth_import_id
             LEFT JOIN financial_approval_requests far ON far.workspace_id = fep.workspace_id AND far.id = fep.approval_request_id
             UNION ALL
+            SELECT fea.workspace_id, 'finance_evidence_artifact', 'FINANCE_EVIDENCE_ARTIFACT', fea.id,
+                   COALESCE(fps.provider_profile_id, prr.provider_profile_id, pti.provider_profile_id, far.provider_profile_id), NULL::uuid,
+                   NULL::uuid, NULL::uuid, NULL::uuid, NULL::uuid, fea.checksum_value, fea.id::text,
+                   'FINANCE_EVIDENCE_EXPORT', fee.id, 'STORED', fep.evidence_pack_type,
+                   COALESCE(fps.currency_code, prr.currency_code, pti.currency_code, far.currency_code), fea.artifact_size_bytes,
+                   COALESCE(fap.period_start, prr.statement_period_start, pti.statement_period_start),
+                   COALESCE(fap.period_end, prr.statement_period_end, pti.statement_period_end),
+                   fea.created_at
+            FROM finance_evidence_export_artifacts fea
+            JOIN finance_evidence_exports fee ON fee.workspace_id = fea.workspace_id AND fee.artifact_id = fea.id
+            JOIN finance_evidence_packs fep ON fep.workspace_id = fee.workspace_id AND fep.id = fee.evidence_pack_id
+            LEFT JOIN finalized_provider_statements fps ON fps.workspace_id = fep.workspace_id AND fps.id = fep.finalized_statement_id
+            LEFT JOIN financial_accounting_periods fap ON fap.workspace_id = fep.workspace_id AND fap.id = fep.accounting_period_id
+            LEFT JOIN provider_reconciliation_runs prr ON prr.workspace_id = fep.workspace_id AND prr.id = fep.reconciliation_run_id
+            LEFT JOIN provider_reconciliation_truth_imports pti ON pti.workspace_id = fep.workspace_id AND pti.id = fep.provider_truth_import_id
+            LEFT JOIN financial_approval_requests far ON far.workspace_id = fep.workspace_id AND far.id = fep.approval_request_id
+            UNION ALL
             SELECT mfe.workspace_id, 'merchant_finance_event', 'MERCHANT_FINANCE_EVENT', mfe.id, mfe.provider_profile_id, NULL::uuid,
                    NULL::uuid, NULL::uuid, NULL::uuid, NULL::uuid, NULL::text, mfe.event_key,
                    mfe.source_reference_type, mfe.source_reference_id, mfe.event_type, mfe.event_type, mfe.currency_code, NULL::bigint, fap.period_start, fap.period_end, mfe.occurred_at
@@ -194,8 +225,17 @@ public class InvestigationStore {
             LEFT JOIN financial_accounting_periods fap ON fap.workspace_id = mfe.workspace_id AND fap.id = mfe.accounting_period_id
             UNION ALL
             SELECT mfed.workspace_id, 'merchant_finance_event_delivery', 'MERCHANT_FINANCE_EVENT_DELIVERY', mfed.id, mfe.provider_profile_id, NULL::uuid,
-                   NULL::uuid, NULL::uuid, NULL::uuid, NULL::uuid, NULL::text, mfed.dedupe_key,
-                   'MERCHANT_FINANCE_EVENT', mfed.merchant_finance_event_id, mfed.delivery_status, mfe.event_type, mfe.currency_code, NULL::bigint, fap.period_start, fap.period_end, mfed.updated_at
+                   NULL::uuid, NULL::uuid, NULL::uuid, NULL::uuid, mfed.dedupe_key, mfed.endpoint_id::text,
+                   'MERCHANT_FINANCE_EVENT', mfed.merchant_finance_event_id, mfed.delivery_status,
+                   CASE
+                       WHEN mfed.delivery_status = 'CLAIMED'
+                            AND mfed.claim_expires_at IS NOT NULL
+                            AND mfed.claim_expires_at <= now() THEN 'STALE_CLAIMED_DELIVERY'
+                       WHEN mfed.delivery_status = 'PARKED' THEN 'PARKED_DELIVERY'
+                       WHEN mfed.delivery_status = 'FAILED' THEN 'FAILED_DELIVERY'
+                       ELSE mfe.event_type
+                   END,
+                   mfe.currency_code, NULL::bigint, fap.period_start, fap.period_end, mfed.updated_at
             FROM merchant_finance_event_deliveries mfed
             JOIN merchant_finance_events mfe ON mfe.workspace_id = mfed.workspace_id AND mfe.id = mfed.merchant_finance_event_id
             LEFT JOIN financial_accounting_periods fap ON fap.workspace_id = mfe.workspace_id AND fap.id = mfe.accounting_period_id

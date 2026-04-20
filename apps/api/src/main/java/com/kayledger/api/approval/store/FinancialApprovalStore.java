@@ -53,6 +53,9 @@ public class FinancialApprovalStore {
             nullableInstant(rs, "started_at"),
             nullableInstant(rs, "last_attempt_at"),
             rs.getInt("execution_attempt_count"),
+            nullableInstant(rs, "execution_lease_expires_at"),
+            rs.getBoolean("retryable_after_failure"),
+            nullableInstant(rs, "stale_recovered_at"),
             nullableInstant(rs, "executed_at"),
             rs.getString("failure_reason"),
             instant(rs, "created_at"),
@@ -117,14 +120,16 @@ public class FinancialApprovalStore {
                 """, REQUEST_MAPPER, status, workspaceId, requestId);
     }
 
-    public FinancialApprovalExecutionState markExecutionInProgress(UUID workspaceId, UUID requestId, UUID actorId) {
+    public FinancialApprovalExecutionState markExecutionInProgress(UUID workspaceId, UUID requestId, UUID actorId, int leaseSeconds, boolean retryableAfterFailure) {
         return jdbcTemplate.queryForObject("""
                 UPDATE financial_approval_execution_state execution
                 SET execution_status = 'IN_PROGRESS',
                     executed_by_actor_id = ?,
                     started_at = COALESCE(started_at, now()),
                     last_attempt_at = now(),
+                    execution_lease_expires_at = now() + (? * interval '1 second'),
                     execution_attempt_count = execution_attempt_count + 1,
+                    retryable_after_failure = ?,
                     failure_reason = NULL
                 WHERE workspace_id = ?
                   AND approval_request_id = ?
@@ -137,21 +142,27 @@ public class FinancialApprovalStore {
                         AND request.status = 'APPROVED'
                   )
                 RETURNING *
-                """, EXECUTION_MAPPER, actorId, workspaceId, requestId);
+                """, EXECUTION_MAPPER, actorId, leaseSeconds, retryableAfterFailure, workspaceId, requestId);
     }
 
-    public FinancialApprovalRequest markExecuted(UUID workspaceId, UUID requestId, UUID actorId) {
-        jdbcTemplate.update("""
+    public FinancialApprovalRequest markExecuted(UUID workspaceId, UUID requestId, UUID actorId, int executionAttemptCount) {
+        int updated = jdbcTemplate.update("""
                 UPDATE financial_approval_execution_state
                 SET execution_status = 'EXECUTED',
                     executed_by_actor_id = ?,
                     executed_at = now(),
                     last_attempt_at = now(),
+                    execution_lease_expires_at = NULL,
                     failure_reason = NULL
                 WHERE workspace_id = ?
                   AND approval_request_id = ?
                   AND execution_status = 'IN_PROGRESS'
-                """, actorId, workspaceId, requestId);
+                  AND executed_by_actor_id = ?
+                  AND execution_attempt_count = ?
+                """, actorId, workspaceId, requestId, actorId, executionAttemptCount);
+        if (updated == 0) {
+            throw new IllegalStateException("Approval execution claim is no longer current.");
+        }
         return jdbcTemplate.queryForObject("""
                 UPDATE financial_approval_requests
                 SET status = 'EXECUTED'
@@ -162,16 +173,34 @@ public class FinancialApprovalStore {
                 """, REQUEST_MAPPER, workspaceId, requestId);
     }
 
-    public void markExecutionFailed(UUID workspaceId, UUID requestId, String reason) {
+    public boolean heartbeatExecutionLease(UUID workspaceId, UUID requestId, UUID actorId, int executionAttemptCount, int leaseSeconds) {
+        int updated = jdbcTemplate.update("""
+                UPDATE financial_approval_execution_state
+                SET last_attempt_at = now(),
+                    execution_lease_expires_at = now() + (? * interval '1 second')
+                WHERE workspace_id = ?
+                  AND approval_request_id = ?
+                  AND execution_status = 'IN_PROGRESS'
+                  AND executed_by_actor_id = ?
+                  AND execution_attempt_count = ?
+                """, leaseSeconds, workspaceId, requestId, actorId, executionAttemptCount);
+        return updated > 0;
+    }
+
+    public void markExecutionFailed(UUID workspaceId, UUID requestId, UUID actorId, int executionAttemptCount, String reason) {
         jdbcTemplate.update("""
                 UPDATE financial_approval_execution_state
                 SET execution_status = 'FAILED',
                     last_attempt_at = now(),
+                    execution_lease_expires_at = NULL,
                     failure_reason = ?
                 WHERE workspace_id = ?
                   AND approval_request_id = ?
                   AND execution_status <> 'EXECUTED'
-                """, reason, workspaceId, requestId);
+                  AND execution_status = 'IN_PROGRESS'
+                  AND executed_by_actor_id = ?
+                  AND execution_attempt_count = ?
+                """, reason, workspaceId, requestId, actorId, executionAttemptCount);
     }
 
     public void markBlocked(UUID workspaceId, UUID requestId, String reason) {
@@ -183,6 +212,44 @@ public class FinancialApprovalStore {
                   AND approval_request_id = ?
                   AND execution_status <> 'EXECUTED'
                 """, reason, workspaceId, requestId);
+    }
+
+    public int recoverStaleExecutions(UUID workspaceId, int staleAfterSeconds, String reason) {
+        return jdbcTemplate.update("""
+                UPDATE financial_approval_execution_state
+                SET execution_status = 'FAILED',
+                    stale_recovered_at = now(),
+                    execution_lease_expires_at = NULL,
+                    failure_reason = ?
+                WHERE workspace_id = ?
+                  AND execution_status = 'IN_PROGRESS'
+                  AND COALESCE(execution_lease_expires_at, last_attempt_at + (? * interval '1 second')) <= now()
+                  AND retryable_after_failure = true
+                """, reason, workspaceId, staleAfterSeconds);
+    }
+
+    public List<FinancialApprovalExecutionState> listExecutionStates(UUID workspaceId, String status) {
+        return jdbcTemplate.query("""
+                SELECT *
+                FROM financial_approval_execution_state
+                WHERE workspace_id = ?
+                  AND (? IS NULL OR execution_status = ?)
+                ORDER BY updated_at DESC, id
+                """, EXECUTION_MAPPER, workspaceId, status, status);
+    }
+
+    public ApprovalExecutionRuntimeSummary executionRuntimeSummary(UUID workspaceId) {
+        return jdbcTemplate.queryForObject("""
+                SELECT
+                    COALESCE(SUM(CASE WHEN execution_status = 'IN_PROGRESS' THEN 1 ELSE 0 END), 0)::bigint AS in_progress_count,
+                    COALESCE(SUM(CASE WHEN execution_status = 'IN_PROGRESS' AND COALESCE(execution_lease_expires_at, last_attempt_at) <= now() THEN 1 ELSE 0 END), 0)::bigint AS stale_in_progress_count,
+                    COALESCE(SUM(CASE WHEN execution_status = 'FAILED' THEN 1 ELSE 0 END), 0)::bigint AS failed_count
+                FROM financial_approval_execution_state
+                WHERE workspace_id = ?
+                """, (rs, rowNum) -> new ApprovalExecutionRuntimeSummary(
+                rs.getLong("in_progress_count"),
+                rs.getLong("stale_in_progress_count"),
+                rs.getLong("failed_count")), workspaceId);
     }
 
     public List<FinancialApprovalDecision> listDecisions(UUID workspaceId, UUID requestId) {
@@ -216,5 +283,8 @@ public class FinancialApprovalStore {
     private static Long nullableLong(ResultSet rs, String column) throws SQLException {
         long value = rs.getLong(column);
         return rs.wasNull() ? null : value;
+    }
+
+    public record ApprovalExecutionRuntimeSummary(long inProgressCount, long staleInProgressCount, long failedCount) {
     }
 }

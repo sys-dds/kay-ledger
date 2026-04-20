@@ -60,6 +60,9 @@ public class MerchantFinanceEventStore {
             rs.getString("response_body"),
             rs.getString("final_failure_reason"),
             rs.getString("parked_reason"),
+            rs.getString("claim_owner"),
+            nullableInstant(rs, "claimed_at"),
+            nullableInstant(rs, "claim_expires_at"),
             rs.getString("signature_algorithm"),
             rs.getString("signature_value"),
             rs.getString("dedupe_key"),
@@ -137,6 +140,34 @@ public class MerchantFinanceEventStore {
                 """, DELIVERY_MAPPER, workspaceId);
     }
 
+    public DeliveryRuntimeSummary runtimeSummary(UUID workspaceId) {
+        return jdbcTemplate.queryForObject("""
+                SELECT
+                    COALESCE(SUM(CASE WHEN delivery_status = 'PENDING' THEN 1 ELSE 0 END), 0)::bigint AS pending_count,
+                    COALESCE(SUM(CASE WHEN delivery_status = 'CLAIMED' THEN 1 ELSE 0 END), 0)::bigint AS claimed_count,
+                    COALESCE(SUM(CASE WHEN delivery_status = 'FAILED' THEN 1 ELSE 0 END), 0)::bigint AS failed_count,
+                    COALESCE(SUM(CASE WHEN delivery_status = 'PARKED' THEN 1 ELSE 0 END), 0)::bigint AS parked_count,
+                    MIN(CASE WHEN delivery_status = 'PENDING' THEN created_at END) AS oldest_pending_at,
+                    MIN(CASE WHEN delivery_status = 'CLAIMED' THEN claimed_at END) AS oldest_claimed_at,
+                    COALESCE(EXTRACT(EPOCH FROM now() - MIN(CASE WHEN delivery_status = 'PENDING' THEN created_at END)), 0)::bigint AS oldest_pending_age_seconds,
+                    COALESCE(EXTRACT(EPOCH FROM now() - MIN(CASE WHEN delivery_status = 'CLAIMED' THEN claimed_at END)), 0)::bigint AS oldest_claimed_age_seconds,
+                    COALESCE(SUM(CASE WHEN delivery_status = 'CLAIMED' AND claim_expires_at <= now() THEN 1 ELSE 0 END), 0)::bigint AS stale_claim_count,
+                    COALESCE((SELECT paused FROM merchant_finance_delivery_runtime_controls WHERE workspace_id = ?), false) AS paused
+                FROM merchant_finance_event_deliveries
+                WHERE workspace_id = ?
+                """, (rs, rowNum) -> new DeliveryRuntimeSummary(
+                rs.getLong("pending_count"),
+                rs.getLong("claimed_count"),
+                rs.getLong("failed_count"),
+                rs.getLong("parked_count"),
+                nullableInstant(rs, "oldest_pending_at"),
+                nullableInstant(rs, "oldest_claimed_at"),
+                rs.getLong("oldest_pending_age_seconds"),
+                rs.getLong("oldest_claimed_age_seconds"),
+                rs.getLong("stale_claim_count"),
+                rs.getBoolean("paused")), workspaceId, workspaceId);
+    }
+
     public MerchantFinanceEventDelivery recordAttempt(UUID workspaceId, UUID deliveryId, String status, Integer responseStatus, String responseBody) {
         return jdbcTemplate.queryForObject("""
                 UPDATE merchant_finance_event_deliveries
@@ -155,37 +186,62 @@ public class MerchantFinanceEventStore {
                 """, DELIVERY_MAPPER, status, status, responseStatus, responseBody, status, responseBody, workspaceId, deliveryId);
     }
 
-    public List<DeliveryWork> claimDueDeliveries(int limit, int maxAttempts) {
+    public List<DeliveryWork> claimDueDeliveries(UUID workspaceId, String claimOwner, int limit, int maxAttempts, int leaseSeconds) {
         return jdbcTemplate.query("""
-                SELECT d.*,
+                WITH due AS (
+                    SELECT d.workspace_id, d.id
+                    FROM merchant_finance_event_deliveries d
+                    JOIN merchant_finance_event_endpoints endpoint
+                      ON endpoint.workspace_id = d.workspace_id
+                     AND endpoint.id = d.endpoint_id
+                     AND endpoint.status = 'ACTIVE'
+                    LEFT JOIN merchant_finance_delivery_runtime_controls controls
+                      ON controls.workspace_id = d.workspace_id
+                    WHERE (?::uuid IS NULL OR d.workspace_id = ?::uuid)
+                      AND COALESCE(controls.paused, false) = false
+                      AND (
+                        d.delivery_status = 'PENDING'
+                        OR (d.delivery_status = 'FAILED' AND d.attempt_count < ?)
+                        OR (d.delivery_status = 'CLAIMED' AND d.claim_expires_at <= now())
+                      )
+                      AND (d.next_attempt_at IS NULL OR d.next_attempt_at <= now())
+                    ORDER BY d.created_at, d.id
+                    LIMIT ?
+                    FOR UPDATE OF d SKIP LOCKED
+                ),
+                claimed AS (
+                    UPDATE merchant_finance_event_deliveries d
+                    SET delivery_status = 'CLAIMED',
+                        claim_owner = ?,
+                        claimed_at = now(),
+                        claim_expires_at = now() + (? * interval '1 second')
+                    FROM due
+                    WHERE d.workspace_id = due.workspace_id
+                      AND d.id = due.id
+                    RETURNING d.*
+                )
+                SELECT claimed.*,
                        e.event_type,
                        e.source_reference_type,
                        e.source_reference_id,
                        e.payload_json::text AS payload_json,
                        e.event_key,
                        e.occurred_at,
-                       endpoint.endpoint_url
-                FROM merchant_finance_event_deliveries d
+                       endpoint.endpoint_url,
+                       endpoint.signing_secret_ref
+                FROM claimed
                 JOIN merchant_finance_events e
-                  ON e.workspace_id = d.workspace_id
-                 AND e.id = d.merchant_finance_event_id
+                  ON e.workspace_id = claimed.workspace_id
+                 AND e.id = claimed.merchant_finance_event_id
                 JOIN merchant_finance_event_endpoints endpoint
-                  ON endpoint.workspace_id = d.workspace_id
-                 AND endpoint.id = d.endpoint_id
-                 AND endpoint.status = 'ACTIVE'
-                WHERE (
-                    d.delivery_status = 'PENDING'
-                    OR (d.delivery_status = 'FAILED' AND d.attempt_count < ?)
-                  )
-                  AND (d.next_attempt_at IS NULL OR d.next_attempt_at <= now())
-                ORDER BY d.created_at, d.id
-                LIMIT ?
-                FOR UPDATE OF d SKIP LOCKED
-                """, DELIVERY_WORK_MAPPER, maxAttempts, limit);
+                  ON endpoint.workspace_id = claimed.workspace_id
+                 AND endpoint.id = claimed.endpoint_id
+                ORDER BY claimed.claimed_at, claimed.id
+                """, DELIVERY_WORK_MAPPER, workspaceId, workspaceId, maxAttempts, limit, claimOwner, leaseSeconds);
     }
 
-    public MerchantFinanceEventDelivery recordDeliverySuccess(UUID workspaceId, UUID deliveryId, int responseStatus, String responseBody) {
-        return jdbcTemplate.queryForObject("""
+    public Optional<MerchantFinanceEventDelivery> recordDeliverySuccess(UUID workspaceId, UUID deliveryId, String claimOwner, String signatureValue, int responseStatus, String responseBody) {
+        return jdbcTemplate.query("""
                 UPDATE merchant_finance_event_deliveries
                 SET delivery_status = 'SUCCEEDED',
                     attempt_count = attempt_count + 1,
@@ -195,15 +251,21 @@ public class MerchantFinanceEventStore {
                     response_status = ?,
                     response_body = ?,
                     final_failure_reason = NULL,
-                    parked_reason = NULL
+                    parked_reason = NULL,
+                    signature_value = ?,
+                    claim_owner = NULL,
+                    claimed_at = NULL,
+                    claim_expires_at = NULL
                 WHERE workspace_id = ?
                   AND id = ?
+                  AND delivery_status = 'CLAIMED'
+                  AND claim_owner = ?
                 RETURNING *
-                """, DELIVERY_MAPPER, responseStatus, responseBody, workspaceId, deliveryId);
+                """, DELIVERY_MAPPER, responseStatus, responseBody, signatureValue, workspaceId, deliveryId, claimOwner).stream().findFirst();
     }
 
-    public MerchantFinanceEventDelivery recordDeliveryFailure(UUID workspaceId, UUID deliveryId, int maxAttempts, long backoffSeconds, Integer responseStatus, String responseBody, String failureReason) {
-        return jdbcTemplate.queryForObject("""
+    public Optional<MerchantFinanceEventDelivery> recordDeliveryFailure(UUID workspaceId, UUID deliveryId, String claimOwner, String signatureValue, int maxAttempts, long backoffSeconds, Integer responseStatus, String responseBody, String failureReason) {
+        return jdbcTemplate.query("""
                 UPDATE merchant_finance_event_deliveries
                 SET delivery_status = CASE WHEN attempt_count + 1 >= ? THEN 'PARKED' ELSE 'FAILED' END,
                     attempt_count = attempt_count + 1,
@@ -213,11 +275,17 @@ public class MerchantFinanceEventStore {
                     response_status = ?,
                     response_body = ?,
                     final_failure_reason = ?,
-                    parked_reason = CASE WHEN attempt_count + 1 >= ? THEN ? ELSE NULL END
+                    parked_reason = CASE WHEN attempt_count + 1 >= ? THEN ? ELSE NULL END,
+                    signature_value = ?,
+                    claim_owner = NULL,
+                    claimed_at = NULL,
+                    claim_expires_at = NULL
                 WHERE workspace_id = ?
                   AND id = ?
+                  AND delivery_status = 'CLAIMED'
+                  AND claim_owner = ?
                 RETURNING *
-                """, DELIVERY_MAPPER, maxAttempts, maxAttempts, backoffSeconds, responseStatus, responseBody, failureReason, maxAttempts, failureReason, workspaceId, deliveryId);
+                """, DELIVERY_MAPPER, maxAttempts, maxAttempts, backoffSeconds, responseStatus, responseBody, failureReason, maxAttempts, failureReason, signatureValue, workspaceId, deliveryId, claimOwner).stream().findFirst();
     }
 
     public MerchantFinanceEventDelivery redriveDelivery(UUID workspaceId, UUID deliveryId) {
@@ -226,12 +294,56 @@ public class MerchantFinanceEventStore {
                 SET delivery_status = 'PENDING',
                     next_attempt_at = now(),
                     final_failure_reason = NULL,
-                    parked_reason = NULL
+                    parked_reason = NULL,
+                    claim_owner = NULL,
+                    claimed_at = NULL,
+                    claim_expires_at = NULL
                 WHERE workspace_id = ?
                   AND id = ?
                   AND delivery_status IN ('FAILED', 'PARKED')
                 RETURNING *
                 """, DELIVERY_MAPPER, workspaceId, deliveryId);
+    }
+
+    public int reclaimStaleClaims(UUID workspaceId) {
+        return jdbcTemplate.update("""
+                UPDATE merchant_finance_event_deliveries
+                SET delivery_status = 'FAILED',
+                    final_failure_reason = 'Delivery claim lease expired before completion.',
+                    claim_owner = NULL,
+                    claimed_at = NULL,
+                    claim_expires_at = NULL
+                WHERE workspace_id = ?
+                  AND delivery_status = 'CLAIMED'
+                  AND claim_expires_at <= now()
+                """, workspaceId);
+    }
+
+    public int requeueByStatus(UUID workspaceId, String status) {
+        return jdbcTemplate.update("""
+                UPDATE merchant_finance_event_deliveries
+                SET delivery_status = 'PENDING',
+                    next_attempt_at = now(),
+                    final_failure_reason = NULL,
+                    parked_reason = NULL,
+                    claim_owner = NULL,
+                    claimed_at = NULL,
+                    claim_expires_at = NULL
+                WHERE workspace_id = ?
+                  AND delivery_status = ?
+                """, workspaceId, status);
+    }
+
+    public void setRuntimePaused(UUID workspaceId, UUID actorId, boolean paused, String reason) {
+        jdbcTemplate.update("""
+                INSERT INTO merchant_finance_delivery_runtime_controls (workspace_id, paused, pause_reason, updated_by_actor_id)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT (workspace_id) DO UPDATE
+                SET paused = EXCLUDED.paused,
+                    pause_reason = EXCLUDED.pause_reason,
+                    updated_by_actor_id = EXCLUDED.updated_by_actor_id,
+                    updated_at = now()
+                """, workspaceId, paused, reason, actorId);
     }
 
     private static Instant instant(ResultSet rs, String column) throws SQLException {
@@ -261,7 +373,8 @@ public class MerchantFinanceEventStore {
             rs.getString("payload_json"),
             rs.getString("event_key"),
             instant(rs, "occurred_at"),
-            rs.getString("endpoint_url"));
+            rs.getString("endpoint_url"),
+            rs.getString("signing_secret_ref"));
 
     public record DeliveryWork(
             MerchantFinanceEventDelivery delivery,
@@ -271,6 +384,20 @@ public class MerchantFinanceEventStore {
             String payloadJson,
             String eventKey,
             Instant occurredAt,
-            String endpointUrl) {
+            String endpointUrl,
+            String signingSecretRef) {
+    }
+
+    public record DeliveryRuntimeSummary(
+            long pendingCount,
+            long claimedCount,
+            long failedCount,
+            long parkedCount,
+            Instant oldestPendingAt,
+            Instant oldestClaimedAt,
+            long oldestPendingAgeSeconds,
+            long oldestClaimedAgeSeconds,
+            long staleClaimCount,
+            boolean paused) {
     }
 }

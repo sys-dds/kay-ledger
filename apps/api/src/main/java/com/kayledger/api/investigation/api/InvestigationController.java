@@ -59,6 +59,11 @@ public class InvestigationController {
             @RequestParam(required = false) String subscriptionId,
             @RequestParam(required = false) String providerProfileId,
             @RequestParam(required = false) String referenceId,
+            @RequestParam(required = false) String eventKey,
+            @RequestParam(required = false) String deliveryId,
+            @RequestParam(required = false) String endpointId,
+            @RequestParam(required = false) String sourceReferenceType,
+            @RequestParam(required = false) String sourceReferenceId,
             @RequestParam(required = false) String status,
             @RequestParam(required = false) String currencyCode,
             @RequestParam(required = false) String mismatchType,
@@ -66,7 +71,23 @@ public class InvestigationController {
             @RequestParam(required = false) String periodEnd) {
         AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
         return withFreshness(
-                investigationSearchService.search(context, new SearchCommand(paymentId, refundId, payoutId, disputeId, providerEventId, externalReference, businessReferenceId, subscriptionId, providerProfileId, referenceId, status, currencyCode, mismatchType, periodStart, periodEnd)),
+                investigationSearchService.search(context, new SearchCommand(
+                        paymentId,
+                        refundId,
+                        payoutId,
+                        disputeId,
+                        providerEventId,
+                        firstNonBlank(externalReference, eventKey, endpointId),
+                        firstNonBlank(businessReferenceId, sourceReferenceId),
+                        subscriptionId,
+                        providerProfileId,
+                        firstNonBlank(referenceId, deliveryId),
+                        sourceReferenceType,
+                        status,
+                        currencyCode,
+                        mismatchType,
+                        periodStart,
+                        periodEnd)),
                 regionReplicationService.freshness(RegionReplicationService.INVESTIGATION_READ_SNAPSHOT, context.workspaceId()));
     }
 
@@ -147,5 +168,19 @@ public class InvestigationController {
                 .header("X-Kay-Ledger-Local-Region", freshness.localRegion())
                 .header("X-Kay-Ledger-Replication-Lag-Millis", Long.toString(freshness.lagMillis()))
                 .body(body);
+    }
+
+    private static String firstNonBlank(String first, String second) {
+        return firstNonBlank(first, second, null);
+    }
+
+    private static String firstNonBlank(String first, String second, String third) {
+        if (first != null && !first.isBlank()) {
+            return first;
+        }
+        if (second != null && !second.isBlank()) {
+            return second;
+        }
+        return third != null && !third.isBlank() ? third : null;
     }
 }
