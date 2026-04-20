@@ -226,7 +226,7 @@ class Kay021ProviderReconciliationAndRecoveryHardeningIntegrationTest {
                 .containsExactly("MISSING_INTERNAL_SUMMARY");
 
         var missingProviderImport = reconciliationService.recordProviderTruth(financeWrite(exact), new ProviderStatementTruth(
-                exact.providerProfileId(), "USD", LocalDate.parse("2036-01-01"), LocalDate.parse("2036-01-31"), "kay021-missing-provider", null, Map.of()));
+                exact.providerProfileId(), "USD", statementStart(), statementEnd(), "kay021-missing-provider", null, Map.of()));
         var missingProviderRun = reconciliationService.createRunFromProviderTruth(financeWrite(exact), missingProviderImport.id());
         ReconciliationItem missingProviderItem = reconciliationService.listItems(financeRead(exact), missingProviderRun.id(), true).getFirst();
         assertThat(missingProviderItem.mismatchType()).isEqualTo("MISSING_PROVIDER_TRUTH");
@@ -305,11 +305,19 @@ class Kay021ProviderReconciliationAndRecoveryHardeningIntegrationTest {
         return new ProviderStatementTruth(
                 fixture.providerProfileId(),
                 "USD",
-                LocalDate.parse("2036-01-01"),
-                LocalDate.parse("2036-01-31"),
+                statementStart(),
+                statementEnd(),
                 sourceReference,
                 amounts,
                 Map.of("sourceReference", sourceReference));
+    }
+
+    private LocalDate statementStart() {
+        return LocalDate.now().minusDays(1);
+    }
+
+    private LocalDate statementEnd() {
+        return LocalDate.now().plusDays(1);
     }
 
     private ProviderStatementAmounts amounts(long gross, long fee, long net, long payout, long refund, long dispute, long subscription) {

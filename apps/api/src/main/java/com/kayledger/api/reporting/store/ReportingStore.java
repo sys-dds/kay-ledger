@@ -4,7 +4,9 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -132,6 +134,159 @@ public class ReportingStore {
                 """, SUMMARY_MAPPER, workspaceId);
     }
 
+    public Optional<ProviderFinancialSummary> providerSummaryForPeriod(UUID workspaceId, UUID providerProfileId, String currencyCode, LocalDate periodStart, LocalDate periodEnd) {
+        return jdbcTemplate.query("""
+                WITH bounds AS (
+                    SELECT ?::date AS period_start, (?::date + interval '1 day') AS period_end
+                ),
+                provider_currency AS (
+                    SELECT 1
+                    WHERE EXISTS (
+                        SELECT 1
+                        FROM payment_intents pi, bounds b
+                        WHERE pi.workspace_id = ?
+                          AND pi.provider_profile_id = ?
+                          AND pi.currency_code = ?
+                          AND pi.status = 'SETTLED'
+                          AND pi.updated_at >= b.period_start
+                          AND pi.updated_at < b.period_end
+                        UNION ALL
+                        SELECT 1
+                        FROM payout_requests pr, bounds b
+                        WHERE pr.workspace_id = ?
+                          AND pr.provider_profile_id = ?
+                          AND pr.currency_code = ?
+                          AND pr.status = 'SUCCEEDED'
+                          AND pr.updated_at >= b.period_start
+                          AND pr.updated_at < b.period_end
+                        UNION ALL
+                        SELECT 1
+                        FROM refunds r
+                        JOIN payment_intents pi ON pi.workspace_id = r.workspace_id AND pi.id = r.payment_intent_id,
+                             bounds b
+                        WHERE r.workspace_id = ?
+                          AND pi.provider_profile_id = ?
+                          AND pi.currency_code = ?
+                          AND r.status = 'SUCCEEDED'
+                          AND r.updated_at >= b.period_start
+                          AND r.updated_at < b.period_end
+                        UNION ALL
+                        SELECT 1
+                        FROM disputes d
+                        JOIN payment_intents pi ON pi.workspace_id = d.workspace_id AND pi.id = d.payment_intent_id,
+                             bounds b
+                        WHERE d.workspace_id = ?
+                          AND pi.provider_profile_id = ?
+                          AND pi.currency_code = ?
+                          AND d.status = 'OPEN'
+                          AND d.updated_at >= b.period_start
+                          AND d.updated_at < b.period_end
+                    )
+                )
+                SELECT ?::uuid AS workspace_id,
+                       ?::uuid AS provider_profile_id,
+                       ?::char(3) AS currency_code,
+                       COALESCE((SELECT SUM(gross_amount_minor) FROM payment_intents pi, bounds b
+                           WHERE pi.workspace_id = ? AND pi.provider_profile_id = ?
+                             AND pi.currency_code = ? AND pi.status = 'SETTLED'
+                             AND pi.updated_at >= b.period_start AND pi.updated_at < b.period_end), 0) AS settled_gross_amount_minor,
+                       COALESCE((SELECT SUM(fee_amount_minor) FROM payment_intents pi, bounds b
+                           WHERE pi.workspace_id = ? AND pi.provider_profile_id = ?
+                             AND pi.currency_code = ? AND pi.status = 'SETTLED'
+                             AND pi.updated_at >= b.period_start AND pi.updated_at < b.period_end), 0) AS fee_amount_minor,
+                       COALESCE((SELECT SUM(net_amount_minor) FROM payment_intents pi, bounds b
+                           WHERE pi.workspace_id = ? AND pi.provider_profile_id = ?
+                             AND pi.currency_code = ? AND pi.status = 'SETTLED'
+                             AND pi.updated_at >= b.period_start AND pi.updated_at < b.period_end), 0) AS net_earnings_amount_minor,
+                       COALESCE((SELECT SUM(requested_amount_minor) FROM payout_requests pr, bounds b
+                           WHERE pr.workspace_id = ? AND pr.provider_profile_id = ?
+                             AND pr.currency_code = ? AND pr.status IN ('REQUESTED', 'PROCESSING')
+                             AND pr.updated_at >= b.period_start AND pr.updated_at < b.period_end), 0) AS current_payout_requested_amount_minor,
+                       COALESCE((SELECT SUM(requested_amount_minor) FROM payout_requests pr, bounds b
+                           WHERE pr.workspace_id = ? AND pr.provider_profile_id = ?
+                             AND pr.currency_code = ? AND pr.status = 'SUCCEEDED'
+                             AND pr.updated_at >= b.period_start AND pr.updated_at < b.period_end), 0) AS payout_succeeded_amount_minor,
+                       COALESCE((SELECT SUM(r.amount_minor) FROM refunds r
+                           JOIN payment_intents pi ON pi.workspace_id = r.workspace_id AND pi.id = r.payment_intent_id,
+                                bounds b
+                           WHERE r.workspace_id = ? AND pi.provider_profile_id = ?
+                             AND pi.currency_code = ? AND r.status = 'SUCCEEDED'
+                             AND r.updated_at >= b.period_start AND r.updated_at < b.period_end), 0) AS refund_amount_minor,
+                       COALESCE((SELECT SUM(d.disputed_amount_minor) FROM disputes d
+                           JOIN payment_intents pi ON pi.workspace_id = d.workspace_id AND pi.id = d.payment_intent_id,
+                                bounds b
+                           WHERE d.workspace_id = ? AND pi.provider_profile_id = ?
+                             AND pi.currency_code = ? AND d.status = 'OPEN'
+                             AND d.updated_at >= b.period_start AND d.updated_at < b.period_end), 0) AS active_dispute_exposure_amount_minor,
+                       COALESCE((SELECT SUM(pi.net_amount_minor) FROM payment_intents pi, bounds b
+                           WHERE pi.workspace_id = ? AND pi.provider_profile_id = ?
+                             AND pi.currency_code = ? AND pi.subscription_id IS NOT NULL AND pi.status = 'SETTLED'
+                             AND pi.updated_at >= b.period_start AND pi.updated_at < b.period_end), 0) AS settled_subscription_net_revenue_amount_minor,
+                       now() AS refreshed_at
+                FROM provider_currency pc
+                """, SUMMARY_MAPPER,
+                periodStart, periodEnd,
+                workspaceId, providerProfileId, currencyCode,
+                workspaceId, providerProfileId, currencyCode,
+                workspaceId, providerProfileId, currencyCode,
+                workspaceId, providerProfileId, currencyCode,
+                workspaceId, providerProfileId, currencyCode,
+                workspaceId, providerProfileId, currencyCode,
+                workspaceId, providerProfileId, currencyCode,
+                workspaceId, providerProfileId, currencyCode,
+                workspaceId, providerProfileId, currencyCode,
+                workspaceId, providerProfileId, currencyCode,
+                workspaceId, providerProfileId, currencyCode,
+                workspaceId, providerProfileId, currencyCode,
+                workspaceId, providerProfileId, currencyCode).stream().findFirst();
+    }
+
+    public List<ProviderFinancialSummary> listProviderSummariesForPeriod(UUID workspaceId, LocalDate periodStart, LocalDate periodEnd) {
+        return jdbcTemplate.query("""
+                WITH bounds AS (
+                    SELECT ?::date AS period_start, (?::date + interval '1 day') AS period_end
+                )
+                SELECT DISTINCT provider_profile_id, currency_code
+                FROM (
+                    SELECT pi.provider_profile_id, pi.currency_code
+                    FROM payment_intents pi, bounds b
+                    WHERE pi.workspace_id = ?
+                      AND pi.status = 'SETTLED'
+                      AND pi.updated_at >= b.period_start
+                      AND pi.updated_at < b.period_end
+                    UNION
+                    SELECT pr.provider_profile_id, pr.currency_code
+                    FROM payout_requests pr, bounds b
+                    WHERE pr.workspace_id = ?
+                      AND pr.updated_at >= b.period_start
+                      AND pr.updated_at < b.period_end
+                    UNION
+                    SELECT pi.provider_profile_id, pi.currency_code
+                    FROM refunds r
+                    JOIN payment_intents pi ON pi.workspace_id = r.workspace_id AND pi.id = r.payment_intent_id,
+                         bounds b
+                    WHERE r.workspace_id = ?
+                      AND r.updated_at >= b.period_start
+                      AND r.updated_at < b.period_end
+                    UNION
+                    SELECT pi.provider_profile_id, pi.currency_code
+                    FROM disputes d
+                    JOIN payment_intents pi ON pi.workspace_id = d.workspace_id AND pi.id = d.payment_intent_id,
+                         bounds b
+                    WHERE d.workspace_id = ?
+                      AND d.updated_at >= b.period_start
+                      AND d.updated_at < b.period_end
+                ) provider_currency
+                ORDER BY provider_profile_id, currency_code
+                """, (rs, rowNum) -> new ProviderCurrency(
+                rs.getObject("provider_profile_id", UUID.class),
+                rs.getString("currency_code")), periodStart, periodEnd, workspaceId, workspaceId, workspaceId, workspaceId)
+                .stream()
+                .map(providerCurrency -> providerSummaryForPeriod(workspaceId, providerCurrency.providerProfileId(), providerCurrency.currencyCode(), periodStart, periodEnd))
+                .flatMap(Optional::stream)
+                .toList();
+    }
+
     public ExportJob createExportJob(UUID workspaceId, String exportType, UUID requestedByActorId, String parametersJson) {
         return jdbcTemplate.queryForObject("""
                 INSERT INTO export_jobs (workspace_id, export_type, requested_by_actor_id, parameters_json)
@@ -245,5 +400,8 @@ public class ReportingStore {
     private static Instant nullableInstant(ResultSet rs, String column) throws SQLException {
         Timestamp timestamp = rs.getTimestamp(column);
         return timestamp == null ? null : timestamp.toInstant();
+    }
+
+    private record ProviderCurrency(UUID providerProfileId, String currencyCode) {
     }
 }

@@ -61,10 +61,12 @@ public class InvestigationController {
             @RequestParam(required = false) String referenceId,
             @RequestParam(required = false) String status,
             @RequestParam(required = false) String currencyCode,
-            @RequestParam(required = false) String mismatchType) {
+            @RequestParam(required = false) String mismatchType,
+            @RequestParam(required = false) String periodStart,
+            @RequestParam(required = false) String periodEnd) {
         AccessContext context = accessContextResolver.resolveWorkspace(workspaceSlug, actorKey);
         return withFreshness(
-                investigationSearchService.search(context, new SearchCommand(paymentId, refundId, payoutId, disputeId, providerEventId, externalReference, businessReferenceId, subscriptionId, providerProfileId, referenceId, status, currencyCode, mismatchType)),
+                investigationSearchService.search(context, new SearchCommand(paymentId, refundId, payoutId, disputeId, providerEventId, externalReference, businessReferenceId, subscriptionId, providerProfileId, referenceId, status, currencyCode, mismatchType, periodStart, periodEnd)),
                 regionReplicationService.freshness(RegionReplicationService.INVESTIGATION_READ_SNAPSHOT, context.workspaceId()));
     }
 

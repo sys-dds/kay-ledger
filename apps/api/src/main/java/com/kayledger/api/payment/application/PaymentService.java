@@ -19,6 +19,7 @@ import com.kayledger.api.access.model.AccessScope;
 import com.kayledger.api.access.model.WorkspaceRole;
 import com.kayledger.api.booking.model.Booking;
 import com.kayledger.api.booking.store.BookingStore;
+import com.kayledger.api.close.application.FinancialCloseService;
 import com.kayledger.api.finance.application.FinanceService;
 import com.kayledger.api.finance.application.FinanceService.CreateJournalEntryCommand;
 import com.kayledger.api.finance.application.FinanceService.PostingCommand;
@@ -62,8 +63,9 @@ public class PaymentService {
     private final OutboxService outboxService;
     private final RiskService riskService;
     private final RegionService regionService;
+    private final FinancialCloseService financialCloseService;
 
-    public PaymentService(PaymentStore paymentStore, BookingStore bookingStore, AccessPolicy accessPolicy, FinanceService financeService, SubscriptionStore subscriptionStore, OutboxService outboxService, RiskService riskService, RegionService regionService) {
+    public PaymentService(PaymentStore paymentStore, BookingStore bookingStore, AccessPolicy accessPolicy, FinanceService financeService, SubscriptionStore subscriptionStore, OutboxService outboxService, RiskService riskService, RegionService regionService, FinancialCloseService financialCloseService) {
         this.paymentStore = paymentStore;
         this.bookingStore = bookingStore;
         this.accessPolicy = accessPolicy;
@@ -72,6 +74,7 @@ public class PaymentService {
         this.outboxService = outboxService;
         this.riskService = riskService;
         this.regionService = regionService;
+        this.financialCloseService = financialCloseService;
     }
 
     @Transactional
@@ -277,6 +280,7 @@ public class PaymentService {
         if (amountMinor > summary.availableAmountMinor()) {
             throw new BadRequestException("Payout cannot exceed available payable balance.");
         }
+        requireOpenPostingWindow(context.workspaceId(), providerProfileId, currencyCode, "Payout request");
         PayoutRequest payout = paymentStore.createPayoutRequest(context.workspaceId(), providerProfileId, currencyCode, amountMinor);
         riskService.evaluatePayoutRequest(context.workspaceId(), payout.id(), payout.requestedAmountMinor());
         return attachPayoutRequestJournal(context.workspaceId(), payout, "Payout request reserves seller payable for payout clearing", List.of(
@@ -373,6 +377,7 @@ public class PaymentService {
         if (amountMinor > summary.availableAmountMinor()) {
             throw new BadRequestException("Dispute cannot freeze more than available payable balance.");
         }
+        requireOpenPostingWindow(context.workspaceId(), intent.providerProfileId(), intent.currencyCode(), "Dispute opening");
         DisputeRecord dispute = paymentStore.createDispute(context.workspaceId(), intent.id(), intent.bookingId(), amountMinor, amountMinor);
         paymentStore.createFrozenFund(context.workspaceId(), intent.providerProfileId(), dispute.id(), intent.currencyCode(), amountMinor);
         DisputeRecord opened = attachDisputeOpenJournal(context.workspaceId(), dispute, intent, "Dispute opening freezes seller payable", List.of(
@@ -386,7 +391,9 @@ public class PaymentService {
     public DisputeRecord resolveDispute(AccessContext context, UUID disputeId, ResolveDisputeCommand command) {
         requirePaymentWrite(context);
         DisputeRecord dispute = dispute(context, disputeId);
+        PaymentIntent intent = intent(context, dispute.paymentIntentId());
         String resolution = requireOneOf(command == null ? null : command.resolution(), DISPUTE_RESOLUTIONS, "resolution");
+        requireOpenPostingWindow(context.workspaceId(), intent.providerProfileId(), intent.currencyCode(), "Dispute resolution");
         FrozenFund frozenFund = paymentStore.findFrozenFundForDispute(context.workspaceId(), dispute.id())
                 .orElseThrow(() -> new BadRequestException("Dispute has no frozen funds."));
         String frozenStatus = "LOST".equals(resolution) ? "CONSUMED" : "RELEASED";
@@ -396,7 +403,7 @@ public class PaymentService {
         DisputeRecord completed = attachDisputeResolveJournal(context.workspaceId(), resolved, frozenFund, "Dispute resolution updates frozen payable posture", List.of(
                 posting(account(context.workspaceId(), "FROZEN_PAYABLE", frozenFund.currencyCode()), "DEBIT", frozenFund.amountMinor(), frozenFund.currencyCode()),
                 posting(account(context.workspaceId(), creditPurpose, frozenFund.currencyCode()), "CREDIT", frozenFund.amountMinor(), frozenFund.currencyCode())));
-        outboxService.append(context.workspaceId(), "DISPUTE", completed.id(), "dispute.resolved", "dispute.resolved:" + completed.id() + ":" + resolution, disputeData(completed, intent(context, completed.paymentIntentId())));
+        outboxService.append(context.workspaceId(), "DISPUTE", completed.id(), "dispute.resolved", "dispute.resolved:" + completed.id() + ":" + resolution, disputeData(completed, intent));
         return completed;
     }
 
@@ -508,6 +515,7 @@ public class PaymentService {
             throw new BadRequestException("Partial settlement is not supported in this foundation slice.");
         }
         try {
+            requireOpenPostingWindow(workspaceId, existing.providerProfileId(), existing.currencyCode(), "Payment settlement");
             PaymentIntent settled = paymentStore.settle(workspaceId, existing.id(), amount);
             PaymentAttempt attempt = paymentStore.createAttempt(workspaceId, settled.id(), "SETTLE", "SUCCEEDED", amount, externalReference, null);
             attachJournal(workspaceId, settled, attempt, "Payment settlement creates payable and fee revenue", settlementPostings(workspaceId, settled, amount));
@@ -551,6 +559,7 @@ public class PaymentService {
         if (!"REQUESTED".equals(payout.status()) && !"PROCESSING".equals(payout.status())) {
             throw new BadRequestException("Only requested or processing payouts can succeed.");
         }
+        requireOpenPostingWindow(workspaceId, payout.providerProfileId(), payout.currencyCode(), "Payout success");
         int attemptNumber = paymentStore.nextPayoutAttemptNumber(workspaceId, payout.id());
         PayoutRequest succeeded = paymentStore.markPayoutSucceeded(workspaceId, payout.id());
         PayoutAttempt attempt = paymentStore.createPayoutAttempt(workspaceId, payout.id(), attemptNumber, "SUCCEEDED", null, externalReference, null);
@@ -662,6 +671,7 @@ public class PaymentService {
         if (refund.amountMinor() > intent.grossAmountMinor() - alreadyRefunded - alreadyDisputed) {
             throw new BadRequestException("Provider-confirmed refund amount exceeds remaining payment exposure.");
         }
+        requireOpenPostingWindow(workspaceId, intent.providerProfileId(), intent.currencyCode(), "Refund success");
         RefundRecord succeeded = paymentStore.markRefundSucceeded(workspaceId, refund.id());
         paymentStore.createRefundAttempt(workspaceId, succeeded.id(), "SUCCEEDED", null, externalReference);
         attachRefundJournal(workspaceId, succeeded, intent, "Provider truth confirms refund payable and fee effects", refundPostings(workspaceId, intent, succeeded.refundType(), succeeded.amountMinor(), succeeded.payableReductionAmountMinor()));
@@ -953,6 +963,10 @@ public class PaymentService {
 
     private FinancialAccount account(UUID workspaceId, String purpose, String currencyCode) {
         return financeService.accountByPurpose(workspaceId, purpose, currencyCode);
+    }
+
+    private void requireOpenPostingWindow(UUID workspaceId, UUID providerProfileId, String currencyCode, String operation) {
+        financialCloseService.requireOpenForPosting(workspaceId, providerProfileId, currencyCode, Instant.now(), operation);
     }
 
     private PostingCommand posting(FinancialAccount account, String side, long amountMinor, String currencyCode) {

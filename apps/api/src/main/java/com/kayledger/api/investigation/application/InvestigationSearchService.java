@@ -72,6 +72,8 @@ public class InvestigationSearchService {
             addTerm(filters, "status", command.status());
             addTerm(filters, "currencyCode", command.currencyCode());
             addTerm(filters, "mismatchType", command.mismatchType());
+            addTerm(filters, "periodStart", command.periodStart());
+            addTerm(filters, "periodEnd", command.periodEnd());
         }
         bool.put("filter", filters);
         Map<String, Object> query = Map.of(
@@ -121,7 +123,9 @@ public class InvestigationSearchService {
             String referenceId,
             String status,
             String currencyCode,
-            String mismatchType) {
+            String mismatchType,
+            String periodStart,
+            String periodEnd) {
         public SearchCommand(
                 String paymentId,
                 String refundId,
@@ -133,23 +137,40 @@ public class InvestigationSearchService {
                 String subscriptionId,
                 String providerProfileId,
                 String referenceId) {
-            this(paymentId, refundId, payoutId, disputeId, providerEventId, externalReference, businessReferenceId, subscriptionId, providerProfileId, referenceId, null, null, null);
+            this(paymentId, refundId, payoutId, disputeId, providerEventId, externalReference, businessReferenceId, subscriptionId, providerProfileId, referenceId, null, null, null, null, null);
+        }
+
+        public SearchCommand(
+                String paymentId,
+                String refundId,
+                String payoutId,
+                String disputeId,
+                String providerEventId,
+                String externalReference,
+                String businessReferenceId,
+                String subscriptionId,
+                String providerProfileId,
+                String referenceId,
+                String status,
+                String currencyCode,
+                String mismatchType) {
+            this(paymentId, refundId, payoutId, disputeId, providerEventId, externalReference, businessReferenceId, subscriptionId, providerProfileId, referenceId, status, currencyCode, mismatchType, null, null);
         }
 
         private static SearchCommand empty() {
-            return new SearchCommand(null, null, null, null, null, null, null, null, null, null, null, null, null);
+            return new SearchCommand(null, null, null, null, null, null, null, null, null, null, null, null, null, null, null);
         }
 
         private SearchCommand withReferenceId(String referenceId) {
-            return new SearchCommand(paymentId, refundId, payoutId, disputeId, providerEventId, externalReference, businessReferenceId, subscriptionId, providerProfileId, referenceId, status, currencyCode, mismatchType);
+            return new SearchCommand(paymentId, refundId, payoutId, disputeId, providerEventId, externalReference, businessReferenceId, subscriptionId, providerProfileId, referenceId, status, currencyCode, mismatchType, periodStart, periodEnd);
         }
 
         private SearchCommand withProviderEventId(String providerEventId) {
-            return new SearchCommand(paymentId, refundId, payoutId, disputeId, providerEventId, externalReference, businessReferenceId, subscriptionId, providerProfileId, referenceId, status, currencyCode, mismatchType);
+            return new SearchCommand(paymentId, refundId, payoutId, disputeId, providerEventId, externalReference, businessReferenceId, subscriptionId, providerProfileId, referenceId, status, currencyCode, mismatchType, periodStart, periodEnd);
         }
 
         private SearchCommand withExternalReference(String externalReference) {
-            return new SearchCommand(paymentId, refundId, payoutId, disputeId, providerEventId, externalReference, businessReferenceId, subscriptionId, providerProfileId, referenceId, status, currencyCode, mismatchType);
+            return new SearchCommand(paymentId, refundId, payoutId, disputeId, providerEventId, externalReference, businessReferenceId, subscriptionId, providerProfileId, referenceId, status, currencyCode, mismatchType, periodStart, periodEnd);
         }
     }
 }
