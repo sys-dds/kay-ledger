@@ -116,6 +116,15 @@ public class InvestigationIndexingService {
         return indexDocuments(investigationStore.documentsForReference(workspaceId, referenceType, referenceId));
     }
 
+    public ReindexResult replayRegionalSnapshot(UUID workspaceId, String referenceType, UUID referenceId, UUID recoveryActionId) {
+        int replayed = 0;
+        for (InvestigationDocument document : investigationStore.documentsForReference(workspaceId, referenceType, referenceId)) {
+            regionReplicationService.publishInvestigationDocument(document, recoveryActionId);
+            replayed++;
+        }
+        return new ReindexResult(replayed, 0);
+    }
+
     private ReindexResult indexDocuments(Iterable<InvestigationDocument> documents) {
         int indexed = 0;
         int failed = 0;

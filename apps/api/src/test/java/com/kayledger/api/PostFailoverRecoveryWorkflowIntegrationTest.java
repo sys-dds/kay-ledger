@@ -19,6 +19,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -37,6 +38,7 @@ import com.kayledger.api.region.application.RegionService;
 import com.kayledger.api.region.config.RegionProperties;
 import com.kayledger.api.region.recovery.application.RegionalRecoveryService;
 import com.kayledger.api.region.recovery.application.RegionalRecoveryService.RecoveryCommand;
+import com.kayledger.api.region.recovery.store.RegionalRecoveryStore;
 import com.kayledger.api.region.store.RegionFaultStore;
 import com.kayledger.api.region.store.RegionStore;
 
@@ -47,7 +49,7 @@ import com.kayledger.api.region.store.RegionStore;
         "kay-ledger.temporal.worker-enabled=false",
         "kay-ledger.region.local-region-id=region-a",
         "kay-ledger.region.peer-region-ids=region-b",
-        "kay-ledger.region.replication-consumer-enabled=false",
+        "kay-ledger.region.replication-consumer-enabled=true",
         "kay-ledger.region.replication-producer-enabled=true",
         "kay-ledger.search.opensearch.endpoint=http://localhost:1",
         "kay-ledger.object-storage.endpoint=http://localhost:1"
@@ -100,8 +102,14 @@ class PostFailoverRecoveryWorkflowIntegrationTest {
     @Autowired
     RegionalRecoveryService regionalRecoveryService;
 
+    @Autowired
+    RegionReplicationService regionReplicationService;
+
+    @Autowired
+    KafkaTemplate<String, String> kafkaTemplate;
+
     @Test
-    void invariant_failover_recovery_replays_ownership_to_peer_with_real_kafka_message_and_auditable_action() {
+    void invariant_failover_and_snapshot_recovery_complete_only_after_peer_apply_confirmation() {
         JdbcTemplate regionBJdbc = regionBJdbc();
         Fixture fixture = fixture(jdbcTemplate, "kay019-failover");
         fixture(regionBJdbc, fixture);
@@ -126,6 +134,8 @@ class PostFailoverRecoveryWorkflowIntegrationTest {
 
             String payload = pollReplicationPayload(consumer);
             regionBReplication(regionBJdbc).apply(payload);
+            String confirmation = pollRecoveryConfirmationPayload(consumer);
+            regionReplicationService.apply(confirmation);
         }
 
         assertThat(new RegionStore(regionBJdbc).findOwnership(fixture.workspaceId())).hasValueSatisfying(ownership -> {
@@ -135,21 +145,74 @@ class PostFailoverRecoveryWorkflowIntegrationTest {
         assertThat(new RegionStore(regionBJdbc).listFailoverEvents(fixture.workspaceId())).hasSize(1);
         assertThat(regionalRecoveryService.listActions(context)).anySatisfy(action -> {
             assertThat(action.actionType()).isEqualTo(RegionalRecoveryService.REPLAY_OWNERSHIP_TRANSFER);
+            assertThat(action.status()).isEqualTo("SUCCEEDED");
+        });
+
+        Fixture snapshotFixture = fixture(jdbcTemplate, "kay020-snapshot");
+        fixture(regionBJdbc, snapshotFixture);
+        jdbcTemplate.update("INSERT INTO workspace_region_ownership (workspace_id, home_region, ownership_epoch) VALUES (?, 'region-a', 1)", snapshotFixture.workspaceId());
+        regionBJdbc.update("INSERT INTO workspace_region_ownership (workspace_id, home_region, ownership_epoch) VALUES (?, 'region-a', 1)", snapshotFixture.workspaceId());
+        AccessContext snapshotContext = paymentWrite(snapshotFixture);
+        UUID callbackId = providerCallbackFixture(jdbcTemplate, snapshotFixture);
+        RegionalRecoveryService peerRecovery = peerRecovery(regionBJdbc);
+        assertThat(peerRecovery.scan(snapshotContext).stream()
+                .filter(record -> RegionalRecoveryService.REGIONAL_READ_SNAPSHOT_MISSING.equals(record.driftType()))
+                .map(record -> record.referenceType()))
+                .contains(RegionReplicationService.INVESTIGATION_READ_SNAPSHOT);
+
+        try (KafkaConsumer<String, String> consumer = consumer()) {
+            consumer.subscribe(List.of("kay-ledger.kay019.failover.replication"));
+            consumer.poll(Duration.ofMillis(200));
+            var action = regionalRecoveryService.requestRecovery(snapshotContext, new RecoveryCommand(
+                    null,
+                    RegionalRecoveryService.REPLAY_INVESTIGATION_SNAPSHOT,
+                    "PROVIDER_CALLBACK",
+                    callbackId.toString()));
             assertThat(action.status()).isEqualTo("AWAITING_PEER_APPLY");
+
+            String payload = pollInvestigationSnapshotPayload(consumer);
+            regionBReplication(regionBJdbc).apply(payload);
+            String confirmation = pollRecoveryConfirmationPayload(consumer);
+            regionReplicationService.apply(confirmation);
+        }
+
+        assertThat(regionBJdbc.queryForObject("""
+                SELECT count(*)
+                FROM region_investigation_read_snapshots
+                WHERE workspace_id = ?
+                  AND target_region = 'region-b'
+                  AND reference_type = 'PROVIDER_CALLBACK'
+                  AND reference_id = ?
+                """, Integer.class, snapshotFixture.workspaceId(), callbackId.toString())).isEqualTo(1);
+        assertThat(regionalRecoveryService.listActions(snapshotContext)).anySatisfy(action -> {
+            assertThat(action.actionType()).isEqualTo(RegionalRecoveryService.REPLAY_INVESTIGATION_SNAPSHOT);
+            assertThat(action.status()).isEqualTo("SUCCEEDED");
         });
     }
 
     private String pollReplicationPayload(KafkaConsumer<String, String> consumer) {
+        return pollPayload(consumer, RegionReplicationService.WORKSPACE_OWNERSHIP_TRANSFER);
+    }
+
+    private String pollInvestigationSnapshotPayload(KafkaConsumer<String, String> consumer) {
+        return pollPayload(consumer, RegionReplicationService.INVESTIGATION_READ_SNAPSHOT);
+    }
+
+    private String pollRecoveryConfirmationPayload(KafkaConsumer<String, String> consumer) {
+        return pollPayload(consumer, RegionReplicationService.RECOVERY_ACTION_CONFIRMATION);
+    }
+
+    private String pollPayload(KafkaConsumer<String, String> consumer, String marker) {
         long deadline = System.currentTimeMillis() + 10000;
         while (System.currentTimeMillis() < deadline) {
             var records = consumer.poll(Duration.ofMillis(500));
             for (var record : records) {
-                if (record.value().contains(RegionReplicationService.WORKSPACE_OWNERSHIP_TRANSFER)) {
+                if (record.value().contains(marker)) {
                     return record.value();
                 }
             }
         }
-        throw new AssertionError("Expected ownership replay replication message.");
+        throw new AssertionError("Expected replication message containing " + marker + ".");
     }
 
     private KafkaConsumer<String, String> consumer() {
@@ -167,10 +230,25 @@ class PostFailoverRecoveryWorkflowIntegrationTest {
         properties.setLocalRegionId("region-b");
         properties.setPeerRegionIds(List.of("region-a"));
         properties.setReplicationConsumerEnabled(true);
-        properties.setReplicationProducerEnabled(false);
+        properties.setReplicationProducerEnabled(true);
+        properties.setReplicationTopic("kay-ledger.kay019.failover.replication");
         RegionStore store = new RegionStore(regionBJdbc);
         RegionFaultService faults = new RegionFaultService(new RegionFaultStore(regionBJdbc), new AccessPolicy(), objectMapper);
-        return new RegionReplicationService(store, properties, null, objectMapper, faults);
+        return new RegionReplicationService(store, properties, kafkaTemplate, objectMapper, faults, new RegionalRecoveryStore(regionBJdbc));
+    }
+
+    private RegionalRecoveryService peerRecovery(JdbcTemplate regionBJdbc) {
+        RegionProperties properties = new RegionProperties();
+        properties.setLocalRegionId("region-b");
+        properties.setPeerRegionIds(List.of("region-a"));
+        properties.setReplicationConsumerEnabled(true);
+        properties.setReplicationProducerEnabled(false);
+        properties.setReplicationTopic("kay-ledger.kay019.failover.replication");
+        RegionStore store = new RegionStore(regionBJdbc);
+        RegionFaultService faults = new RegionFaultService(new RegionFaultStore(regionBJdbc), new AccessPolicy(), objectMapper);
+        RegionReplicationService replication = new RegionReplicationService(store, properties, null, objectMapper, faults, new RegionalRecoveryStore(regionBJdbc));
+        RegionService service = new RegionService(store, properties, new AccessPolicy(), replication);
+        return new RegionalRecoveryService(new RegionalRecoveryStore(regionBJdbc), service, replication, null, null, null, new AccessPolicy(), objectMapper);
     }
 
     private JdbcTemplate regionBJdbc() {
@@ -191,6 +269,26 @@ class PostFailoverRecoveryWorkflowIntegrationTest {
         jdbc.update("INSERT INTO workspaces (id, slug, display_name) VALUES (?, ?, ?)", fixture.workspaceId(), fixture.slug(), fixture.slug());
         jdbc.update("INSERT INTO actors (id, actor_key, display_name) VALUES (?, ?, ?)", fixture.ownerId(), fixture.slug() + "-owner", "Owner");
         jdbc.update("INSERT INTO workspace_memberships (id, workspace_id, actor_id, role) VALUES (?, ?, ?, 'OWNER')", fixture.membershipId(), fixture.workspaceId(), fixture.ownerId());
+    }
+
+    private UUID providerCallbackFixture(JdbcTemplate jdbc, Fixture fixture) {
+        UUID providerConfigId = UUID.randomUUID();
+        UUID callbackId = UUID.randomUUID();
+        jdbc.update("""
+                INSERT INTO provider_configs (id, workspace_id, provider_key, display_name, signing_secret, callback_token)
+                VALUES (?, ?, 'kay020-provider', 'KAY020 Provider', 'secret', ?)
+                """, providerConfigId, fixture.workspaceId(), "token-" + providerConfigId);
+        jdbc.update("""
+                INSERT INTO provider_callbacks (
+                    id, workspace_id, provider_config_id, provider_key, provider_event_id, provider_sequence,
+                    callback_type, business_reference_type, business_reference_id, payload_json,
+                    signature_header, signature_verified, dedupe_key, processing_status, applied_at
+                )
+                VALUES (?, ?, ?, 'kay020-provider', 'evt-kay020-snapshot', 20,
+                    'PAYMENT_FAILED', 'PAYMENT_INTENT', ?, '{}'::jsonb,
+                    'sig', true, 'kay020-provider:evt-kay020-snapshot', 'APPLIED', now())
+                """, callbackId, fixture.workspaceId(), providerConfigId, UUID.randomUUID());
+        return callbackId;
     }
 
     private AccessContext paymentWrite(Fixture fixture) {
