@@ -148,17 +148,23 @@ public class ReportingStore {
                           AND pi.provider_profile_id = ?
                           AND pi.currency_code = ?
                           AND pi.status = 'SETTLED'
-                          AND pi.updated_at >= b.period_start
-                          AND pi.updated_at < b.period_end
+                          AND pi.settled_effective_at >= b.period_start
+                          AND pi.settled_effective_at < b.period_end
                         UNION ALL
                         SELECT 1
                         FROM payout_requests pr, bounds b
                         WHERE pr.workspace_id = ?
                           AND pr.provider_profile_id = ?
                           AND pr.currency_code = ?
-                          AND pr.status = 'SUCCEEDED'
-                          AND pr.updated_at >= b.period_start
-                          AND pr.updated_at < b.period_end
+                          AND (
+                              (pr.status IN ('REQUESTED', 'PROCESSING')
+                               AND pr.requested_effective_at >= b.period_start
+                               AND pr.requested_effective_at < b.period_end)
+                              OR
+                              (pr.status = 'SUCCEEDED'
+                               AND pr.succeeded_effective_at >= b.period_start
+                               AND pr.succeeded_effective_at < b.period_end)
+                          )
                         UNION ALL
                         SELECT 1
                         FROM refunds r
@@ -168,8 +174,8 @@ public class ReportingStore {
                           AND pi.provider_profile_id = ?
                           AND pi.currency_code = ?
                           AND r.status = 'SUCCEEDED'
-                          AND r.updated_at >= b.period_start
-                          AND r.updated_at < b.period_end
+                          AND r.succeeded_effective_at >= b.period_start
+                          AND r.succeeded_effective_at < b.period_end
                         UNION ALL
                         SELECT 1
                         FROM disputes d
@@ -179,8 +185,8 @@ public class ReportingStore {
                           AND pi.provider_profile_id = ?
                           AND pi.currency_code = ?
                           AND d.status = 'OPEN'
-                          AND d.updated_at >= b.period_start
-                          AND d.updated_at < b.period_end
+                          AND d.opened_effective_at >= b.period_start
+                          AND d.opened_effective_at < b.period_end
                     )
                 )
                 SELECT ?::uuid AS workspace_id,
@@ -189,39 +195,39 @@ public class ReportingStore {
                        COALESCE((SELECT SUM(gross_amount_minor) FROM payment_intents pi, bounds b
                            WHERE pi.workspace_id = ? AND pi.provider_profile_id = ?
                              AND pi.currency_code = ? AND pi.status = 'SETTLED'
-                             AND pi.updated_at >= b.period_start AND pi.updated_at < b.period_end), 0) AS settled_gross_amount_minor,
+                             AND pi.settled_effective_at >= b.period_start AND pi.settled_effective_at < b.period_end), 0) AS settled_gross_amount_minor,
                        COALESCE((SELECT SUM(fee_amount_minor) FROM payment_intents pi, bounds b
                            WHERE pi.workspace_id = ? AND pi.provider_profile_id = ?
                              AND pi.currency_code = ? AND pi.status = 'SETTLED'
-                             AND pi.updated_at >= b.period_start AND pi.updated_at < b.period_end), 0) AS fee_amount_minor,
+                             AND pi.settled_effective_at >= b.period_start AND pi.settled_effective_at < b.period_end), 0) AS fee_amount_minor,
                        COALESCE((SELECT SUM(net_amount_minor) FROM payment_intents pi, bounds b
                            WHERE pi.workspace_id = ? AND pi.provider_profile_id = ?
                              AND pi.currency_code = ? AND pi.status = 'SETTLED'
-                             AND pi.updated_at >= b.period_start AND pi.updated_at < b.period_end), 0) AS net_earnings_amount_minor,
+                             AND pi.settled_effective_at >= b.period_start AND pi.settled_effective_at < b.period_end), 0) AS net_earnings_amount_minor,
                        COALESCE((SELECT SUM(requested_amount_minor) FROM payout_requests pr, bounds b
                            WHERE pr.workspace_id = ? AND pr.provider_profile_id = ?
                              AND pr.currency_code = ? AND pr.status IN ('REQUESTED', 'PROCESSING')
-                             AND pr.updated_at >= b.period_start AND pr.updated_at < b.period_end), 0) AS current_payout_requested_amount_minor,
+                             AND pr.requested_effective_at >= b.period_start AND pr.requested_effective_at < b.period_end), 0) AS current_payout_requested_amount_minor,
                        COALESCE((SELECT SUM(requested_amount_minor) FROM payout_requests pr, bounds b
                            WHERE pr.workspace_id = ? AND pr.provider_profile_id = ?
                              AND pr.currency_code = ? AND pr.status = 'SUCCEEDED'
-                             AND pr.updated_at >= b.period_start AND pr.updated_at < b.period_end), 0) AS payout_succeeded_amount_minor,
+                             AND pr.succeeded_effective_at >= b.period_start AND pr.succeeded_effective_at < b.period_end), 0) AS payout_succeeded_amount_minor,
                        COALESCE((SELECT SUM(r.amount_minor) FROM refunds r
                            JOIN payment_intents pi ON pi.workspace_id = r.workspace_id AND pi.id = r.payment_intent_id,
                                 bounds b
                            WHERE r.workspace_id = ? AND pi.provider_profile_id = ?
                              AND pi.currency_code = ? AND r.status = 'SUCCEEDED'
-                             AND r.updated_at >= b.period_start AND r.updated_at < b.period_end), 0) AS refund_amount_minor,
+                             AND r.succeeded_effective_at >= b.period_start AND r.succeeded_effective_at < b.period_end), 0) AS refund_amount_minor,
                        COALESCE((SELECT SUM(d.disputed_amount_minor) FROM disputes d
                            JOIN payment_intents pi ON pi.workspace_id = d.workspace_id AND pi.id = d.payment_intent_id,
                                 bounds b
                            WHERE d.workspace_id = ? AND pi.provider_profile_id = ?
                              AND pi.currency_code = ? AND d.status = 'OPEN'
-                             AND d.updated_at >= b.period_start AND d.updated_at < b.period_end), 0) AS active_dispute_exposure_amount_minor,
+                             AND d.opened_effective_at >= b.period_start AND d.opened_effective_at < b.period_end), 0) AS active_dispute_exposure_amount_minor,
                        COALESCE((SELECT SUM(pi.net_amount_minor) FROM payment_intents pi, bounds b
                            WHERE pi.workspace_id = ? AND pi.provider_profile_id = ?
                              AND pi.currency_code = ? AND pi.subscription_id IS NOT NULL AND pi.status = 'SETTLED'
-                             AND pi.updated_at >= b.period_start AND pi.updated_at < b.period_end), 0) AS settled_subscription_net_revenue_amount_minor,
+                             AND pi.settled_effective_at >= b.period_start AND pi.settled_effective_at < b.period_end), 0) AS settled_subscription_net_revenue_amount_minor,
                        now() AS refreshed_at
                 FROM provider_currency pc
                 """, SUMMARY_MAPPER,
@@ -252,30 +258,39 @@ public class ReportingStore {
                     FROM payment_intents pi, bounds b
                     WHERE pi.workspace_id = ?
                       AND pi.status = 'SETTLED'
-                      AND pi.updated_at >= b.period_start
-                      AND pi.updated_at < b.period_end
+                      AND pi.settled_effective_at >= b.period_start
+                      AND pi.settled_effective_at < b.period_end
                     UNION
                     SELECT pr.provider_profile_id, pr.currency_code
                     FROM payout_requests pr, bounds b
                     WHERE pr.workspace_id = ?
-                      AND pr.updated_at >= b.period_start
-                      AND pr.updated_at < b.period_end
+                      AND (
+                          (pr.status IN ('REQUESTED', 'PROCESSING')
+                           AND pr.requested_effective_at >= b.period_start
+                           AND pr.requested_effective_at < b.period_end)
+                          OR
+                          (pr.status = 'SUCCEEDED'
+                           AND pr.succeeded_effective_at >= b.period_start
+                           AND pr.succeeded_effective_at < b.period_end)
+                      )
                     UNION
                     SELECT pi.provider_profile_id, pi.currency_code
                     FROM refunds r
                     JOIN payment_intents pi ON pi.workspace_id = r.workspace_id AND pi.id = r.payment_intent_id,
                          bounds b
                     WHERE r.workspace_id = ?
-                      AND r.updated_at >= b.period_start
-                      AND r.updated_at < b.period_end
+                      AND r.status = 'SUCCEEDED'
+                      AND r.succeeded_effective_at >= b.period_start
+                      AND r.succeeded_effective_at < b.period_end
                     UNION
                     SELECT pi.provider_profile_id, pi.currency_code
                     FROM disputes d
                     JOIN payment_intents pi ON pi.workspace_id = d.workspace_id AND pi.id = d.payment_intent_id,
                          bounds b
                     WHERE d.workspace_id = ?
-                      AND d.updated_at >= b.period_start
-                      AND d.updated_at < b.period_end
+                      AND d.status = 'OPEN'
+                      AND d.opened_effective_at >= b.period_start
+                      AND d.opened_effective_at < b.period_end
                 ) provider_currency
                 ORDER BY provider_profile_id, currency_code
                 """, (rs, rowNum) -> new ProviderCurrency(

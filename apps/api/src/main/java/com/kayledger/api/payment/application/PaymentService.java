@@ -17,6 +17,7 @@ import com.kayledger.api.access.application.AccessContext;
 import com.kayledger.api.access.application.AccessPolicy;
 import com.kayledger.api.access.model.AccessScope;
 import com.kayledger.api.access.model.WorkspaceRole;
+import com.kayledger.api.approval.application.FinancialApprovalService;
 import com.kayledger.api.booking.model.Booking;
 import com.kayledger.api.booking.store.BookingStore;
 import com.kayledger.api.close.application.FinancialCloseService;
@@ -25,6 +26,7 @@ import com.kayledger.api.finance.application.FinanceService.CreateJournalEntryCo
 import com.kayledger.api.finance.application.FinanceService.PostingCommand;
 import com.kayledger.api.finance.model.FinancialAccount;
 import com.kayledger.api.finance.model.JournalEntryDetails;
+import com.kayledger.api.merchantevents.application.MerchantFinanceEventService;
 import com.kayledger.api.payment.model.PaymentIntent;
 import com.kayledger.api.payment.model.PaymentIntentDetails;
 import com.kayledger.api.payment.model.PaymentAttempt;
@@ -64,8 +66,10 @@ public class PaymentService {
     private final RiskService riskService;
     private final RegionService regionService;
     private final FinancialCloseService financialCloseService;
+    private final FinancialApprovalService financialApprovalService;
+    private final MerchantFinanceEventService merchantFinanceEventService;
 
-    public PaymentService(PaymentStore paymentStore, BookingStore bookingStore, AccessPolicy accessPolicy, FinanceService financeService, SubscriptionStore subscriptionStore, OutboxService outboxService, RiskService riskService, RegionService regionService, FinancialCloseService financialCloseService) {
+    public PaymentService(PaymentStore paymentStore, BookingStore bookingStore, AccessPolicy accessPolicy, FinanceService financeService, SubscriptionStore subscriptionStore, OutboxService outboxService, RiskService riskService, RegionService regionService, FinancialCloseService financialCloseService, FinancialApprovalService financialApprovalService, MerchantFinanceEventService merchantFinanceEventService) {
         this.paymentStore = paymentStore;
         this.bookingStore = bookingStore;
         this.accessPolicy = accessPolicy;
@@ -75,6 +79,8 @@ public class PaymentService {
         this.riskService = riskService;
         this.regionService = regionService;
         this.financialCloseService = financialCloseService;
+        this.financialApprovalService = financialApprovalService;
+        this.merchantFinanceEventService = merchantFinanceEventService;
     }
 
     @Transactional
@@ -280,8 +286,9 @@ public class PaymentService {
         if (amountMinor > summary.availableAmountMinor()) {
             throw new BadRequestException("Payout cannot exceed available payable balance.");
         }
-        requireOpenPostingWindow(context.workspaceId(), providerProfileId, currencyCode, "Payout request");
-        PayoutRequest payout = paymentStore.createPayoutRequest(context.workspaceId(), providerProfileId, currencyCode, amountMinor);
+        Instant effectiveAt = Instant.now();
+        requireOpenPostingWindow(context.workspaceId(), providerProfileId, currencyCode, effectiveAt, "Payout request");
+        PayoutRequest payout = paymentStore.createPayoutRequest(context.workspaceId(), providerProfileId, currencyCode, amountMinor, effectiveAt);
         riskService.evaluatePayoutRequest(context.workspaceId(), payout.id(), payout.requestedAmountMinor());
         return attachPayoutRequestJournal(context.workspaceId(), payout, "Payout request reserves seller payable for payout clearing", List.of(
                 posting(account(context.workspaceId(), "SELLER_PAYABLE", payout.currencyCode()), "DEBIT", payout.requestedAmountMinor(), payout.currencyCode()),
@@ -304,6 +311,7 @@ public class PaymentService {
         requirePaymentWrite(context);
         PayoutRequest payout = payout(context, payoutRequestId);
         requirePayoutOperatorMutationAllowed(context.workspaceId(), payout, RiskService.MUTATION_PAYOUT_OPERATOR_SUCCEED);
+        financialApprovalService.requireApprovedForExecution(context, command == null ? null : command.approvalRequestId(), FinancialApprovalService.ACTION_PAYOUT_OPERATOR_SUCCESS, "PAYOUT_REQUEST", payout.id());
         return markPayoutSucceededInternal(context.workspaceId(), payout, externalReference(command));
     }
 
@@ -311,6 +319,7 @@ public class PaymentService {
     public PayoutRequest markPayoutFailed(AccessContext context, UUID payoutRequestId, PayoutMutationCommand command) {
         requirePaymentWrite(context);
         PayoutRequest payout = payout(context, payoutRequestId);
+        financialApprovalService.requireApprovedForExecution(context, command == null ? null : command.approvalRequestId(), FinancialApprovalService.ACTION_PAYOUT_OPERATOR_FAILURE, "PAYOUT_REQUEST", payout.id());
         return markPayoutFailedInternal(context.workspaceId(), payout, requireText(command == null ? null : command.failureReason(), "failureReason"), externalReference(command));
     }
 
@@ -319,6 +328,7 @@ public class PaymentService {
         requirePaymentWrite(context);
         PayoutRequest payout = payout(context, payoutRequestId);
         requirePayoutOperatorMutationAllowed(context.workspaceId(), payout, RiskService.MUTATION_PAYOUT_RETRY);
+        financialApprovalService.requireApprovedForExecution(context, command == null ? null : command.approvalRequestId(), FinancialApprovalService.ACTION_PAYOUT_OPERATOR_RETRY, "PAYOUT_REQUEST", payout.id());
         return retryPayoutInternal(context.workspaceId(), payout, externalReference(command));
     }
 
@@ -377,13 +387,15 @@ public class PaymentService {
         if (amountMinor > summary.availableAmountMinor()) {
             throw new BadRequestException("Dispute cannot freeze more than available payable balance.");
         }
-        requireOpenPostingWindow(context.workspaceId(), intent.providerProfileId(), intent.currencyCode(), "Dispute opening");
-        DisputeRecord dispute = paymentStore.createDispute(context.workspaceId(), intent.id(), intent.bookingId(), amountMinor, amountMinor);
+        Instant effectiveAt = Instant.now();
+        requireOpenPostingWindow(context.workspaceId(), intent.providerProfileId(), intent.currencyCode(), effectiveAt, "Dispute opening");
+        DisputeRecord dispute = paymentStore.createDispute(context.workspaceId(), intent.id(), intent.bookingId(), amountMinor, amountMinor, effectiveAt);
         paymentStore.createFrozenFund(context.workspaceId(), intent.providerProfileId(), dispute.id(), intent.currencyCode(), amountMinor);
         DisputeRecord opened = attachDisputeOpenJournal(context.workspaceId(), dispute, intent, "Dispute opening freezes seller payable", List.of(
                 posting(account(context.workspaceId(), "SELLER_PAYABLE", intent.currencyCode()), "DEBIT", amountMinor, intent.currencyCode()),
                 posting(account(context.workspaceId(), "FROZEN_PAYABLE", intent.currencyCode()), "CREDIT", amountMinor, intent.currencyCode())));
         outboxService.append(context.workspaceId(), "DISPUTE", opened.id(), "dispute.opened", "dispute.opened:" + opened.id(), disputeData(opened, intent));
+        merchantFinanceEventService.emit(context.workspaceId(), intent.providerProfileId(), intent.currencyCode(), null, MerchantFinanceEventService.EVENT_DISPUTE_OPENED, "DISPUTE", opened.id(), disputeData(opened, intent));
         return opened;
     }
 
@@ -393,17 +405,20 @@ public class PaymentService {
         DisputeRecord dispute = dispute(context, disputeId);
         PaymentIntent intent = intent(context, dispute.paymentIntentId());
         String resolution = requireOneOf(command == null ? null : command.resolution(), DISPUTE_RESOLUTIONS, "resolution");
-        requireOpenPostingWindow(context.workspaceId(), intent.providerProfileId(), intent.currencyCode(), "Dispute resolution");
+        financialApprovalService.requireApprovedForExecution(context, command == null ? null : command.approvalRequestId(), FinancialApprovalService.ACTION_DISPUTE_RESOLUTION, "DISPUTE", dispute.id());
+        Instant effectiveAt = Instant.now();
+        requireOpenPostingWindow(context.workspaceId(), intent.providerProfileId(), intent.currencyCode(), effectiveAt, "Dispute resolution");
         FrozenFund frozenFund = paymentStore.findFrozenFundForDispute(context.workspaceId(), dispute.id())
                 .orElseThrow(() -> new BadRequestException("Dispute has no frozen funds."));
         String frozenStatus = "LOST".equals(resolution) ? "CONSUMED" : "RELEASED";
         paymentStore.updateFrozenFundStatus(context.workspaceId(), frozenFund.id(), frozenStatus);
-        DisputeRecord resolved = paymentStore.resolveDispute(context.workspaceId(), dispute.id(), resolution, resolution);
+        DisputeRecord resolved = paymentStore.resolveDispute(context.workspaceId(), dispute.id(), resolution, resolution, effectiveAt);
         String creditPurpose = "LOST".equals(resolution) ? "DISPUTE_RESERVE" : "SELLER_PAYABLE";
         DisputeRecord completed = attachDisputeResolveJournal(context.workspaceId(), resolved, frozenFund, "Dispute resolution updates frozen payable posture", List.of(
                 posting(account(context.workspaceId(), "FROZEN_PAYABLE", frozenFund.currencyCode()), "DEBIT", frozenFund.amountMinor(), frozenFund.currencyCode()),
                 posting(account(context.workspaceId(), creditPurpose, frozenFund.currencyCode()), "CREDIT", frozenFund.amountMinor(), frozenFund.currencyCode())));
         outboxService.append(context.workspaceId(), "DISPUTE", completed.id(), "dispute.resolved", "dispute.resolved:" + completed.id() + ":" + resolution, disputeData(completed, intent));
+        merchantFinanceEventService.emit(context.workspaceId(), intent.providerProfileId(), intent.currencyCode(), null, MerchantFinanceEventService.EVENT_DISPUTE_RESOLVED, "DISPUTE", completed.id(), disputeData(completed, intent));
         return completed;
     }
 
@@ -433,15 +448,23 @@ public class PaymentService {
         if (amountMinor <= 0 || amountMinor > remainingRefundable) {
             throw new BadRequestException("Refund amount exceeds remaining refundable amount.");
         }
+        if (financialApprovalService.isLargeRefundOrReversal(refundType, amountMinor)) {
+            financialApprovalService.requireApprovedForExecution(context, command.approvalRequestId(), FinancialApprovalService.ACTION_LARGE_REFUND_OR_REVERSAL, "PAYMENT_INTENT", intent.id());
+        }
         long priorPayableReduction = paymentStore.payableReductionForIntent(context.workspaceId(), intent.id())
                 + paymentStore.activeDisputePayableExposureForIntent(context.workspaceId(), intent.id());
         long remainingPayableExposure = Math.max(intent.netAmountMinor() - priorPayableReduction, 0);
         long payableReduction = Math.min(amountMinor, remainingPayableExposure);
-        RefundRecord refund = paymentStore.createRefund(context.workspaceId(), intent.id(), intent.bookingId(), refundType, amountMinor, payableReduction);
+        Instant effectiveAt = Instant.now();
+        requireOpenPostingWindow(context.workspaceId(), intent.providerProfileId(), intent.currencyCode(), effectiveAt, "Refund request");
+        RefundRecord refund = paymentStore.createRefund(context.workspaceId(), intent.id(), intent.bookingId(), refundType, amountMinor, payableReduction, effectiveAt);
         paymentStore.createRefundAttempt(context.workspaceId(), refund.id(), "PROCESSING", null, externalReference(command));
         attachRefundJournal(context.workspaceId(), refund, intent, "Refund request reserves payable and fee effects", refundPostings(context.workspaceId(), intent, refund.refundType(), refund.amountMinor(), refund.payableReductionAmountMinor()));
         riskService.evaluateRefundVelocity(context.workspaceId(), intent.providerProfileId());
         outboxService.append(context.workspaceId(), "REFUND", refund.id(), "refund.requested", "refund.requested:" + refund.id(), refundData(refund, intent));
+        if ("SUCCEEDED".equals(refund.status())) {
+            merchantFinanceEventService.emit(context.workspaceId(), intent.providerProfileId(), intent.currencyCode(), null, MerchantFinanceEventService.EVENT_REFUND_SUCCEEDED, "REFUND", refund.id(), refundData(refund, intent));
+        }
         return refund;
     }
 
@@ -515,8 +538,9 @@ public class PaymentService {
             throw new BadRequestException("Partial settlement is not supported in this foundation slice.");
         }
         try {
-            requireOpenPostingWindow(workspaceId, existing.providerProfileId(), existing.currencyCode(), "Payment settlement");
-            PaymentIntent settled = paymentStore.settle(workspaceId, existing.id(), amount);
+            Instant effectiveAt = Instant.now();
+            requireOpenPostingWindow(workspaceId, existing.providerProfileId(), existing.currencyCode(), effectiveAt, "Payment settlement");
+            PaymentIntent settled = paymentStore.settle(workspaceId, existing.id(), amount, effectiveAt);
             PaymentAttempt attempt = paymentStore.createAttempt(workspaceId, settled.id(), "SETTLE", "SUCCEEDED", amount, externalReference, null);
             attachJournal(workspaceId, settled, attempt, "Payment settlement creates payable and fee revenue", settlementPostings(workspaceId, settled, amount));
             paymentStore.refreshPayableBalance(workspaceId, settled.providerProfileId(), settled.currencyCode());
@@ -559,14 +583,16 @@ public class PaymentService {
         if (!"REQUESTED".equals(payout.status()) && !"PROCESSING".equals(payout.status())) {
             throw new BadRequestException("Only requested or processing payouts can succeed.");
         }
-        requireOpenPostingWindow(workspaceId, payout.providerProfileId(), payout.currencyCode(), "Payout success");
+        Instant effectiveAt = Instant.now();
+        requireOpenPostingWindow(workspaceId, payout.providerProfileId(), payout.currencyCode(), effectiveAt, "Payout success");
         int attemptNumber = paymentStore.nextPayoutAttemptNumber(workspaceId, payout.id());
-        PayoutRequest succeeded = paymentStore.markPayoutSucceeded(workspaceId, payout.id());
+        PayoutRequest succeeded = paymentStore.markPayoutSucceeded(workspaceId, payout.id(), effectiveAt);
         PayoutAttempt attempt = paymentStore.createPayoutAttempt(workspaceId, payout.id(), attemptNumber, "SUCCEEDED", null, externalReference, null);
         attachPayoutAttemptJournal(workspaceId, succeeded, attempt, "Payout success clears payout clearing through cash placeholder", List.of(
                 posting(account(workspaceId, "PAYOUT_CLEARING", succeeded.currencyCode()), "DEBIT", succeeded.requestedAmountMinor(), succeeded.currencyCode()),
                 posting(account(workspaceId, "CASH_PLACEHOLDER", succeeded.currencyCode()), "CREDIT", succeeded.requestedAmountMinor(), succeeded.currencyCode())));
         appendPayoutEvent(workspaceId, succeeded, eventType);
+        merchantFinanceEventService.emit(workspaceId, succeeded.providerProfileId(), succeeded.currencyCode(), null, MerchantFinanceEventService.EVENT_PAYOUT_SUCCEEDED, "PAYOUT_REQUEST", succeeded.id(), payoutPayload(succeeded));
         return succeeded;
     }
 
@@ -671,12 +697,14 @@ public class PaymentService {
         if (refund.amountMinor() > intent.grossAmountMinor() - alreadyRefunded - alreadyDisputed) {
             throw new BadRequestException("Provider-confirmed refund amount exceeds remaining payment exposure.");
         }
-        requireOpenPostingWindow(workspaceId, intent.providerProfileId(), intent.currencyCode(), "Refund success");
-        RefundRecord succeeded = paymentStore.markRefundSucceeded(workspaceId, refund.id());
+        Instant effectiveAt = Instant.now();
+        requireOpenPostingWindow(workspaceId, intent.providerProfileId(), intent.currencyCode(), effectiveAt, "Refund success");
+        RefundRecord succeeded = paymentStore.markRefundSucceeded(workspaceId, refund.id(), effectiveAt);
         paymentStore.createRefundAttempt(workspaceId, succeeded.id(), "SUCCEEDED", null, externalReference);
         attachRefundJournal(workspaceId, succeeded, intent, "Provider truth confirms refund payable and fee effects", refundPostings(workspaceId, intent, succeeded.refundType(), succeeded.amountMinor(), succeeded.payableReductionAmountMinor()));
         riskService.evaluateRefundVelocity(workspaceId, intent.providerProfileId());
         outboxService.append(workspaceId, "REFUND", succeeded.id(), "refund.provider_succeeded", "refund.provider_succeeded:" + succeeded.id(), refundData(succeeded, intent));
+        merchantFinanceEventService.emit(workspaceId, intent.providerProfileId(), intent.currencyCode(), null, MerchantFinanceEventService.EVENT_REFUND_SUCCEEDED, "REFUND", succeeded.id(), refundData(succeeded, intent));
         return succeeded;
     }
 
@@ -690,6 +718,16 @@ public class PaymentService {
 
     private void appendPaymentEvent(UUID workspaceId, PaymentIntent intent, String eventType, String transitionSource) {
         outboxService.append(workspaceId, "PAYMENT", intent.id(), eventType, eventType + ":" + intent.id() + ":" + intent.status(), paymentData(intent, transitionSource));
+    }
+
+    private Map<String, Object> payoutPayload(PayoutRequest payout) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("payoutRequestId", payout.id());
+        payload.put("providerProfileId", payout.providerProfileId());
+        payload.put("currencyCode", payout.currencyCode());
+        payload.put("requestedAmountMinor", payout.requestedAmountMinor());
+        payload.put("status", payout.status());
+        return payload;
     }
 
     private void requirePayoutOperatorMutationAllowed(UUID workspaceId, PayoutRequest payout, String mutationScope) {
@@ -965,8 +1003,8 @@ public class PaymentService {
         return financeService.accountByPurpose(workspaceId, purpose, currencyCode);
     }
 
-    private void requireOpenPostingWindow(UUID workspaceId, UUID providerProfileId, String currencyCode, String operation) {
-        financialCloseService.requireOpenForPosting(workspaceId, providerProfileId, currencyCode, Instant.now(), operation);
+    private void requireOpenPostingWindow(UUID workspaceId, UUID providerProfileId, String currencyCode, Instant effectiveAt, String operation) {
+        financialCloseService.requireOpenForPosting(workspaceId, providerProfileId, currencyCode, effectiveAt, operation);
     }
 
     private PostingCommand posting(FinancialAccount account, String side, long amountMinor, String currencyCode) {
@@ -1117,10 +1155,16 @@ public class PaymentService {
     public record PayoutRequestCommand(UUID providerProfileId, String currencyCode, Long amountMinor) {
     }
 
-    public record PayoutMutationCommand(String failureReason, String externalReference) {
+    public record PayoutMutationCommand(String failureReason, String externalReference, UUID approvalRequestId) {
+        public PayoutMutationCommand(String failureReason, String externalReference) {
+            this(failureReason, externalReference, null);
+        }
     }
 
-    public record RefundCommand(UUID paymentIntentId, Long amountMinor, String externalReference) {
+    public record RefundCommand(UUID paymentIntentId, Long amountMinor, String externalReference, UUID approvalRequestId) {
+        public RefundCommand(UUID paymentIntentId, Long amountMinor, String externalReference) {
+            this(paymentIntentId, amountMinor, externalReference, null);
+        }
     }
 
     public record RefundFailureCommand(String failureReason, String externalReference) {
@@ -1129,6 +1173,9 @@ public class PaymentService {
     public record DisputeCommand(UUID paymentIntentId, Long amountMinor) {
     }
 
-    public record ResolveDisputeCommand(String resolution, String note) {
+    public record ResolveDisputeCommand(String resolution, String note, UUID approvalRequestId) {
+        public ResolveDisputeCommand(String resolution, String note) {
+            this(resolution, note, null);
+        }
     }
 }

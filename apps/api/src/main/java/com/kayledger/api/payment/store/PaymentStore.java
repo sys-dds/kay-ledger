@@ -2,6 +2,7 @@ package com.kayledger.api.payment.store;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -295,17 +296,18 @@ public class PaymentStore {
                 """, INTENT_MAPPER, amountMinor, workspaceId, paymentIntentId, amountMinor);
     }
 
-    public PaymentIntent settle(UUID workspaceId, UUID paymentIntentId, long amountMinor) {
+    public PaymentIntent settle(UUID workspaceId, UUID paymentIntentId, long amountMinor, Instant effectiveAt) {
         return jdbcTemplate.queryForObject("""
                 UPDATE payment_intents
                 SET status = 'SETTLED',
-                    settled_amount_minor = ?
+                    settled_amount_minor = ?,
+                    settled_effective_at = ?
                 WHERE workspace_id = ?
                   AND id = ?
                   AND status = 'CAPTURED'
                   AND ? <= captured_amount_minor
                 RETURNING *
-                """, INTENT_MAPPER, amountMinor, workspaceId, paymentIntentId, amountMinor);
+                """, INTENT_MAPPER, amountMinor, Timestamp.from(effectiveAt), workspaceId, paymentIntentId, amountMinor);
     }
 
     public PaymentIntent cancel(UUID workspaceId, UUID paymentIntentId) {
@@ -584,17 +586,18 @@ public class PaymentStore {
                 """, BALANCE_SUMMARY_MAPPER, workspaceId, workspaceId, workspaceId);
     }
 
-    public PayoutRequest createPayoutRequest(UUID workspaceId, UUID providerProfileId, String currencyCode, long requestedAmountMinor) {
+    public PayoutRequest createPayoutRequest(UUID workspaceId, UUID providerProfileId, String currencyCode, long requestedAmountMinor, Instant effectiveAt) {
         return jdbcTemplate.queryForObject("""
                 INSERT INTO payout_requests (
                     workspace_id,
                     provider_profile_id,
                     currency_code,
-                    requested_amount_minor
+                    requested_amount_minor,
+                    requested_effective_at
                 )
-                VALUES (?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?)
                 RETURNING *
-                """, PAYOUT_MAPPER, workspaceId, providerProfileId, currencyCode, requestedAmountMinor);
+                """, PAYOUT_MAPPER, workspaceId, providerProfileId, currencyCode, requestedAmountMinor, Timestamp.from(effectiveAt));
     }
 
     public Optional<PayoutRequest> findPayout(UUID workspaceId, UUID payoutRequestId) {
@@ -627,16 +630,17 @@ public class PaymentStore {
                 """, PAYOUT_MAPPER, workspaceId, payoutRequestId);
     }
 
-    public PayoutRequest markPayoutSucceeded(UUID workspaceId, UUID payoutRequestId) {
+    public PayoutRequest markPayoutSucceeded(UUID workspaceId, UUID payoutRequestId, Instant effectiveAt) {
         return jdbcTemplate.queryForObject("""
                 UPDATE payout_requests
                 SET status = 'SUCCEEDED',
-                    failure_reason = NULL
+                    failure_reason = NULL,
+                    succeeded_effective_at = ?
                 WHERE workspace_id = ?
                   AND id = ?
                   AND status IN ('REQUESTED', 'PROCESSING')
                 RETURNING *
-                """, PAYOUT_MAPPER, workspaceId, payoutRequestId);
+                """, PAYOUT_MAPPER, Timestamp.from(effectiveAt), workspaceId, payoutRequestId);
     }
 
     public PayoutRequest markPayoutFailed(UUID workspaceId, UUID payoutRequestId, String failureReason) {
@@ -720,7 +724,8 @@ public class PaymentStore {
             UUID bookingId,
             String refundType,
             long amountMinor,
-            long payableReductionAmountMinor) {
+            long payableReductionAmountMinor,
+            Instant effectiveAt) {
         return jdbcTemplate.queryForObject("""
                 INSERT INTO refunds (
                     workspace_id,
@@ -728,11 +733,12 @@ public class PaymentStore {
                     booking_id,
                     refund_type,
                     amount_minor,
-                    payable_reduction_amount_minor
+                    payable_reduction_amount_minor,
+                    requested_effective_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 RETURNING *
-                """, REFUND_MAPPER, workspaceId, paymentIntentId, bookingId, refundType, amountMinor, payableReductionAmountMinor);
+                """, REFUND_MAPPER, workspaceId, paymentIntentId, bookingId, refundType, amountMinor, payableReductionAmountMinor, Timestamp.from(effectiveAt));
     }
 
     public RefundRecord markRefundProcessing(UUID workspaceId, UUID refundId) {
@@ -799,15 +805,16 @@ public class PaymentStore {
                 """, REFUND_MAPPER, workspaceId, refundId);
     }
 
-    public RefundRecord markRefundSucceeded(UUID workspaceId, UUID refundId) {
+    public RefundRecord markRefundSucceeded(UUID workspaceId, UUID refundId, Instant effectiveAt) {
         return jdbcTemplate.queryForObject("""
                 UPDATE refunds
-                SET status = 'SUCCEEDED'
+                SET status = 'SUCCEEDED',
+                    succeeded_effective_at = ?
                 WHERE workspace_id = ?
                   AND id = ?
                   AND status IN ('REQUESTED', 'PROCESSING', 'FAILED')
                 RETURNING *
-                """, REFUND_MAPPER, workspaceId, refundId);
+                """, REFUND_MAPPER, Timestamp.from(effectiveAt), workspaceId, refundId);
     }
 
     public long refundedAmountForIntent(UUID workspaceId, UUID paymentIntentId) {
@@ -854,18 +861,19 @@ public class PaymentStore {
         return value == null ? 0 : value;
     }
 
-    public DisputeRecord createDispute(UUID workspaceId, UUID paymentIntentId, UUID bookingId, long disputedAmountMinor, long frozenAmountMinor) {
+    public DisputeRecord createDispute(UUID workspaceId, UUID paymentIntentId, UUID bookingId, long disputedAmountMinor, long frozenAmountMinor, Instant effectiveAt) {
         return jdbcTemplate.queryForObject("""
                 INSERT INTO disputes (
                     workspace_id,
                     payment_intent_id,
                     booking_id,
                     disputed_amount_minor,
-                    frozen_amount_minor
+                    frozen_amount_minor,
+                    opened_effective_at
                 )
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?)
                 RETURNING *
-                """, DISPUTE_MAPPER, workspaceId, paymentIntentId, bookingId, disputedAmountMinor, frozenAmountMinor);
+                """, DISPUTE_MAPPER, workspaceId, paymentIntentId, bookingId, disputedAmountMinor, frozenAmountMinor, Timestamp.from(effectiveAt));
     }
 
     public Optional<DisputeRecord> findDispute(UUID workspaceId, UUID disputeId) {
@@ -920,16 +928,17 @@ public class PaymentStore {
                 """, FROZEN_MAPPER, status, workspaceId, frozenFundId);
     }
 
-    public DisputeRecord resolveDispute(UUID workspaceId, UUID disputeId, String status, String resolution) {
+    public DisputeRecord resolveDispute(UUID workspaceId, UUID disputeId, String status, String resolution, Instant effectiveAt) {
         return jdbcTemplate.queryForObject("""
                 UPDATE disputes
                 SET status = ?,
-                    resolution = ?
+                    resolution = ?,
+                    resolved_effective_at = ?
                 WHERE workspace_id = ?
                   AND id = ?
                   AND status = 'OPEN'
                 RETURNING *
-                """, DISPUTE_MAPPER, status, resolution, workspaceId, disputeId);
+                """, DISPUTE_MAPPER, status, resolution, Timestamp.from(effectiveAt), workspaceId, disputeId);
     }
 
     public void attachDisputeOpenJournal(UUID workspaceId, UUID disputeId, UUID journalEntryId) {

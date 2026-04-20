@@ -130,7 +130,7 @@ public class FinancialCloseStore {
                 """, PERIOD_MAPPER, workspaceId, periodId).stream().findFirst();
     }
 
-    public Optional<AccountingPeriod> closedPeriodForPosting(UUID workspaceId, UUID providerProfileId, String currencyCode, Instant occurredAt) {
+    public Optional<AccountingPeriod> closedPeriodForPosting(UUID workspaceId, Instant occurredAt) {
         return jdbcTemplate.query("""
                 SELECT fap.*
                 FROM financial_accounting_periods fap
@@ -138,18 +138,9 @@ public class FinancialCloseStore {
                   AND fap.status = 'CLOSED'
                   AND ? >= fap.period_start
                   AND ? < (fap.period_end + 1)
-                  AND EXISTS (
-                    SELECT 1
-                    FROM finalized_provider_statements fps
-                    WHERE fps.workspace_id = fap.workspace_id
-                      AND fps.accounting_period_id = fap.id
-                      AND fps.provider_profile_id = ?
-                      AND fps.currency_code = ?
-                      AND fps.status = 'FINALIZED'
-                  )
                 ORDER BY fap.period_start DESC
                 LIMIT 1
-                """, PERIOD_MAPPER, workspaceId, timestamp(occurredAt), timestamp(occurredAt), providerProfileId, currencyCode).stream().findFirst();
+                """, PERIOD_MAPPER, workspaceId, timestamp(occurredAt), timestamp(occurredAt)).stream().findFirst();
     }
 
     public AccountingPeriod closePeriod(UUID workspaceId, UUID periodId, UUID actorId, String reason) {

@@ -16,6 +16,7 @@ import com.kayledger.api.access.application.AccessPolicy;
 import com.kayledger.api.access.model.AccessScope;
 import com.kayledger.api.access.model.WorkspaceRole;
 import com.kayledger.api.investigation.application.InvestigationIndexingService;
+import com.kayledger.api.merchantevents.application.MerchantFinanceEventService;
 import com.kayledger.api.provider.model.ProviderStatementAmounts;
 import com.kayledger.api.provider.model.ProviderStatementTruth;
 import com.kayledger.api.reconciliation.model.ProviderTruthImport;
@@ -42,6 +43,7 @@ public class ReconciliationService {
     private final RegionService regionService;
     private final ObjectMapper objectMapper;
     private final InvestigationIndexingService investigationIndexingService;
+    private final MerchantFinanceEventService merchantFinanceEventService;
 
     public ReconciliationService(
             ReconciliationStore reconciliationStore,
@@ -49,13 +51,15 @@ public class ReconciliationService {
             AccessPolicy accessPolicy,
             RegionService regionService,
             ObjectMapper objectMapper,
-            InvestigationIndexingService investigationIndexingService) {
+            InvestigationIndexingService investigationIndexingService,
+            MerchantFinanceEventService merchantFinanceEventService) {
         this.reconciliationStore = reconciliationStore;
         this.reportingStore = reportingStore;
         this.accessPolicy = accessPolicy;
         this.regionService = regionService;
         this.objectMapper = objectMapper;
         this.investigationIndexingService = investigationIndexingService;
+        this.merchantFinanceEventService = merchantFinanceEventService;
     }
 
     @Transactional
@@ -114,6 +118,9 @@ public class ReconciliationService {
         int itemCount = compare(run, internalSummary.orElse(null), providerTruth.orElse(null));
         ReconciliationRun completed = reconciliationStore.completeRun(context.workspaceId(), run.id(), itemCount);
         reconciliationStore.markImportStatus(context.workspaceId(), truthImport.id(), itemCount == 0 ? "MATCHED" : "MISMATCHED", context.actorId());
+        if (itemCount > 0) {
+            emitReconciliationEvent(completed, MerchantFinanceEventService.EVENT_RECONCILIATION_RUN_MISMATCHED);
+        }
         indexReference(context.workspaceId(), "PROVIDER_RECONCILIATION_RUN", completed.id());
         for (ReconciliationItem item : reconciliationStore.listItems(context.workspaceId(), completed.id(), false)) {
             indexReference(context.workspaceId(), "PROVIDER_RECONCILIATION_ITEM", item.id());
@@ -170,6 +177,7 @@ public class ReconciliationService {
         ReconciliationItem resolved = reconciliationStore.resolveItem(context.workspaceId(), itemId, context.actorId(), outcome, resolutionNote.trim());
         reconciliationStore.refreshRunCounts(context.workspaceId(), resolved.reconciliationRunId());
         refreshImportStatusAfterItemChange(context.workspaceId(), resolved.reconciliationRunId(), context.actorId());
+        emitImportResolvedIfComplete(context.workspaceId(), resolved.reconciliationRunId());
         indexReference(context.workspaceId(), "PROVIDER_RECONCILIATION_ITEM", resolved.id());
         indexReference(context.workspaceId(), "PROVIDER_RECONCILIATION_RUN", resolved.reconciliationRunId());
         return resolved;
@@ -231,6 +239,47 @@ public class ReconciliationService {
         } else if (run.unresolvedItemCount() > 0) {
             reconciliationStore.markImportStatus(workspaceId, run.truthImportId(), "MISMATCHED", actorId);
         }
+    }
+
+    private void emitImportResolvedIfComplete(UUID workspaceId, UUID runId) {
+        ReconciliationRun run = reconciliationStore.findRun(workspaceId, runId)
+                .orElseThrow(() -> new NotFoundException("Provider reconciliation run was not found."));
+        reconciliationStore.findProviderTruthImport(workspaceId, run.truthImportId())
+                .filter(truthImport -> "RESOLVED".equals(truthImport.status()))
+                .ifPresent(truthImport -> merchantFinanceEventService.emit(
+                        workspaceId,
+                        truthImport.providerProfileId(),
+                        truthImport.currencyCode(),
+                        null,
+                        MerchantFinanceEventService.EVENT_RECONCILIATION_IMPORT_RESOLVED,
+                        "PROVIDER_TRUTH_IMPORT",
+                        truthImport.id(),
+                        reconciliationPayload(run)));
+    }
+
+    private void emitReconciliationEvent(ReconciliationRun run, String eventType) {
+        merchantFinanceEventService.emit(
+                run.workspaceId(),
+                run.providerProfileId(),
+                run.currencyCode(),
+                null,
+                eventType,
+                "PROVIDER_RECONCILIATION_RUN",
+                run.id(),
+                reconciliationPayload(run));
+    }
+
+    private Map<String, Object> reconciliationPayload(ReconciliationRun run) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("reconciliationRunId", run.id());
+        payload.put("truthImportId", run.truthImportId());
+        payload.put("providerProfileId", run.providerProfileId());
+        payload.put("currencyCode", run.currencyCode());
+        payload.put("status", run.status());
+        payload.put("unresolvedItemCount", run.unresolvedItemCount());
+        payload.put("resolvedItemCount", run.resolvedItemCount());
+        payload.put("sourceReference", run.sourceReference());
+        return payload;
     }
 
     private int compareAmount(ReconciliationRun run, ReconciliationMismatchType mismatchType, ProviderFinancialSummary internalSummary, ProviderTruthSnapshot providerTruth, String fieldName, long internalValue, long providerValue) {
