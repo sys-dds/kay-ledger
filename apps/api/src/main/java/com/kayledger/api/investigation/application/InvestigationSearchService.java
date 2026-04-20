@@ -66,6 +66,7 @@ public class InvestigationSearchService {
             addTerm(filters, "providerEventId", command.providerEventId());
             addTerm(filters, "externalReference", command.externalReference());
             addTerm(filters, "businessReferenceId", command.businessReferenceId());
+            addTerm(filters, "businessReferenceType", command.businessReferenceType());
             addTerm(filters, "subscriptionId", command.subscriptionId());
             addTerm(filters, "providerProfileId", command.providerProfileId());
             addTerm(filters, "referenceId", command.referenceId());
@@ -121,6 +122,7 @@ public class InvestigationSearchService {
             String subscriptionId,
             String providerProfileId,
             String referenceId,
+            String businessReferenceType,
             String status,
             String currencyCode,
             String mismatchType,
@@ -137,7 +139,7 @@ public class InvestigationSearchService {
                 String subscriptionId,
                 String providerProfileId,
                 String referenceId) {
-            this(paymentId, refundId, payoutId, disputeId, providerEventId, externalReference, businessReferenceId, subscriptionId, providerProfileId, referenceId, null, null, null, null, null);
+            this(paymentId, refundId, payoutId, disputeId, providerEventId, externalReference, businessReferenceId, subscriptionId, providerProfileId, referenceId, null, null, null, null, null, null);
         }
 
         public SearchCommand(
@@ -154,23 +156,23 @@ public class InvestigationSearchService {
                 String status,
                 String currencyCode,
                 String mismatchType) {
-            this(paymentId, refundId, payoutId, disputeId, providerEventId, externalReference, businessReferenceId, subscriptionId, providerProfileId, referenceId, status, currencyCode, mismatchType, null, null);
+            this(paymentId, refundId, payoutId, disputeId, providerEventId, externalReference, businessReferenceId, subscriptionId, providerProfileId, referenceId, null, status, currencyCode, mismatchType, null, null);
         }
 
         private static SearchCommand empty() {
-            return new SearchCommand(null, null, null, null, null, null, null, null, null, null, null, null, null, null, null);
+            return new SearchCommand(null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null);
         }
 
         private SearchCommand withReferenceId(String referenceId) {
-            return new SearchCommand(paymentId, refundId, payoutId, disputeId, providerEventId, externalReference, businessReferenceId, subscriptionId, providerProfileId, referenceId, status, currencyCode, mismatchType, periodStart, periodEnd);
+            return new SearchCommand(paymentId, refundId, payoutId, disputeId, providerEventId, externalReference, businessReferenceId, subscriptionId, providerProfileId, referenceId, businessReferenceType, status, currencyCode, mismatchType, periodStart, periodEnd);
         }
 
         private SearchCommand withProviderEventId(String providerEventId) {
-            return new SearchCommand(paymentId, refundId, payoutId, disputeId, providerEventId, externalReference, businessReferenceId, subscriptionId, providerProfileId, referenceId, status, currencyCode, mismatchType, periodStart, periodEnd);
+            return new SearchCommand(paymentId, refundId, payoutId, disputeId, providerEventId, externalReference, businessReferenceId, subscriptionId, providerProfileId, referenceId, businessReferenceType, status, currencyCode, mismatchType, periodStart, periodEnd);
         }
 
         private SearchCommand withExternalReference(String externalReference) {
-            return new SearchCommand(paymentId, refundId, payoutId, disputeId, providerEventId, externalReference, businessReferenceId, subscriptionId, providerProfileId, referenceId, status, currencyCode, mismatchType, periodStart, periodEnd);
+            return new SearchCommand(paymentId, refundId, payoutId, disputeId, providerEventId, externalReference, businessReferenceId, subscriptionId, providerProfileId, referenceId, businessReferenceType, status, currencyCode, mismatchType, periodStart, periodEnd);
         }
     }
 }

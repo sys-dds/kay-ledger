@@ -254,7 +254,8 @@ public class ReconciliationService {
                         MerchantFinanceEventService.EVENT_RECONCILIATION_IMPORT_RESOLVED,
                         "PROVIDER_TRUTH_IMPORT",
                         truthImport.id(),
-                        reconciliationPayload(run)));
+                        reconciliationPayload(run, truthImport.updatedAt()),
+                        truthImport.updatedAt()));
     }
 
     private void emitReconciliationEvent(ReconciliationRun run, String eventType) {
@@ -266,10 +267,15 @@ public class ReconciliationService {
                 eventType,
                 "PROVIDER_RECONCILIATION_RUN",
                 run.id(),
-                reconciliationPayload(run));
+                reconciliationPayload(run, run.completedAt() == null ? run.updatedAt() : run.completedAt()),
+                run.completedAt() == null ? run.updatedAt() : run.completedAt());
     }
 
     private Map<String, Object> reconciliationPayload(ReconciliationRun run) {
+        return reconciliationPayload(run, null);
+    }
+
+    private Map<String, Object> reconciliationPayload(ReconciliationRun run, java.time.Instant occurredAt) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("reconciliationRunId", run.id());
         payload.put("truthImportId", run.truthImportId());
@@ -279,6 +285,10 @@ public class ReconciliationService {
         payload.put("unresolvedItemCount", run.unresolvedItemCount());
         payload.put("resolvedItemCount", run.resolvedItemCount());
         payload.put("sourceReference", run.sourceReference());
+        if (occurredAt != null) {
+            payload.put("effectiveAt", occurredAt);
+            payload.put("occurredAt", occurredAt);
+        }
         return payload;
     }
 

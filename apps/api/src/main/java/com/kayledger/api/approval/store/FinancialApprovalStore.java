@@ -145,8 +145,8 @@ public class FinancialApprovalStore {
                 """, EXECUTION_MAPPER, actorId, leaseSeconds, retryableAfterFailure, workspaceId, requestId);
     }
 
-    public FinancialApprovalRequest markExecuted(UUID workspaceId, UUID requestId, UUID actorId) {
-        jdbcTemplate.update("""
+    public FinancialApprovalRequest markExecuted(UUID workspaceId, UUID requestId, UUID actorId, int executionAttemptCount) {
+        int updated = jdbcTemplate.update("""
                 UPDATE financial_approval_execution_state
                 SET execution_status = 'EXECUTED',
                     executed_by_actor_id = ?,
@@ -157,7 +157,12 @@ public class FinancialApprovalStore {
                 WHERE workspace_id = ?
                   AND approval_request_id = ?
                   AND execution_status = 'IN_PROGRESS'
-                """, actorId, workspaceId, requestId);
+                  AND executed_by_actor_id = ?
+                  AND execution_attempt_count = ?
+                """, actorId, workspaceId, requestId, actorId, executionAttemptCount);
+        if (updated == 0) {
+            throw new IllegalStateException("Approval execution claim is no longer current.");
+        }
         return jdbcTemplate.queryForObject("""
                 UPDATE financial_approval_requests
                 SET status = 'EXECUTED'
@@ -168,7 +173,7 @@ public class FinancialApprovalStore {
                 """, REQUEST_MAPPER, workspaceId, requestId);
     }
 
-    public void markExecutionFailed(UUID workspaceId, UUID requestId, String reason) {
+    public void markExecutionFailed(UUID workspaceId, UUID requestId, UUID actorId, int executionAttemptCount, String reason) {
         jdbcTemplate.update("""
                 UPDATE financial_approval_execution_state
                 SET execution_status = 'FAILED',
@@ -178,7 +183,10 @@ public class FinancialApprovalStore {
                 WHERE workspace_id = ?
                   AND approval_request_id = ?
                   AND execution_status <> 'EXECUTED'
-                """, reason, workspaceId, requestId);
+                  AND execution_status = 'IN_PROGRESS'
+                  AND executed_by_actor_id = ?
+                  AND execution_attempt_count = ?
+                """, reason, workspaceId, requestId, actorId, executionAttemptCount);
     }
 
     public void markBlocked(UUID workspaceId, UUID requestId, String reason) {

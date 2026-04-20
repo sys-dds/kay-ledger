@@ -150,18 +150,27 @@ public class FinancialApprovalService {
     public <T> T executeApproved(AccessContext context, UUID approvalRequestId, String actionType, String targetType, UUID targetId, Supplier<T> protectedMutation) {
         FinancialApprovalRequest request = validateApprovedForExecution(context, approvalRequestId, actionType, targetType, targetId);
         ApprovalPolicy policy = policy(actionType);
+        FinancialApprovalExecutionState execution = null;
         try {
-            transactionTemplate.executeWithoutResult(status -> financialApprovalStore.markExecutionInProgress(
+            execution = transactionTemplate.execute(status -> financialApprovalStore.markExecutionInProgress(
                     context.workspaceId(),
                     request.id(),
                     context.actorId(),
                     properties.getExecutionLeaseSeconds(),
                     policy.retryAfterFailure()));
             T result = protectedMutation.get();
-            financialApprovalStore.markExecuted(context.workspaceId(), request.id(), context.actorId());
+            financialApprovalStore.markExecuted(context.workspaceId(), request.id(), context.actorId(), execution.executionAttemptCount());
             return result;
         } catch (RuntimeException exception) {
-            transactionTemplate.executeWithoutResult(status -> financialApprovalStore.markExecutionFailed(context.workspaceId(), request.id(), failureReason(exception)));
+            FinancialApprovalExecutionState claimedExecution = execution;
+            if (claimedExecution != null) {
+                transactionTemplate.executeWithoutResult(status -> financialApprovalStore.markExecutionFailed(
+                        context.workspaceId(),
+                        request.id(),
+                        context.actorId(),
+                        claimedExecution.executionAttemptCount(),
+                        failureReason(exception)));
+            }
             throw exception;
         }
     }

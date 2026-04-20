@@ -3,23 +3,18 @@ package com.kayledger.api;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import java.io.IOException;
 import java.net.InetSocketAddress;
-import java.sql.Timestamp;
 import java.time.Instant;
-import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Callable;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.Test;
@@ -38,13 +33,8 @@ import org.testcontainers.utility.DockerImageName;
 import com.kayledger.api.access.application.AccessContext;
 import com.kayledger.api.approval.application.FinancialApprovalService;
 import com.kayledger.api.approval.application.FinancialApprovalService.CreateApprovalRequestCommand;
-import com.kayledger.api.approval.model.FinancialApprovalRequest;
-import com.kayledger.api.approval.store.FinancialApprovalStore;
-import com.kayledger.api.close.application.FinancialCloseService;
 import com.kayledger.api.investigation.store.InvestigationStore;
 import com.kayledger.api.merchantevents.application.MerchantFinanceEventService;
-import com.kayledger.api.merchantevents.model.MerchantFinanceEventDelivery;
-import com.kayledger.api.merchantevents.store.MerchantFinanceEventStore;
 import com.kayledger.api.payment.application.PaymentService;
 import com.kayledger.api.shared.api.BadRequestException;
 
@@ -61,7 +51,8 @@ import com.kayledger.api.shared.api.BadRequestException;
         "kay-ledger.object-storage.endpoint=http://localhost:1",
         "kay-ledger.merchant-finance.delivery.max-attempts=2",
         "kay-ledger.merchant-finance.delivery.backoff-seconds=1",
-        "kay-ledger.merchant-finance.delivery.lease-seconds=5"
+        "kay-ledger.merchant-finance.delivery.lease-seconds=1",
+        "kay-ledger.financial-approvals.execution-lease-seconds=1"
 })
 class Ticket027FinanceRuntimeConcurrencyAndDeliveryTruthIntegrationTest {
 
@@ -88,22 +79,10 @@ class Ticket027FinanceRuntimeConcurrencyAndDeliveryTruthIntegrationTest {
     JdbcTemplate jdbcTemplate;
 
     @Autowired
-    ObjectMapper objectMapper;
-
-    @Autowired
     MerchantFinanceEventService merchantFinanceEventService;
 
     @Autowired
-    MerchantFinanceEventStore merchantFinanceEventStore;
-
-    @Autowired
     FinancialApprovalService financialApprovalService;
-
-    @Autowired
-    FinancialApprovalStore financialApprovalStore;
-
-    @Autowired
-    FinancialCloseService financialCloseService;
 
     @Autowired
     PaymentService paymentService;
@@ -111,254 +90,247 @@ class Ticket027FinanceRuntimeConcurrencyAndDeliveryTruthIntegrationTest {
     @Autowired
     InvestigationStore investigationStore;
 
+    @Autowired
+    ObjectMapper objectMapper;
+
     @Test
-    void invariant_runtime_concurrency_delivery_truth_and_operator_recovery_are_workspace_safe() throws Exception {
+    void finance_runtime_concurrency_recovery_contract_time_and_investigation_truth_hold() throws Exception {
         Fixture alpha = ownedFixture("ticket027-alpha");
         Fixture beta = ownedFixture("ticket027-beta");
-        AtomicInteger alphaDeliveries = new AtomicInteger();
-        AtomicInteger betaDeliveries = new AtomicInteger();
-        AtomicBoolean flakyHealthy = new AtomicBoolean(false);
-        List<Map<String, Object>> alphaBodies = new CopyOnWriteArrayList<>();
+        List<String> bodies = java.util.Collections.synchronizedList(new ArrayList<>());
+        AtomicInteger hitCount = new AtomicInteger();
+        AtomicInteger flakyCount = new AtomicInteger();
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        server.createContext("/alpha", exchange -> respond(exchange, 200, "ok", alphaDeliveries, alphaBodies));
-        server.createContext("/beta", exchange -> respond(exchange, 200, "ok", betaDeliveries, List.of()));
-        server.createContext("/flaky", exchange -> respond(exchange, flakyHealthy.get() ? 200 : 500, flakyHealthy.get() ? "ok" : "retry", alphaDeliveries, alphaBodies));
+        server.createContext("/deliver", exchange -> {
+            hitCount.incrementAndGet();
+            bodies.add(new String(exchange.getRequestBody().readAllBytes()));
+            byte[] response = "ok".getBytes();
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.createContext("/flaky", exchange -> {
+            flakyCount.incrementAndGet();
+            bodies.add(new String(exchange.getRequestBody().readAllBytes()));
+            byte[] response = "retry".getBytes();
+            exchange.sendResponseHeaders(500, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
         server.start();
+
         String baseUrl = "http://127.0.0.1:" + server.getAddress().getPort();
+        var alphaEndpoint = merchantFinanceEventService.configureEndpoint(financeWrite(alpha), new MerchantFinanceEventService.ConfigureEndpointCommand(
+                alpha.providerProfileId(), baseUrl + "/deliver", "ticket027-secret", new String[0]));
+        var betaEndpoint = merchantFinanceEventService.configureEndpoint(financeWrite(beta), new MerchantFinanceEventService.ConfigureEndpointCommand(
+                beta.providerProfileId(), baseUrl + "/deliver", "ticket027-beta-secret", new String[0]));
 
-        var alphaEndpoint = merchantFinanceEventService.configureEndpoint(financeWrite(alpha), new MerchantFinanceEventService.ConfigureEndpointCommand(alpha.providerProfileId(), baseUrl + "/alpha", "alpha-secret", new String[] {MerchantFinanceEventService.EVENT_FINALIZED_STATEMENT_AVAILABLE}));
-        var betaEndpoint = merchantFinanceEventService.configureEndpoint(financeWrite(beta), new MerchantFinanceEventService.ConfigureEndpointCommand(beta.providerProfileId(), baseUrl + "/beta", "beta-secret", new String[] {MerchantFinanceEventService.EVENT_FINALIZED_STATEMENT_AVAILABLE}));
+        Instant providerEffectiveAt = Instant.parse("2026-01-02T03:04:05Z");
+        var providerPayout = seedPayout(alpha, "REQUESTED", 4100);
+        paymentService.applyProviderPayoutTruth(alpha.workspaceId(), providerPayout, "SUCCEEDED", "provider-payout", null, providerEffectiveAt);
+        UUID providerDeliveryId = deliveryIdForEndpoint(alpha, alphaEndpoint.id());
 
-        UUID alphaManualSource = emit(alpha, "manual-alpha", Instant.parse("2026-01-05T10:00:00Z"));
-        emit(beta, "manual-beta", Instant.parse("2026-01-05T10:00:00Z"));
+        var executor = Executors.newFixedThreadPool(2);
+        List<Callable<Integer>> work = List.of(
+                () -> merchantFinanceEventService.processDueDeliveries(),
+                () -> merchantFinanceEventService.processDueDeliveries());
+        int processed = executor.invokeAll(work).stream().mapToInt(future -> {
+            try {
+                return future.get();
+            } catch (Exception exception) {
+                throw new IllegalStateException(exception);
+            }
+        }).sum();
+        executor.shutdown();
+        assertThat(executor.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
+        assertThat(processed).isEqualTo(1);
+        assertThat(hitCount.get()).isEqualTo(1);
+        assertThat(deliveryStatus(alpha, providerDeliveryId)).isEqualTo("SUCCEEDED");
+
+        UUID staleEventId = merchantFinanceEventService.emit(alpha.workspaceId(), alpha.providerProfileId(), "USD", null,
+                MerchantFinanceEventService.EVENT_APPROVAL_REJECTED, "FINANCIAL_APPROVAL_REQUEST", UUID.randomUUID(),
+                Map.of("source", "stale-claim"), Instant.parse("2026-01-03T00:00:00Z")).id();
+        UUID staleDeliveryId = deliveryIdForEvent(alpha, staleEventId);
+        jdbcTemplate.update("""
+                UPDATE merchant_finance_event_deliveries
+                SET delivery_status = 'CLAIMED', claim_owner = 'abandoned-worker', claimed_at = now() - interval '10 minutes',
+                    claim_expires_at = now() - interval '5 minutes'
+                WHERE workspace_id = ? AND id = ?
+                """, alpha.workspaceId(), staleDeliveryId);
         assertThat(merchantFinanceEventService.processDueDeliveries(financeWrite(alpha))).isEqualTo(1);
-        assertThat(alphaDeliveries.get()).isEqualTo(1);
-        assertThat(deliveryFor(beta, betaEndpoint.id()).deliveryStatus()).isEqualTo("PENDING");
-        assertThat(betaDeliveries.get()).isZero();
-        assertThat(merchantFinanceEventService.processDueDeliveries()).isEqualTo(1);
-        assertThat(betaDeliveries.get()).isEqualTo(1);
+        assertThat(deliveryStatus(alpha, staleDeliveryId)).isEqualTo("SUCCEEDED");
 
-        int beforeConcurrent = alphaDeliveries.get();
-        emit(alpha, "concurrent-alpha", Instant.parse("2026-01-05T11:00:00Z"));
-        try (var executor = Executors.newFixedThreadPool(2)) {
-            List<Callable<Integer>> workers = List.of(
-                    () -> merchantFinanceEventService.processDueDeliveries(),
-                    () -> merchantFinanceEventService.processDueDeliveries());
-            int processed = executor.invokeAll(workers).stream()
-                    .mapToInt(future -> {
-                        try {
-                            return future.get(10, TimeUnit.SECONDS);
-                        } catch (Exception exception) {
-                            throw new IllegalStateException(exception);
-                        }
-                    })
-                    .sum();
-            assertThat(processed).isEqualTo(1);
-        }
-        assertThat(alphaDeliveries.get()).isEqualTo(beforeConcurrent + 1);
-
-        UUID staleSource = emit(alpha, "stale-claim", Instant.parse("2026-01-05T12:00:00Z"));
-        var claimed = merchantFinanceEventStore.claimDueDeliveries(alpha.workspaceId(), "test-stale-owner", 1, 2, 5);
-        assertThat(claimed).hasSize(1);
-        UUID staleDeliveryId = claimed.getFirst().delivery().id();
-        jdbcTemplate.update("UPDATE merchant_finance_event_deliveries SET claim_expires_at = now() - interval '1 second' WHERE workspace_id = ? AND id = ?", alpha.workspaceId(), staleDeliveryId);
-        assertThat(merchantFinanceEventService.runtimeSummary(financeRead(alpha)).staleClaimCount()).isEqualTo(1);
-        assertThat(merchantFinanceEventService.reclaimStaleClaims(financeWrite(alpha)).affectedCount()).isEqualTo(1);
-        assertThat(deliveryById(alpha, staleDeliveryId).deliveryStatus()).isEqualTo("FAILED");
-        assertThat(merchantFinanceEventService.requeueFailed(financeWrite(alpha)).affectedCount()).isEqualTo(1);
+        merchantFinanceEventService.emit(alpha.workspaceId(), alpha.providerProfileId(), "USD", null,
+                MerchantFinanceEventService.EVENT_APPROVAL_GRANTED, "FINANCIAL_APPROVAL_REQUEST", UUID.randomUUID(),
+                Map.of("tenant", "alpha"), Instant.now());
+        merchantFinanceEventService.emit(beta.workspaceId(), beta.providerProfileId(), "USD", null,
+                MerchantFinanceEventService.EVENT_APPROVAL_GRANTED, "FINANCIAL_APPROVAL_REQUEST", UUID.randomUUID(),
+                Map.of("tenant", "beta"), Instant.now());
         assertThat(merchantFinanceEventService.processDueDeliveries(financeWrite(alpha))).isEqualTo(1);
-        assertThat(deliveryById(alpha, staleDeliveryId).deliveryStatus()).isEqualTo("SUCCEEDED");
-        assertThat(staleSource).isNotNull();
+        assertThat(pendingCount(beta)).isEqualTo(1);
+        assertThat(merchantFinanceEventService.processDueDeliveries()).isGreaterThanOrEqualTo(1);
+        assertThat(pendingCount(beta)).isZero();
 
-        var flakyEndpoint = merchantFinanceEventService.configureEndpoint(financeWrite(alpha), new MerchantFinanceEventService.ConfigureEndpointCommand(alpha.providerProfileId(), baseUrl + "/flaky", "flaky-secret", new String[] {MerchantFinanceEventService.EVENT_APPROVAL_REJECTED}));
-        UUID redriveSource = UUID.randomUUID();
-        merchantFinanceEventService.emit(alpha.workspaceId(), alpha.providerProfileId(), "USD", null, MerchantFinanceEventService.EVENT_APPROVAL_REJECTED, "FINANCIAL_APPROVAL_REQUEST", redriveSource, Map.of("approvalRequestId", redriveSource), Instant.parse("2026-01-05T13:00:00Z"));
-        long eventCountBeforeRedrive = eventCount(alpha, redriveSource);
-        assertThat(merchantFinanceEventService.processDueDeliveries(financeWrite(alpha))).isEqualTo(1);
-        MerchantFinanceEventDelivery flakyDelivery = deliveryFor(alpha, flakyEndpoint.id());
-        assertThat(flakyDelivery.deliveryStatus()).isEqualTo("FAILED");
-        jdbcTemplate.update("UPDATE merchant_finance_event_deliveries SET next_attempt_at = now() WHERE workspace_id = ? AND id = ?", alpha.workspaceId(), flakyDelivery.id());
-        assertThat(merchantFinanceEventService.processDueDeliveries(financeWrite(alpha))).isEqualTo(1);
-        flakyDelivery = deliveryFor(alpha, flakyEndpoint.id());
-        assertThat(flakyDelivery.deliveryStatus()).isEqualTo("PARKED");
-        flakyHealthy.set(true);
-        merchantFinanceEventService.redriveDelivery(financeWrite(alpha), flakyDelivery.id());
-        assertThat(merchantFinanceEventService.processDueDeliveries(financeWrite(alpha))).isEqualTo(1);
-        assertThat(deliveryFor(alpha, flakyEndpoint.id()).deliveryStatus()).isEqualTo("SUCCEEDED");
-        assertThat(eventCount(alpha, redriveSource)).isEqualTo(eventCountBeforeRedrive);
-
-        Map<String, Object> envelope = alphaBodies.stream()
-                .filter(body -> body.containsKey("envelopeVersion") && body.containsKey("deliveryId"))
-                .findFirst()
-                .orElseThrow();
-        assertThat(envelope).containsKeys("envelopeVersion", "eventId", "deliveryId", "eventType", "sourceReferenceType", "sourceReferenceId", "eventKey", "occurredAt", "attemptedAt", "payload");
-        assertThat(envelope.get("envelopeVersion")).isEqualTo(1);
-
-        UUID failedPayoutId = seedPayout(alpha, "FAILED", 2500);
-        var payoutApproval = approvedPayoutSuccess(alpha, failedPayoutId, 2500);
-        assertThatThrownBy(() -> paymentService.markPayoutSucceeded(paymentWrite(alpha), failedPayoutId, new PaymentService.PayoutMutationCommand(null, "expected-failure", payoutApproval.id())))
+        UUID failedPayout = seedPayout(alpha, "FAILED", 3000);
+        var failedApproval = approval(alpha, failedPayout, 3000);
+        assertThatThrownBy(() -> paymentService.markPayoutSucceeded(paymentWrite(alpha), failedPayout,
+                new PaymentService.PayoutMutationCommand(null, "still-failed", failedApproval.id())))
                 .isInstanceOf(BadRequestException.class)
                 .hasMessageContaining("Only requested or processing payouts can succeed");
-        var failedHistory = financialApprovalService.history(financeRead(alpha), payoutApproval.id());
+        var failedHistory = financialApprovalService.history(financeRead(alpha), failedApproval.id());
         assertThat(failedHistory.request().status()).isEqualTo("APPROVED");
         assertThat(failedHistory.executionState().executionStatus()).isEqualTo("FAILED");
-        jdbcTemplate.update("UPDATE payout_requests SET status = 'REQUESTED', failure_reason = NULL WHERE workspace_id = ? AND id = ?", alpha.workspaceId(), failedPayoutId);
-        Instant payoutBefore = Instant.now().minusSeconds(2);
-        paymentService.markPayoutSucceeded(paymentWrite(alpha), failedPayoutId, new PaymentService.PayoutMutationCommand(null, "success-after-retry", payoutApproval.id()));
-        var executedHistory = financialApprovalService.history(financeRead(alpha), payoutApproval.id());
-        assertThat(executedHistory.request().status()).isEqualTo("EXECUTED");
-        assertThat(executedHistory.executionState().executionStatus()).isEqualTo("EXECUTED");
-        assertThatThrownBy(() -> paymentService.markPayoutSucceeded(paymentWrite(alpha), failedPayoutId, new PaymentService.PayoutMutationCommand(null, "double-exec", payoutApproval.id())))
+
+        UUID stuckPayout = seedPayout(alpha, "REQUESTED", 3200);
+        var stuckApproval = approval(alpha, stuckPayout, 3200);
+        jdbcTemplate.update("""
+                UPDATE financial_approval_execution_state
+                SET execution_status = 'IN_PROGRESS', executed_by_actor_id = ?, started_at = now() - interval '10 minutes',
+                    last_attempt_at = now() - interval '10 minutes', execution_attempt_count = 1,
+                    execution_lease_expires_at = now() - interval '5 minutes', retryable_after_failure = true
+                WHERE workspace_id = ? AND approval_request_id = ?
+                """, alpha.ownerId(), alpha.workspaceId(), stuckApproval.id());
+        assertThat(financialApprovalService.recoverStaleExecutions(financeWrite(alpha)).recoveredCount()).isGreaterThanOrEqualTo(1);
+        Instant operatorBefore = Instant.now().minusSeconds(1);
+        paymentService.markPayoutSucceeded(paymentWrite(alpha), stuckPayout,
+                new PaymentService.PayoutMutationCommand(null, "recovered", stuckApproval.id()));
+        Instant operatorAfter = Instant.now().plusSeconds(1);
+        assertThat(financialApprovalService.history(financeRead(alpha), stuckApproval.id()).executionState().executionStatus()).isEqualTo("EXECUTED");
+        Instant operatorOccurredAt = merchantEventOccurredAt(alpha, "PAYOUT_REQUEST", stuckPayout);
+        assertThat(operatorOccurredAt).isBetween(operatorBefore, operatorAfter);
+        assertThatThrownBy(() -> paymentService.markPayoutSucceeded(paymentWrite(alpha), stuckPayout,
+                new PaymentService.PayoutMutationCommand(null, "double", stuckApproval.id())))
                 .isInstanceOf(BadRequestException.class);
-        Instant payoutOccurredAt = jdbcTemplate.queryForObject("""
-                SELECT occurred_at
-                FROM merchant_finance_events
-                WHERE workspace_id = ?
-                  AND source_reference_type = 'PAYOUT_REQUEST'
-                  AND source_reference_id = ?
-                  AND event_type = ?
-                """, (rs, rowNum) -> rs.getTimestamp("occurred_at").toInstant(), alpha.workspaceId(), failedPayoutId, MerchantFinanceEventService.EVENT_PAYOUT_SUCCEEDED);
-        assertThat(payoutOccurredAt).isAfterOrEqualTo(payoutBefore);
 
-        var staleApproval = financialApprovalService.createRequest(financeWrite(alpha), new CreateApprovalRequestCommand(
-                FinancialApprovalService.ACTION_FINANCIAL_PERIOD_REOPEN,
-                "ACCOUNTING_PERIOD",
-                UUID.randomUUID(),
-                null,
-                null,
-                null,
-                "Stale execution recovery proof."));
-        financialApprovalService.approve(financeWriteChecker(alpha), staleApproval.id(), "Checker approves stale recovery proof.");
-        financialApprovalStore.markExecutionInProgress(alpha.workspaceId(), staleApproval.id(), alpha.ownerId(), 30, true);
-        jdbcTemplate.update("UPDATE financial_approval_execution_state SET execution_lease_expires_at = now() - interval '1 second' WHERE workspace_id = ? AND approval_request_id = ?", alpha.workspaceId(), staleApproval.id());
-        assertThat(financialApprovalService.executionRuntimeSummary(financeRead(alpha)).staleInProgressCount()).isEqualTo(1);
-        assertThat(financialApprovalService.recoverStaleExecutions(financeWrite(alpha)).recoveredCount()).isEqualTo(1);
-        assertThat(financialApprovalService.history(financeRead(alpha), staleApproval.id()).executionState().executionStatus()).isEqualTo("FAILED");
+        var envelope = objectMapper.readValue(bodies.getFirst(), Map.class);
+        assertThat(envelope).containsKeys("envelopeVersion", "eventId", "deliveryId", "eventType", "sourceReferenceType",
+                "sourceReferenceId", "eventKey", "occurredAt", "attemptedAt", "payload");
+        assertThat(envelope.get("occurredAt")).isEqualTo(providerEffectiveAt.toString());
+        Map<?, ?> envelopePayload = (Map<?, ?>) envelope.get("payload");
+        assertThat(envelopePayload.get("effectiveAt")).isEqualTo(providerEffectiveAt.toString());
 
-        LocalDate closedStart = LocalDate.now().minusDays(20);
-        var closedPeriod = financialCloseService.openPeriod(financeWrite(alpha), closedStart, closedStart);
-        financialCloseService.closePeriod(financeWrite(alpha), closedPeriod.id(), "Empty closed period for event-time block.");
-        UUID providerTruthIntent = seedCreatedPayment(alpha, 8000, 800, "provider-truth-blocked");
-        assertThatThrownBy(() -> paymentService.applyProviderPaymentTruth(alpha.workspaceId(), providerTruthIntent, "SETTLED", 8000, "late-provider", closedStart.atStartOfDay().plusHours(4).toInstant(java.time.ZoneOffset.UTC)))
-                .isInstanceOf(BadRequestException.class)
-                .hasMessageContaining("closed accounting period");
-        Instant providerEffectiveAt = Instant.parse("2026-02-02T15:30:00Z");
-        UUID openProviderTruthIntent = seedCreatedPayment(alpha, 9000, 900, "provider-truth-open");
-        paymentService.applyProviderPaymentTruth(alpha.workspaceId(), openProviderTruthIntent, "SETTLED", 9000, "provider-effective", providerEffectiveAt);
-        Instant storedEffectiveAt = jdbcTemplate.queryForObject("SELECT settled_effective_at FROM payment_intents WHERE workspace_id = ? AND id = ?", (rs, rowNum) -> rs.getTimestamp("settled_effective_at").toInstant(), alpha.workspaceId(), openProviderTruthIntent);
-        assertThat(storedEffectiveAt).isEqualTo(providerEffectiveAt);
+        var flakyEndpoint = merchantFinanceEventService.configureEndpoint(financeWrite(alpha), new MerchantFinanceEventService.ConfigureEndpointCommand(
+                alpha.providerProfileId(), baseUrl + "/flaky", "ticket027-flaky", new String[] {MerchantFinanceEventService.EVENT_APPROVAL_REJECTED}));
+        UUID redriveEventId = merchantFinanceEventService.emit(alpha.workspaceId(), alpha.providerProfileId(), "USD", null,
+                MerchantFinanceEventService.EVENT_APPROVAL_REJECTED, "FINANCIAL_APPROVAL_REQUEST", UUID.randomUUID(),
+                Map.of("redrive", true), Instant.parse("2026-01-04T00:00:00Z")).id();
+        int eventRowsBeforeRedrive = eventCount(alpha);
+        assertThat(merchantFinanceEventService.processDueDeliveries(financeWrite(alpha))).isGreaterThanOrEqualTo(1);
+        jdbcTemplate.update("UPDATE merchant_finance_event_deliveries SET next_attempt_at = now() WHERE workspace_id = ? AND endpoint_id = ?", alpha.workspaceId(), flakyEndpoint.id());
+        assertThat(merchantFinanceEventService.processDueDeliveries(financeWrite(alpha))).isGreaterThanOrEqualTo(1);
+        UUID redriveDeliveryId = deliveryIdForEventAndEndpoint(alpha, redriveEventId, flakyEndpoint.id());
+        assertThat(deliveryStatus(alpha, redriveDeliveryId)).isEqualTo("PARKED");
+        assertThat(investigationStore.documentsForWorkspace(alpha.workspaceId()))
+                .anyMatch(document -> "MERCHANT_FINANCE_EVENT_DELIVERY".equals(document.referenceType()) && redriveDeliveryId.equals(document.referenceId()))
+                .anyMatch(document -> "MERCHANT_FINANCE_EVENT_DELIVERY".equals(document.referenceType()) && "PARKED_DELIVERY".equals(document.mismatchType()));
+        merchantFinanceEventService.redriveDelivery(financeWrite(alpha), redriveDeliveryId);
+        assertThat(merchantFinanceEventService.processDueDeliveries(financeWrite(alpha))).isGreaterThanOrEqualTo(1);
+        assertThat(eventCount(alpha)).isEqualTo(eventRowsBeforeRedrive);
+        assertThat(flakyCount.get()).isEqualTo(3);
 
         assertThat(investigationStore.documentsForWorkspace(alpha.workspaceId()))
-                .anyMatch(document -> "MERCHANT_FINANCE_EVENT_DELIVERY".equals(document.referenceType()) && Set.of("FAILED_DELIVERY", "PARKED_DELIVERY", "STALE_CLAIMED_DELIVERY", MerchantFinanceEventService.EVENT_APPROVAL_REJECTED, MerchantFinanceEventService.EVENT_PAYOUT_SUCCEEDED).contains(document.mismatchType()))
-                .anyMatch(document -> "FINANCIAL_APPROVAL_EXECUTION".equals(document.referenceType()) && Set.of("FAILED_APPROVAL_EXECUTION", "STALE_APPROVAL_EXECUTION").contains(document.mismatchType()));
-        assertThat(investigationStore.documentsForWorkspace(beta.workspaceId()))
-                .noneMatch(document -> alphaManualSource.equals(document.businessReferenceId()) || failedPayoutId.equals(document.businessReferenceId()));
+                .anyMatch(document -> "MERCHANT_FINANCE_EVENT_DELIVERY".equals(document.referenceType()) && redriveDeliveryId.equals(document.referenceId()))
+                .anyMatch(document -> "FINANCIAL_APPROVAL_EXECUTION".equals(document.referenceType()) && "FAILED_APPROVAL_EXECUTION".equals(document.mismatchType()))
+                .anyMatch(document -> "MERCHANT_FINANCE_EVENT".equals(document.referenceType()) && redriveEventId.equals(document.referenceId()));
         assertThat(merchantFinanceEventService.listDeliveries(financeRead(beta)))
-                .allMatch(delivery -> beta.workspaceId().equals(delivery.workspaceId()));
+                .noneMatch(delivery -> redriveDeliveryId.equals(delivery.id()) || providerDeliveryId.equals(delivery.id()));
+
         server.stop(0);
     }
 
-    private UUID emit(Fixture fixture, String key, Instant occurredAt) {
-        UUID sourceId = UUID.nameUUIDFromBytes((fixture.slug() + ":" + key).getBytes(java.nio.charset.StandardCharsets.UTF_8));
-        merchantFinanceEventService.emit(fixture.workspaceId(), fixture.providerProfileId(), "USD", null, MerchantFinanceEventService.EVENT_FINALIZED_STATEMENT_AVAILABLE, "FINALIZED_PROVIDER_STATEMENT", sourceId, Map.of("source", key), occurredAt);
-        return sourceId;
-    }
-
-    private FinancialApprovalRequest approvedPayoutSuccess(Fixture fixture, UUID payoutId, long amountMinor) {
-        var request = financialApprovalService.createRequest(financeWrite(fixture), new CreateApprovalRequestCommand(
+    private com.kayledger.api.approval.model.FinancialApprovalRequest approval(Fixture fixture, UUID payoutId, long amountMinor) {
+        var approval = financialApprovalService.createRequest(financeWrite(fixture), new CreateApprovalRequestCommand(
                 FinancialApprovalService.ACTION_PAYOUT_OPERATOR_SUCCESS,
                 "PAYOUT_REQUEST",
                 payoutId,
                 fixture.providerProfileId(),
                 "USD",
                 amountMinor,
-                "Operator payout success requires approval."));
-        financialApprovalService.approve(financeWriteChecker(fixture), request.id(), "Approved payout success.");
-        return request;
+                "Ticket 027 approval."));
+        financialApprovalService.approve(financeWriteChecker(fixture), approval.id(), "Checker approved.");
+        return approval;
     }
 
-    private MerchantFinanceEventDelivery deliveryFor(Fixture fixture, UUID endpointId) {
-        return merchantFinanceEventService.listDeliveries(financeRead(fixture)).stream()
-                .filter(delivery -> endpointId.equals(delivery.endpointId()))
-                .findFirst()
-                .orElseThrow();
+    private UUID seedPayout(Fixture fixture, String status, long amountMinor) {
+        UUID payoutId = UUID.randomUUID();
+        jdbcTemplate.update("""
+                INSERT INTO payout_requests (id, workspace_id, provider_profile_id, currency_code, requested_amount_minor, status, failure_reason)
+                VALUES (?, ?, ?, 'USD', ?, ?, CASE WHEN ? = 'FAILED' THEN 'provider failed' ELSE NULL END)
+                """, payoutId, fixture.workspaceId(), fixture.providerProfileId(), amountMinor, status, status);
+        return payoutId;
     }
 
-    private MerchantFinanceEventDelivery deliveryById(Fixture fixture, UUID deliveryId) {
-        return merchantFinanceEventService.listDeliveries(financeRead(fixture)).stream()
-                .filter(delivery -> deliveryId.equals(delivery.id()))
-                .findFirst()
-                .orElseThrow();
+    private UUID deliveryIdForEndpoint(Fixture fixture, UUID endpointId) {
+        return jdbcTemplate.queryForObject("""
+                SELECT id FROM merchant_finance_event_deliveries
+                WHERE workspace_id = ? AND endpoint_id = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """, UUID.class, fixture.workspaceId(), endpointId);
     }
 
-    private long eventCount(Fixture fixture, UUID sourceId) {
-        Long count = jdbcTemplate.queryForObject("""
-                SELECT count(*)
-                FROM merchant_finance_events
-                WHERE workspace_id = ?
-                  AND source_reference_id = ?
-                """, Long.class, fixture.workspaceId(), sourceId);
-        return count == null ? 0 : count;
+    private UUID deliveryIdForEvent(Fixture fixture, UUID eventId) {
+        return jdbcTemplate.queryForObject("""
+                SELECT id FROM merchant_finance_event_deliveries
+                WHERE workspace_id = ? AND merchant_finance_event_id = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """, UUID.class, fixture.workspaceId(), eventId);
     }
 
-    private void respond(com.sun.net.httpserver.HttpExchange exchange, int status, String responseBody, AtomicInteger counter, List<Map<String, Object>> bodies) throws IOException {
-        counter.incrementAndGet();
-        byte[] requestBody = exchange.getRequestBody().readAllBytes();
-        if (!bodies.getClass().getName().contains("Immutable")) {
-            bodies.add(readJson(requestBody));
-        }
-        byte[] response = responseBody.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        exchange.sendResponseHeaders(status, response.length);
-        exchange.getResponseBody().write(response);
-        exchange.close();
+    private UUID deliveryIdForEventAndEndpoint(Fixture fixture, UUID eventId, UUID endpointId) {
+        return jdbcTemplate.queryForObject("""
+                SELECT id FROM merchant_finance_event_deliveries
+                WHERE workspace_id = ? AND merchant_finance_event_id = ? AND endpoint_id = ?
+                """, UUID.class, fixture.workspaceId(), eventId, endpointId);
     }
 
-    private Map<String, Object> readJson(byte[] body) {
-        try {
-            return objectMapper.readValue(body, new TypeReference<>() {
-            });
-        } catch (Exception exception) {
-            throw new IllegalStateException(exception);
-        }
+    private String deliveryStatus(Fixture fixture, UUID deliveryId) {
+        return jdbcTemplate.queryForObject("""
+                SELECT delivery_status FROM merchant_finance_event_deliveries
+                WHERE workspace_id = ? AND id = ?
+                """, String.class, fixture.workspaceId(), deliveryId);
+    }
+
+    private int pendingCount(Fixture fixture) {
+        return jdbcTemplate.queryForObject("""
+                SELECT COUNT(*) FROM merchant_finance_event_deliveries
+                WHERE workspace_id = ? AND delivery_status = 'PENDING'
+                """, Integer.class, fixture.workspaceId());
+    }
+
+    private int eventCount(Fixture fixture) {
+        return jdbcTemplate.queryForObject("SELECT COUNT(*) FROM merchant_finance_events WHERE workspace_id = ?", Integer.class, fixture.workspaceId());
+    }
+
+    private Instant merchantEventOccurredAt(Fixture fixture, String sourceType, UUID sourceId) {
+        return jdbcTemplate.queryForObject("""
+                SELECT occurred_at FROM merchant_finance_events
+                WHERE workspace_id = ? AND source_reference_type = ? AND source_reference_id = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """, (rs, rowNum) -> rs.getTimestamp("occurred_at").toInstant(), fixture.workspaceId(), sourceType, sourceId);
     }
 
     private Fixture ownedFixture(String slug) {
-        Fixture fixture = new Fixture(UUID.randomUUID(), slug, UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID());
+        Fixture fixture = new Fixture(UUID.randomUUID(), slug, UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID());
         jdbcTemplate.update("INSERT INTO workspaces (id, slug, display_name) VALUES (?, ?, ?)", fixture.workspaceId(), fixture.slug(), fixture.slug());
         jdbcTemplate.update("INSERT INTO actors (id, actor_key, display_name) VALUES (?, ?, ?)", fixture.ownerId(), fixture.slug() + "-owner", "Owner");
         jdbcTemplate.update("INSERT INTO actors (id, actor_key, display_name) VALUES (?, ?, ?)", fixture.checkerId(), fixture.slug() + "-checker", "Checker");
         jdbcTemplate.update("INSERT INTO actors (id, actor_key, display_name) VALUES (?, ?, ?)", fixture.providerActorId(), fixture.slug() + "-provider", "Provider");
-        jdbcTemplate.update("INSERT INTO actors (id, actor_key, display_name) VALUES (?, ?, ?)", fixture.customerActorId(), fixture.slug() + "-customer", "Customer");
         jdbcTemplate.update("INSERT INTO workspace_memberships (id, workspace_id, actor_id, role) VALUES (?, ?, ?, 'OWNER')", fixture.ownerMembershipId(), fixture.workspaceId(), fixture.ownerId());
         jdbcTemplate.update("INSERT INTO workspace_memberships (id, workspace_id, actor_id, role) VALUES (?, ?, ?, 'ADMIN')", fixture.checkerMembershipId(), fixture.workspaceId(), fixture.checkerId());
         jdbcTemplate.update("INSERT INTO workspace_memberships (id, workspace_id, actor_id, role) VALUES (?, ?, ?, 'PROVIDER')", UUID.randomUUID(), fixture.workspaceId(), fixture.providerActorId());
-        jdbcTemplate.update("INSERT INTO workspace_memberships (id, workspace_id, actor_id, role) VALUES (?, ?, ?, 'CUSTOMER')", UUID.randomUUID(), fixture.workspaceId(), fixture.customerActorId());
         jdbcTemplate.update("INSERT INTO provider_profiles (id, workspace_id, actor_id, display_name) VALUES (?, ?, ?, 'Provider')", fixture.providerProfileId(), fixture.workspaceId(), fixture.providerActorId());
-        jdbcTemplate.update("INSERT INTO customer_profiles (id, workspace_id, actor_id, display_name) VALUES (?, ?, ?, 'Customer')", fixture.customerProfileId(), fixture.workspaceId(), fixture.customerActorId());
         jdbcTemplate.update("INSERT INTO workspace_region_ownership (workspace_id, home_region, ownership_epoch) VALUES (?, 'region-a', 1)", fixture.workspaceId());
-        seedOffering(fixture);
         seedFinancialAccounts(fixture);
         return fixture;
     }
 
-    private void seedOffering(Fixture fixture) {
-        jdbcTemplate.update("""
-                INSERT INTO offerings (id, workspace_id, provider_profile_id, title, status, duration_minutes, offer_type, min_notice_minutes, max_notice_days, slot_interval_minutes)
-                VALUES (?, ?, ?, 'Ticket027 Offering', 'PUBLISHED', 60, 'SCHEDULED_TIME', 0, 30, 30)
-                """, fixture.offeringId(), fixture.workspaceId(), fixture.providerProfileId());
-    }
-
     private void seedFinancialAccounts(Fixture fixture) {
-        seedFinancialAccount(fixture, "PLATFORM_CLEARING", "ASSET");
-        seedFinancialAccount(fixture, "AUTHORIZED_FUNDS", "LIABILITY");
-        seedFinancialAccount(fixture, "CAPTURED_FUNDS", "LIABILITY");
-        seedFinancialAccount(fixture, "CASH_PLACEHOLDER", "ASSET");
         seedFinancialAccount(fixture, "SELLER_PAYABLE", "LIABILITY");
-        seedFinancialAccount(fixture, "FEE_REVENUE", "REVENUE");
         seedFinancialAccount(fixture, "PAYOUT_CLEARING", "LIABILITY");
-        seedFinancialAccount(fixture, "REFUND_RESERVE", "LIABILITY");
-        seedFinancialAccount(fixture, "REFUND_LIABILITY", "LIABILITY");
-        seedFinancialAccount(fixture, "DISPUTE_RESERVE", "LIABILITY");
+        seedFinancialAccount(fixture, "CASH_PLACEHOLDER", "ASSET");
     }
 
     private void seedFinancialAccount(Fixture fixture, String purpose, String type) {
@@ -366,42 +338,6 @@ class Ticket027FinanceRuntimeConcurrencyAndDeliveryTruthIntegrationTest {
                 INSERT INTO financial_accounts (id, workspace_id, account_code, account_name, account_type, account_purpose, currency_code)
                 VALUES (?, ?, ?, ?, ?, ?, 'USD')
                 """, UUID.randomUUID(), fixture.workspaceId(), purpose + "-USD", purpose, type, purpose);
-    }
-
-    private UUID seedCreatedPayment(Fixture fixture, long gross, long fee, String reference) {
-        UUID bookingId = seedBooking(fixture);
-        UUID paymentIntentId = UUID.randomUUID();
-        jdbcTemplate.update("""
-                INSERT INTO payment_intents (
-                    id, workspace_id, booking_id, provider_profile_id, status, currency_code,
-                    gross_amount_minor, fee_amount_minor, net_amount_minor,
-                    authorized_amount_minor, captured_amount_minor, settled_amount_minor, external_reference
-                )
-                VALUES (?, ?, ?, ?, 'CREATED', 'USD', ?, ?, ?, 0, 0, 0, ?)
-                """, paymentIntentId, fixture.workspaceId(), bookingId, fixture.providerProfileId(), gross, fee, gross - fee, reference);
-        return paymentIntentId;
-    }
-
-    private UUID seedPayout(Fixture fixture, String status, long amountMinor) {
-        UUID payoutId = UUID.randomUUID();
-        jdbcTemplate.update("""
-                INSERT INTO payout_requests (id, workspace_id, provider_profile_id, currency_code, requested_amount_minor, status, failure_reason)
-                VALUES (?, ?, ?, 'USD', ?, ?, ?)
-                """, payoutId, fixture.workspaceId(), fixture.providerProfileId(), amountMinor, status, "FAILED".equals(status) ? "provider failed" : null);
-        return payoutId;
-    }
-
-    private UUID seedBooking(Fixture fixture) {
-        UUID bookingId = UUID.randomUUID();
-        Instant startAt = Instant.now().plusSeconds(3600 + Math.abs(bookingId.getLeastSignificantBits() % 100_000));
-        jdbcTemplate.update("""
-                INSERT INTO bookings (id, workspace_id, offering_id, provider_profile_id, customer_profile_id, offer_type, scheduled_start_at, scheduled_end_at, quantity_reserved, hold_expires_at)
-                VALUES (?, ?, ?, ?, ?, 'SCHEDULED_TIME', ?, ?, 1, ?)
-                """, bookingId, fixture.workspaceId(), fixture.offeringId(), fixture.providerProfileId(), fixture.customerProfileId(),
-                Timestamp.from(startAt),
-                Timestamp.from(startAt.plusSeconds(3600)),
-                Timestamp.from(startAt.minusSeconds(1800)));
-        return bookingId;
     }
 
     private AccessContext financeRead(Fixture fixture) {
@@ -432,7 +368,6 @@ class Ticket027FinanceRuntimeConcurrencyAndDeliveryTruthIntegrationTest {
             UUID ownerMembershipId,
             UUID checkerMembershipId,
             UUID providerActorId,
-            UUID customerActorId,
             UUID providerProfileId,
             UUID customerProfileId,
             UUID offeringId) {

@@ -149,6 +149,8 @@ public class MerchantFinanceEventStore {
                     COALESCE(SUM(CASE WHEN delivery_status = 'PARKED' THEN 1 ELSE 0 END), 0)::bigint AS parked_count,
                     MIN(CASE WHEN delivery_status = 'PENDING' THEN created_at END) AS oldest_pending_at,
                     MIN(CASE WHEN delivery_status = 'CLAIMED' THEN claimed_at END) AS oldest_claimed_at,
+                    COALESCE(EXTRACT(EPOCH FROM now() - MIN(CASE WHEN delivery_status = 'PENDING' THEN created_at END)), 0)::bigint AS oldest_pending_age_seconds,
+                    COALESCE(EXTRACT(EPOCH FROM now() - MIN(CASE WHEN delivery_status = 'CLAIMED' THEN claimed_at END)), 0)::bigint AS oldest_claimed_age_seconds,
                     COALESCE(SUM(CASE WHEN delivery_status = 'CLAIMED' AND claim_expires_at <= now() THEN 1 ELSE 0 END), 0)::bigint AS stale_claim_count,
                     COALESCE((SELECT paused FROM merchant_finance_delivery_runtime_controls WHERE workspace_id = ?), false) AS paused
                 FROM merchant_finance_event_deliveries
@@ -160,6 +162,8 @@ public class MerchantFinanceEventStore {
                 rs.getLong("parked_count"),
                 nullableInstant(rs, "oldest_pending_at"),
                 nullableInstant(rs, "oldest_claimed_at"),
+                rs.getLong("oldest_pending_age_seconds"),
+                rs.getLong("oldest_claimed_age_seconds"),
                 rs.getLong("stale_claim_count"),
                 rs.getBoolean("paused")), workspaceId, workspaceId);
     }
@@ -236,8 +240,8 @@ public class MerchantFinanceEventStore {
                 """, DELIVERY_WORK_MAPPER, workspaceId, workspaceId, maxAttempts, limit, claimOwner, leaseSeconds);
     }
 
-    public MerchantFinanceEventDelivery recordDeliverySuccess(UUID workspaceId, UUID deliveryId, int responseStatus, String responseBody) {
-        return jdbcTemplate.queryForObject("""
+    public Optional<MerchantFinanceEventDelivery> recordDeliverySuccess(UUID workspaceId, UUID deliveryId, String claimOwner, String signatureValue, int responseStatus, String responseBody) {
+        return jdbcTemplate.query("""
                 UPDATE merchant_finance_event_deliveries
                 SET delivery_status = 'SUCCEEDED',
                     attempt_count = attempt_count + 1,
@@ -248,18 +252,20 @@ public class MerchantFinanceEventStore {
                     response_body = ?,
                     final_failure_reason = NULL,
                     parked_reason = NULL,
+                    signature_value = ?,
                     claim_owner = NULL,
                     claimed_at = NULL,
                     claim_expires_at = NULL
                 WHERE workspace_id = ?
                   AND id = ?
                   AND delivery_status = 'CLAIMED'
+                  AND claim_owner = ?
                 RETURNING *
-                """, DELIVERY_MAPPER, responseStatus, responseBody, workspaceId, deliveryId);
+                """, DELIVERY_MAPPER, responseStatus, responseBody, signatureValue, workspaceId, deliveryId, claimOwner).stream().findFirst();
     }
 
-    public MerchantFinanceEventDelivery recordDeliveryFailure(UUID workspaceId, UUID deliveryId, int maxAttempts, long backoffSeconds, Integer responseStatus, String responseBody, String failureReason) {
-        return jdbcTemplate.queryForObject("""
+    public Optional<MerchantFinanceEventDelivery> recordDeliveryFailure(UUID workspaceId, UUID deliveryId, String claimOwner, String signatureValue, int maxAttempts, long backoffSeconds, Integer responseStatus, String responseBody, String failureReason) {
+        return jdbcTemplate.query("""
                 UPDATE merchant_finance_event_deliveries
                 SET delivery_status = CASE WHEN attempt_count + 1 >= ? THEN 'PARKED' ELSE 'FAILED' END,
                     attempt_count = attempt_count + 1,
@@ -270,14 +276,16 @@ public class MerchantFinanceEventStore {
                     response_body = ?,
                     final_failure_reason = ?,
                     parked_reason = CASE WHEN attempt_count + 1 >= ? THEN ? ELSE NULL END,
+                    signature_value = ?,
                     claim_owner = NULL,
                     claimed_at = NULL,
                     claim_expires_at = NULL
                 WHERE workspace_id = ?
                   AND id = ?
                   AND delivery_status = 'CLAIMED'
+                  AND claim_owner = ?
                 RETURNING *
-                """, DELIVERY_MAPPER, maxAttempts, maxAttempts, backoffSeconds, responseStatus, responseBody, failureReason, maxAttempts, failureReason, workspaceId, deliveryId);
+                """, DELIVERY_MAPPER, maxAttempts, maxAttempts, backoffSeconds, responseStatus, responseBody, failureReason, maxAttempts, failureReason, signatureValue, workspaceId, deliveryId, claimOwner).stream().findFirst();
     }
 
     public MerchantFinanceEventDelivery redriveDelivery(UUID workspaceId, UUID deliveryId) {
@@ -387,6 +395,8 @@ public class MerchantFinanceEventStore {
             long parkedCount,
             Instant oldestPendingAt,
             Instant oldestClaimedAt,
+            long oldestPendingAgeSeconds,
+            long oldestClaimedAgeSeconds,
             long staleClaimCount,
             boolean paused) {
     }

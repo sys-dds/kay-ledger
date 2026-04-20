@@ -28,6 +28,7 @@ import com.kayledger.api.access.model.WorkspaceRole;
 import com.kayledger.api.merchantevents.model.MerchantFinanceEndpoint;
 import com.kayledger.api.merchantevents.model.MerchantFinanceEvent;
 import com.kayledger.api.merchantevents.model.MerchantFinanceEventDelivery;
+import com.kayledger.api.merchantevents.model.MerchantFinanceEventEnvelope;
 import com.kayledger.api.merchantevents.store.MerchantFinanceEventStore;
 import com.kayledger.api.merchantevents.store.MerchantFinanceEventStore.DeliveryRuntimeSummary;
 import com.kayledger.api.region.application.RegionService;
@@ -134,7 +135,7 @@ public class MerchantFinanceEventService {
                 domainOccurredAt);
         for (MerchantFinanceEndpoint endpoint : merchantFinanceEventStore.matchingEndpoints(workspaceId, providerProfileId, eventType)) {
             String dedupeKey = event.id() + ":" + endpoint.id();
-            merchantFinanceEventStore.upsertDelivery(workspaceId, event.id(), endpoint.id(), dedupeKey, signature(endpoint.signingSecretRef(), event.eventKey(), event.payloadJson()));
+            merchantFinanceEventStore.upsertDelivery(workspaceId, event.id(), endpoint.id(), dedupeKey, null);
         }
         Map<String, Object> outboxPayload = new LinkedHashMap<>();
         outboxPayload.put("merchantFinanceEventId", event.id());
@@ -234,12 +235,12 @@ public class MerchantFinanceEventService {
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
             String body = snippet(response.body());
             if (response.statusCode() >= 200 && response.statusCode() < 300) {
-                merchantFinanceEventStore.recordDeliverySuccess(work.delivery().workspaceId(), work.delivery().id(), response.statusCode(), body);
+                merchantFinanceEventStore.recordDeliverySuccess(work.delivery().workspaceId(), work.delivery().id(), work.delivery().claimOwner(), requestSignature, response.statusCode(), body);
             } else {
-                merchantFinanceEventStore.recordDeliveryFailure(work.delivery().workspaceId(), work.delivery().id(), deliveryProperties.getMaxAttempts(), deliveryProperties.getBackoffSeconds(), response.statusCode(), body, "HTTP " + response.statusCode());
+                merchantFinanceEventStore.recordDeliveryFailure(work.delivery().workspaceId(), work.delivery().id(), work.delivery().claimOwner(), requestSignature, deliveryProperties.getMaxAttempts(), deliveryProperties.getBackoffSeconds(), response.statusCode(), body, "HTTP " + response.statusCode());
             }
         } catch (Exception exception) {
-            merchantFinanceEventStore.recordDeliveryFailure(work.delivery().workspaceId(), work.delivery().id(), deliveryProperties.getMaxAttempts(), deliveryProperties.getBackoffSeconds(), null, null, failureReason(exception));
+            merchantFinanceEventStore.recordDeliveryFailure(work.delivery().workspaceId(), work.delivery().id(), work.delivery().claimOwner(), requestSignature, deliveryProperties.getMaxAttempts(), deliveryProperties.getBackoffSeconds(), null, null, failureReason(exception));
         }
     }
 
@@ -263,18 +264,17 @@ public class MerchantFinanceEventService {
     }
 
     private String deliveryPayload(MerchantFinanceEventStore.DeliveryWork work, Instant attemptedAt) {
-        Map<String, Object> envelope = new LinkedHashMap<>();
-        envelope.put("envelopeVersion", ENVELOPE_VERSION);
-        envelope.put("eventId", work.delivery().merchantFinanceEventId());
-        envelope.put("deliveryId", work.delivery().id());
-        envelope.put("eventType", work.eventType());
-        envelope.put("sourceReferenceType", work.sourceReferenceType());
-        envelope.put("sourceReferenceId", work.sourceReferenceId());
-        envelope.put("eventKey", work.eventKey());
-        envelope.put("occurredAt", work.occurredAt());
-        envelope.put("attemptedAt", attemptedAt);
-        envelope.put("payload", payloadObject(work.payloadJson()));
-        return json(envelope);
+        return json(new MerchantFinanceEventEnvelope(
+                ENVELOPE_VERSION,
+                work.delivery().merchantFinanceEventId(),
+                work.delivery().id(),
+                work.eventType(),
+                work.sourceReferenceType(),
+                work.sourceReferenceId(),
+                work.eventKey(),
+                work.occurredAt(),
+                attemptedAt,
+                payloadObject(work.payloadJson())));
     }
 
     private Object payloadObject(String payloadJson) {
@@ -300,10 +300,6 @@ public class MerchantFinanceEventService {
             return exception.getClass().getSimpleName();
         }
         return message.length() > 1000 ? message.substring(0, 1000) : message;
-    }
-
-    private static String signature(String secretRef, String eventKey, String payloadJson) {
-        return signature(secretRef, eventKey + "." + payloadJson);
     }
 
     private static String signature(String secretRef, String signedBody) {
