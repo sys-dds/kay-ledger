@@ -19,6 +19,8 @@ import com.kayledger.api.close.application.FinancialCloseService;
 import com.kayledger.api.close.model.AccountingPeriod;
 import com.kayledger.api.close.model.FinalizedProviderStatement;
 import com.kayledger.api.close.model.FinancialCloseAuditEvent;
+import com.kayledger.api.evidence.application.FinanceEvidenceService;
+import com.kayledger.api.evidence.model.FinanceEvidencePack;
 import com.kayledger.api.shared.api.BadRequestException;
 import com.kayledger.api.shared.idempotency.IdempotencyService;
 
@@ -28,14 +30,17 @@ public class FinancialCloseController {
 
     private final AccessContextResolver accessContextResolver;
     private final FinancialCloseService financialCloseService;
+    private final FinanceEvidenceService financeEvidenceService;
     private final IdempotencyService idempotencyService;
 
     public FinancialCloseController(
             AccessContextResolver accessContextResolver,
             FinancialCloseService financialCloseService,
+            FinanceEvidenceService financeEvidenceService,
             IdempotencyService idempotencyService) {
         this.accessContextResolver = accessContextResolver;
         this.financialCloseService = financialCloseService;
+        this.financeEvidenceService = financeEvidenceService;
         this.idempotencyService = idempotencyService;
     }
 
@@ -92,7 +97,7 @@ public class FinancialCloseController {
                 context.actorId(),
                 "POST /api/financial-close/periods/{periodId}/close",
                 IdempotencyService.fingerprint(workspaceSlug, actorKey, periodId, request),
-                () -> financialCloseService.closePeriod(context, periodId, request.closeReason()));
+                () -> financialCloseService.closePeriod(context, periodId, request.closeReason(), request.approvalRequestId()));
     }
 
     @PostMapping("/periods/{periodId}/reopen")
@@ -113,7 +118,7 @@ public class FinancialCloseController {
                 context.actorId(),
                 "POST /api/financial-close/periods/{periodId}/reopen",
                 IdempotencyService.fingerprint(workspaceSlug, actorKey, periodId, request),
-                () -> financialCloseService.reopenPeriod(context, periodId, request.reopenReason()));
+                () -> financialCloseService.reopenPeriod(context, periodId, request.reopenReason(), request.approvalRequestId()));
     }
 
     @GetMapping("/periods/{periodId}/statements")
@@ -140,12 +145,28 @@ public class FinancialCloseController {
         return financialCloseService.auditEvents(accessContextResolver.resolveWorkspace(workspaceSlug, actorKey), periodId);
     }
 
+    @GetMapping("/periods/{periodId}/evidence-packs")
+    List<FinanceEvidencePack> periodEvidencePacks(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @PathVariable UUID periodId) {
+        return financeEvidenceService.listPacksForSource(accessContextResolver.resolveWorkspace(workspaceSlug, actorKey), "ACCOUNTING_PERIOD", periodId);
+    }
+
+    @GetMapping("/statements/{statementId}/evidence-packs")
+    List<FinanceEvidencePack> statementEvidencePacks(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @PathVariable UUID statementId) {
+        return financeEvidenceService.listPacksForSource(accessContextResolver.resolveWorkspace(workspaceSlug, actorKey), "FINALIZED_PROVIDER_STATEMENT", statementId);
+    }
+
     public record OpenPeriodRequest(LocalDate periodStart, LocalDate periodEnd) {
     }
 
-    public record ClosePeriodRequest(String closeReason) {
+    public record ClosePeriodRequest(String closeReason, UUID approvalRequestId) {
     }
 
-    public record ReopenPeriodRequest(String reopenReason) {
+    public record ReopenPeriodRequest(String reopenReason, UUID approvalRequestId) {
     }
 }

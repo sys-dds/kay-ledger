@@ -144,6 +144,61 @@ public class InvestigationStore {
             FROM financial_close_audit_events fcae
             LEFT JOIN financial_accounting_periods fap ON fap.workspace_id = fcae.workspace_id AND fap.id = fcae.accounting_period_id
             LEFT JOIN finalized_provider_statements fps ON fps.workspace_id = fcae.workspace_id AND fps.id = fcae.finalized_statement_id
+            UNION ALL
+            SELECT far.workspace_id, 'financial_approval_request', 'FINANCIAL_APPROVAL_REQUEST', far.id, far.provider_profile_id, NULL::uuid,
+                   NULL::uuid, NULL::uuid, NULL::uuid, NULL::uuid, NULL::text, far.action_type,
+                   far.target_type, far.target_id, far.status, far.action_type, far.currency_code, far.amount_minor, NULL::date, NULL::date, far.updated_at
+            FROM financial_approval_requests far
+            UNION ALL
+            SELECT fad.workspace_id, 'financial_approval_decision', 'FINANCIAL_APPROVAL_DECISION', fad.id, far.provider_profile_id, NULL::uuid,
+                   NULL::uuid, NULL::uuid, NULL::uuid, NULL::uuid, NULL::text, far.action_type,
+                   'FINANCIAL_APPROVAL_REQUEST', far.id, fad.decision, far.action_type, far.currency_code, far.amount_minor, NULL::date, NULL::date, fad.created_at
+            FROM financial_approval_decisions fad
+            JOIN financial_approval_requests far ON far.workspace_id = fad.workspace_id AND far.id = fad.approval_request_id
+            UNION ALL
+            SELECT fep.workspace_id, 'finance_evidence_pack', 'FINANCE_EVIDENCE_PACK', fep.id,
+                   COALESCE(fps.provider_profile_id, prr.provider_profile_id, pti.provider_profile_id, far.provider_profile_id), NULL::uuid,
+                   NULL::uuid, NULL::uuid, NULL::uuid, NULL::uuid, NULL::text, fep.source_reference,
+                   fep.evidence_pack_type, COALESCE(fep.finalized_statement_id, fep.reconciliation_run_id, fep.provider_truth_import_id, fep.approval_request_id, fep.accounting_period_id),
+                   fep.status, fep.evidence_pack_type, COALESCE(fps.currency_code, prr.currency_code, pti.currency_code, far.currency_code), NULL::bigint,
+                   COALESCE(fap.period_start, prr.statement_period_start, pti.statement_period_start),
+                   COALESCE(fap.period_end, prr.statement_period_end, pti.statement_period_end),
+                   fep.updated_at
+            FROM finance_evidence_packs fep
+            LEFT JOIN finalized_provider_statements fps ON fps.workspace_id = fep.workspace_id AND fps.id = fep.finalized_statement_id
+            LEFT JOIN financial_accounting_periods fap ON fap.workspace_id = fep.workspace_id AND fap.id = fep.accounting_period_id
+            LEFT JOIN provider_reconciliation_runs prr ON prr.workspace_id = fep.workspace_id AND prr.id = fep.reconciliation_run_id
+            LEFT JOIN provider_reconciliation_truth_imports pti ON pti.workspace_id = fep.workspace_id AND pti.id = fep.provider_truth_import_id
+            LEFT JOIN financial_approval_requests far ON far.workspace_id = fep.workspace_id AND far.id = fep.approval_request_id
+            UNION ALL
+            SELECT fee.workspace_id, 'finance_evidence_export', 'FINANCE_EVIDENCE_EXPORT', fee.id,
+                   COALESCE(fps.provider_profile_id, prr.provider_profile_id, pti.provider_profile_id, far.provider_profile_id), NULL::uuid,
+                   NULL::uuid, NULL::uuid, NULL::uuid, NULL::uuid, NULL::text, fee.artifact_reference,
+                   'FINANCE_EVIDENCE_PACK', fee.evidence_pack_id, fee.export_status, fep.evidence_pack_type,
+                   COALESCE(fps.currency_code, prr.currency_code, pti.currency_code, far.currency_code), fee.artifact_size_bytes,
+                   COALESCE(fap.period_start, prr.statement_period_start, pti.statement_period_start),
+                   COALESCE(fap.period_end, prr.statement_period_end, pti.statement_period_end),
+                   fee.created_at
+            FROM finance_evidence_exports fee
+            JOIN finance_evidence_packs fep ON fep.workspace_id = fee.workspace_id AND fep.id = fee.evidence_pack_id
+            LEFT JOIN finalized_provider_statements fps ON fps.workspace_id = fep.workspace_id AND fps.id = fep.finalized_statement_id
+            LEFT JOIN financial_accounting_periods fap ON fap.workspace_id = fep.workspace_id AND fap.id = fep.accounting_period_id
+            LEFT JOIN provider_reconciliation_runs prr ON prr.workspace_id = fep.workspace_id AND prr.id = fep.reconciliation_run_id
+            LEFT JOIN provider_reconciliation_truth_imports pti ON pti.workspace_id = fep.workspace_id AND pti.id = fep.provider_truth_import_id
+            LEFT JOIN financial_approval_requests far ON far.workspace_id = fep.workspace_id AND far.id = fep.approval_request_id
+            UNION ALL
+            SELECT mfe.workspace_id, 'merchant_finance_event', 'MERCHANT_FINANCE_EVENT', mfe.id, mfe.provider_profile_id, NULL::uuid,
+                   NULL::uuid, NULL::uuid, NULL::uuid, NULL::uuid, NULL::text, mfe.event_key,
+                   mfe.source_reference_type, mfe.source_reference_id, mfe.event_type, mfe.event_type, mfe.currency_code, NULL::bigint, fap.period_start, fap.period_end, mfe.occurred_at
+            FROM merchant_finance_events mfe
+            LEFT JOIN financial_accounting_periods fap ON fap.workspace_id = mfe.workspace_id AND fap.id = mfe.accounting_period_id
+            UNION ALL
+            SELECT mfed.workspace_id, 'merchant_finance_event_delivery', 'MERCHANT_FINANCE_EVENT_DELIVERY', mfed.id, mfe.provider_profile_id, NULL::uuid,
+                   NULL::uuid, NULL::uuid, NULL::uuid, NULL::uuid, NULL::text, mfed.dedupe_key,
+                   'MERCHANT_FINANCE_EVENT', mfed.merchant_finance_event_id, mfed.delivery_status, mfe.event_type, mfe.currency_code, NULL::bigint, fap.period_start, fap.period_end, mfed.updated_at
+            FROM merchant_finance_event_deliveries mfed
+            JOIN merchant_finance_events mfe ON mfe.workspace_id = mfed.workspace_id AND mfe.id = mfed.merchant_finance_event_id
+            LEFT JOIN financial_accounting_periods fap ON fap.workspace_id = mfe.workspace_id AND fap.id = mfe.accounting_period_id
             """;
 
     private final JdbcTemplate jdbcTemplate;

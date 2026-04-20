@@ -15,6 +15,8 @@ import org.springframework.web.bind.annotation.RestController;
 
 import com.kayledger.api.access.application.AccessContext;
 import com.kayledger.api.access.application.AccessContextResolver;
+import com.kayledger.api.evidence.application.FinanceEvidenceService;
+import com.kayledger.api.evidence.model.FinanceEvidencePack;
 import com.kayledger.api.reconciliation.api.ReconciliationRequests.CreateReconciliationRunRequest;
 import com.kayledger.api.reconciliation.api.ReconciliationRequests.ProviderTruthImportRequest;
 import com.kayledger.api.reconciliation.api.ReconciliationRequests.ReopenReconciliationItemRequest;
@@ -32,14 +34,17 @@ public class ReconciliationController {
 
     private final AccessContextResolver accessContextResolver;
     private final ReconciliationService reconciliationService;
+    private final FinanceEvidenceService financeEvidenceService;
     private final IdempotencyService idempotencyService;
 
     public ReconciliationController(
             AccessContextResolver accessContextResolver,
             ReconciliationService reconciliationService,
+            FinanceEvidenceService financeEvidenceService,
             IdempotencyService idempotencyService) {
         this.accessContextResolver = accessContextResolver;
         this.reconciliationService = reconciliationService;
+        this.financeEvidenceService = financeEvidenceService;
         this.idempotencyService = idempotencyService;
     }
 
@@ -105,6 +110,14 @@ public class ReconciliationController {
             @PathVariable UUID runId,
             @RequestParam(value = "unresolvedOnly", defaultValue = "false") boolean unresolvedOnly) {
         return reconciliationService.listItems(accessContextResolver.resolveWorkspace(workspaceSlug, actorKey), runId, unresolvedOnly);
+    }
+
+    @GetMapping("/runs/{runId}/evidence-packs")
+    List<FinanceEvidencePack> runEvidencePacks(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @PathVariable UUID runId) {
+        return financeEvidenceService.listPacksForSource(accessContextResolver.resolveWorkspace(workspaceSlug, actorKey), "PROVIDER_RECONCILIATION_RUN", runId);
     }
 
     @GetMapping("/items")
