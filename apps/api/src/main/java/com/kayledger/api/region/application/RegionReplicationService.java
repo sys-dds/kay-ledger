@@ -288,6 +288,9 @@ public class RegionReplicationService {
         regionalRecoveryStore.completeActionFromPeerConfirmation(
                 event.workspaceId(),
                 recoveryActionId,
+                text(event.payload().get("actionType")),
+                text(event.payload().get("referenceType")),
+                text(event.payload().get("referenceId")),
                 text(event.payload().get("appliedRegion")),
                 event.eventId(),
                 appliedAt,

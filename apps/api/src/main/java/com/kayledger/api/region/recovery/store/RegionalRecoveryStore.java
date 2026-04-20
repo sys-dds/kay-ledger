@@ -173,6 +173,9 @@ public class RegionalRecoveryStore {
     public Optional<RegionalRecoveryAction> completeActionFromPeerConfirmation(
             UUID workspaceId,
             UUID recoveryActionId,
+            String actionType,
+            String referenceType,
+            String referenceId,
             String appliedRegion,
             UUID confirmationEventId,
             Instant appliedAt,
@@ -188,10 +191,14 @@ public class RegionalRecoveryStore {
                     peer_confirmation_event_id = ?
                 WHERE workspace_id = ?
                   AND id = ?
+                  AND action_type = ?
+                  AND reference_type = ?
+                  AND reference_id = ?
                   AND status = 'AWAITING_PEER_APPLY'
                 RETURNING id, workspace_id, drift_record_id, action_type, reference_type, reference_id, status,
                           requested_by_actor_id, result_json::text, failure_reason, created_at, updated_at, completed_at
-                """, ACTION_MAPPER, resultJson, appliedRegion, Timestamp.from(appliedAt), confirmationEventId, workspaceId, recoveryActionId);
+                """, ACTION_MAPPER, resultJson, appliedRegion, Timestamp.from(appliedAt), confirmationEventId,
+                workspaceId, recoveryActionId, actionType, referenceType, referenceId);
         Optional<RegionalRecoveryAction> action = updated.stream().findFirst();
         action.map(RegionalRecoveryAction::driftRecordId)
                 .ifPresent(driftRecordId -> resolveDrift(workspaceId, driftRecordId));
