@@ -21,6 +21,7 @@ import com.kayledger.api.approval.model.FinancialApprovalDecision;
 import com.kayledger.api.approval.model.FinancialApprovalExecutionState;
 import com.kayledger.api.approval.model.FinancialApprovalRequest;
 import com.kayledger.api.approval.store.FinancialApprovalStore;
+import com.kayledger.api.approval.store.FinancialApprovalStore.ApprovalExecutionRuntimeSummary;
 import com.kayledger.api.merchantevents.application.MerchantFinanceEventService;
 import com.kayledger.api.region.application.RegionService;
 import com.kayledger.api.shared.api.BadRequestException;
@@ -103,6 +104,11 @@ public class FinancialApprovalService {
                 financialApprovalStore.executionState(context.workspaceId(), request.id()).orElse(null));
     }
 
+    public ApprovalExecutionRuntimeSummary executionRuntimeSummary(AccessContext context) {
+        requireRead(context);
+        return financialApprovalStore.executionRuntimeSummary(context.workspaceId());
+    }
+
     @Transactional
     public FinancialApprovalRequest approve(AccessContext context, UUID requestId, String note) {
         requireWrite(context, "financial approval decision");
@@ -143,8 +149,14 @@ public class FinancialApprovalService {
 
     public <T> T executeApproved(AccessContext context, UUID approvalRequestId, String actionType, String targetType, UUID targetId, Supplier<T> protectedMutation) {
         FinancialApprovalRequest request = validateApprovedForExecution(context, approvalRequestId, actionType, targetType, targetId);
+        ApprovalPolicy policy = policy(actionType);
         try {
-            transactionTemplate.executeWithoutResult(status -> financialApprovalStore.markExecutionInProgress(context.workspaceId(), request.id(), context.actorId()));
+            transactionTemplate.executeWithoutResult(status -> financialApprovalStore.markExecutionInProgress(
+                    context.workspaceId(),
+                    request.id(),
+                    context.actorId(),
+                    properties.getExecutionLeaseSeconds(),
+                    policy.retryAfterFailure()));
             T result = protectedMutation.get();
             financialApprovalStore.markExecuted(context.workspaceId(), request.id(), context.actorId());
             return result;
@@ -191,6 +203,16 @@ public class FinancialApprovalService {
             throw new BadRequestException(actionType + " approval cannot be retried after execution failure.");
         }
         return request;
+    }
+
+    @Transactional
+    public ApprovalExecutionRecoveryResult recoverStaleExecutions(AccessContext context) {
+        requireWrite(context, "financial approval execution recovery");
+        int recovered = financialApprovalStore.recoverStaleExecutions(
+                context.workspaceId(),
+                properties.getExecutionLeaseSeconds(),
+                "Approval execution lease expired before protected finance action completed.");
+        return new ApprovalExecutionRecoveryResult(recovered);
     }
 
     public boolean closeRequiresApproval() {
@@ -327,5 +349,8 @@ public class FinancialApprovalService {
             FinancialApprovalRequest request,
             List<FinancialApprovalDecision> decisions,
             FinancialApprovalExecutionState executionState) {
+    }
+
+    public record ApprovalExecutionRecoveryResult(int recoveredCount) {
     }
 }

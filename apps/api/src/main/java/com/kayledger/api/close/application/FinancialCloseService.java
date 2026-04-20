@@ -124,7 +124,8 @@ public class FinancialCloseService {
                     MerchantFinanceEventService.EVENT_FINALIZED_STATEMENT_AVAILABLE,
                     "FINALIZED_PROVIDER_STATEMENT",
                     statement.id(),
-                statementPayload(statement));
+                    statementPayload(statement),
+                    statement.finalizedAt());
         }
         return new CloseResult(closed, statements);
     }
@@ -162,7 +163,8 @@ public class FinancialCloseService {
                 MerchantFinanceEventService.EVENT_ACCOUNTING_PERIOD_REOPENED,
                 "ACCOUNTING_PERIOD",
                 reopened.id(),
-                periodPayload(reopened));
+                periodPayload(reopened),
+                reopened.reopenedAt() == null ? Instant.now() : reopened.reopenedAt());
         return reopened;
     }
 

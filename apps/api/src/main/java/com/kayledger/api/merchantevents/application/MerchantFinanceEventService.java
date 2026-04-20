@@ -11,6 +11,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
@@ -28,6 +29,7 @@ import com.kayledger.api.merchantevents.model.MerchantFinanceEndpoint;
 import com.kayledger.api.merchantevents.model.MerchantFinanceEvent;
 import com.kayledger.api.merchantevents.model.MerchantFinanceEventDelivery;
 import com.kayledger.api.merchantevents.store.MerchantFinanceEventStore;
+import com.kayledger.api.merchantevents.store.MerchantFinanceEventStore.DeliveryRuntimeSummary;
 import com.kayledger.api.region.application.RegionService;
 import com.kayledger.api.shared.api.BadRequestException;
 import com.kayledger.api.shared.messaging.application.OutboxService;
@@ -35,6 +37,8 @@ import com.kayledger.api.shared.messaging.application.OutboxService;
 @Service
 @EnableConfigurationProperties(MerchantFinanceDeliveryProperties.class)
 public class MerchantFinanceEventService {
+
+    public static final int ENVELOPE_VERSION = 1;
 
     public static final String EVENT_FINALIZED_STATEMENT_AVAILABLE = "FINALIZED_STATEMENT_AVAILABLE";
     public static final String EVENT_ACCOUNTING_PERIOD_REOPENED = "ACCOUNTING_PERIOD_REOPENED";
@@ -54,6 +58,7 @@ public class MerchantFinanceEventService {
     private final ObjectMapper objectMapper;
     private final MerchantFinanceDeliveryProperties deliveryProperties;
     private final HttpClient httpClient;
+    private final AtomicLong deliveryClaimSequence = new AtomicLong();
 
     public MerchantFinanceEventService(
             MerchantFinanceEventStore merchantFinanceEventStore,
@@ -98,6 +103,11 @@ public class MerchantFinanceEventService {
         return merchantFinanceEventStore.listDeliveries(context.workspaceId());
     }
 
+    public DeliveryRuntimeSummary runtimeSummary(AccessContext context) {
+        requireRead(context);
+        return merchantFinanceEventStore.runtimeSummary(context.workspaceId());
+    }
+
     @Transactional
     public MerchantFinanceEvent emit(UUID workspaceId, UUID providerProfileId, String currencyCode, UUID accountingPeriodId, String eventType, String sourceType, UUID sourceId, Map<String, Object> payload) {
         return emit(workspaceId, providerProfileId, currencyCode, accountingPeriodId, eventType, sourceType, sourceId, payload, Instant.now());
@@ -105,6 +115,7 @@ public class MerchantFinanceEventService {
 
     @Transactional
     public MerchantFinanceEvent emit(UUID workspaceId, UUID providerProfileId, String currencyCode, UUID accountingPeriodId, String eventType, String sourceType, UUID sourceId, Map<String, Object> payload, Instant occurredAt) {
+        Instant domainOccurredAt = occurredAt == null ? Instant.now() : occurredAt;
         if (workspaceId == null || eventType == null || sourceType == null || sourceId == null) {
             throw new BadRequestException("Merchant finance event source is required.");
         }
@@ -120,7 +131,7 @@ public class MerchantFinanceEventService {
                 sourceId,
                 json(safePayload),
                 eventKey,
-                occurredAt == null ? Instant.now() : occurredAt);
+                domainOccurredAt);
         for (MerchantFinanceEndpoint endpoint : merchantFinanceEventStore.matchingEndpoints(workspaceId, providerProfileId, eventType)) {
             String dedupeKey = event.id() + ":" + endpoint.id();
             merchantFinanceEventStore.upsertDelivery(workspaceId, event.id(), endpoint.id(), dedupeKey, signature(endpoint.signingSecretRef(), event.eventKey(), event.payloadJson()));
@@ -148,21 +159,65 @@ public class MerchantFinanceEventService {
     }
 
     public int processDueDeliveries() {
+        return processDueDeliveriesForWorkspace(null, "scheduler");
+    }
+
+    public int processDueDeliveries(AccessContext context) {
+        requireWrite(context, "merchant finance event delivery processing");
+        return processDueDeliveriesForWorkspace(context.workspaceId(), "workspace:" + context.workspaceId() + ":" + context.actorId());
+    }
+
+    @Transactional
+    public DeliveryRuntimeMutationResult pauseRuntime(AccessContext context, String reason) {
+        requireWrite(context, "merchant finance delivery runtime pause");
+        merchantFinanceEventStore.setRuntimePaused(context.workspaceId(), context.actorId(), true, reason == null || reason.isBlank() ? "Paused by finance operator." : reason.trim());
+        return new DeliveryRuntimeMutationResult(0);
+    }
+
+    @Transactional
+    public DeliveryRuntimeMutationResult resumeRuntime(AccessContext context) {
+        requireWrite(context, "merchant finance delivery runtime resume");
+        merchantFinanceEventStore.setRuntimePaused(context.workspaceId(), context.actorId(), false, null);
+        return new DeliveryRuntimeMutationResult(0);
+    }
+
+    @Transactional
+    public DeliveryRuntimeMutationResult reclaimStaleClaims(AccessContext context) {
+        requireWrite(context, "merchant finance delivery stale claim reclaim");
+        return new DeliveryRuntimeMutationResult(merchantFinanceEventStore.reclaimStaleClaims(context.workspaceId()));
+    }
+
+    @Transactional
+    public DeliveryRuntimeMutationResult requeueParked(AccessContext context) {
+        requireWrite(context, "merchant finance delivery parked requeue");
+        return new DeliveryRuntimeMutationResult(merchantFinanceEventStore.requeueByStatus(context.workspaceId(), "PARKED"));
+    }
+
+    @Transactional
+    public DeliveryRuntimeMutationResult requeueFailed(AccessContext context) {
+        requireWrite(context, "merchant finance delivery failed requeue");
+        return new DeliveryRuntimeMutationResult(merchantFinanceEventStore.requeueByStatus(context.workspaceId(), "FAILED"));
+    }
+
+    private int processDueDeliveriesForWorkspace(UUID workspaceId, String ownerPrefix) {
+        String claimOwner = ownerPrefix + ":" + java.lang.management.ManagementFactory.getRuntimeMXBean().getName() + ":" + deliveryClaimSequence.incrementAndGet();
         int processed = 0;
-        for (var work : merchantFinanceEventStore.claimDueDeliveries(deliveryProperties.getBatchSize(), deliveryProperties.getMaxAttempts())) {
+        for (var work : merchantFinanceEventStore.claimDueDeliveries(
+                workspaceId,
+                claimOwner,
+                deliveryProperties.getBatchSize(),
+                deliveryProperties.getMaxAttempts(),
+                deliveryProperties.getLeaseSeconds())) {
             deliver(work);
             processed++;
         }
         return processed;
     }
 
-    public int processDueDeliveries(AccessContext context) {
-        requireWrite(context, "merchant finance event delivery processing");
-        return processDueDeliveries();
-    }
-
     private void deliver(MerchantFinanceEventStore.DeliveryWork work) {
-        String requestBody = deliveryPayload(work);
+        Instant attemptedAt = Instant.now();
+        String requestBody = deliveryPayload(work, attemptedAt);
+        String requestSignature = signature(work.signingSecretRef(), requestBody);
         try {
             HttpRequest request = HttpRequest.newBuilder(URI.create(work.endpointUrl()))
                     .timeout(Duration.ofSeconds(deliveryProperties.getTimeoutSeconds()))
@@ -171,7 +226,9 @@ public class MerchantFinanceEventService {
                     .header("X-Kay-Ledger-Event-Type", work.eventType())
                     .header("X-Kay-Ledger-Delivery-Id", work.delivery().id().toString())
                     .header("X-Kay-Ledger-Dedupe-Key", work.delivery().dedupeKey())
-                    .header("X-Kay-Ledger-Signature", work.delivery().signatureValue() == null ? "" : work.delivery().signatureValue())
+                    .header("X-Kay-Ledger-Envelope-Version", Integer.toString(ENVELOPE_VERSION))
+                    .header("X-Kay-Ledger-Attempted-At", attemptedAt.toString())
+                    .header("X-Kay-Ledger-Signature", requestSignature)
                     .POST(HttpRequest.BodyPublishers.ofString(requestBody, StandardCharsets.UTF_8))
                     .build();
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
@@ -205,8 +262,9 @@ public class MerchantFinanceEventService {
         }
     }
 
-    private String deliveryPayload(MerchantFinanceEventStore.DeliveryWork work) {
+    private String deliveryPayload(MerchantFinanceEventStore.DeliveryWork work, Instant attemptedAt) {
         Map<String, Object> envelope = new LinkedHashMap<>();
+        envelope.put("envelopeVersion", ENVELOPE_VERSION);
         envelope.put("eventId", work.delivery().merchantFinanceEventId());
         envelope.put("deliveryId", work.delivery().id());
         envelope.put("eventType", work.eventType());
@@ -214,8 +272,17 @@ public class MerchantFinanceEventService {
         envelope.put("sourceReferenceId", work.sourceReferenceId());
         envelope.put("eventKey", work.eventKey());
         envelope.put("occurredAt", work.occurredAt());
-        envelope.put("payload", work.payloadJson());
+        envelope.put("attemptedAt", attemptedAt);
+        envelope.put("payload", payloadObject(work.payloadJson()));
         return json(envelope);
+    }
+
+    private Object payloadObject(String payloadJson) {
+        try {
+            return objectMapper.readValue(payloadJson == null ? "{}" : payloadJson, Object.class);
+        } catch (Exception exception) {
+            throw new BadRequestException("Merchant finance event payload could not be read.");
+        }
     }
 
     private String snippet(String value) {
@@ -236,10 +303,14 @@ public class MerchantFinanceEventService {
     }
 
     private static String signature(String secretRef, String eventKey, String payloadJson) {
+        return signature(secretRef, eventKey + "." + payloadJson);
+    }
+
+    private static String signature(String secretRef, String signedBody) {
         try {
             Mac mac = Mac.getInstance("HmacSHA256");
             mac.init(new SecretKeySpec(secretRef.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
-            byte[] digest = mac.doFinal((eventKey + "." + payloadJson).getBytes(StandardCharsets.UTF_8));
+            byte[] digest = mac.doFinal(signedBody.getBytes(StandardCharsets.UTF_8));
             return java.util.HexFormat.of().formatHex(digest);
         } catch (Exception exception) {
             throw new BadRequestException("Merchant finance event signature could not be generated.");
@@ -254,5 +325,8 @@ public class MerchantFinanceEventService {
     }
 
     public record ConfigureEndpointCommand(UUID providerProfileId, String endpointUrl, String signingSecretRef, String[] eventTypes) {
+    }
+
+    public record DeliveryRuntimeMutationResult(int affectedCount) {
     }
 }

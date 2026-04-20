@@ -301,7 +301,7 @@ public class PaymentService {
         if (amountMinor > summary.availableAmountMinor()) {
             throw new BadRequestException("Payout cannot exceed available payable balance.");
         }
-        Instant effectiveAt = Instant.now();
+        Instant effectiveAt = operatorEffectiveAt();
         requireOpenPostingWindow(context.workspaceId(), providerProfileId, currencyCode, effectiveAt, "Payout request");
         PayoutRequest payout = paymentStore.createPayoutRequest(context.workspaceId(), providerProfileId, currencyCode, amountMinor, effectiveAt);
         riskService.evaluatePayoutRequest(context.workspaceId(), payout.id(), payout.requestedAmountMinor());
@@ -417,7 +417,7 @@ public class PaymentService {
         if (amountMinor > summary.availableAmountMinor()) {
             throw new BadRequestException("Dispute cannot freeze more than available payable balance.");
         }
-        Instant effectiveAt = Instant.now();
+        Instant effectiveAt = operatorEffectiveAt();
         requireOpenPostingWindow(context.workspaceId(), intent.providerProfileId(), intent.currencyCode(), effectiveAt, "Dispute opening");
         DisputeRecord dispute = paymentStore.createDispute(context.workspaceId(), intent.id(), intent.bookingId(), amountMinor, amountMinor, effectiveAt);
         paymentStore.createFrozenFund(context.workspaceId(), intent.providerProfileId(), dispute.id(), intent.currencyCode(), amountMinor);
@@ -445,7 +445,7 @@ public class PaymentService {
     }
 
     private DisputeRecord resolveDisputeApproved(AccessContext context, DisputeRecord dispute, PaymentIntent intent, String resolution) {
-        Instant effectiveAt = Instant.now();
+        Instant effectiveAt = operatorEffectiveAt();
         requireOpenPostingWindow(context.workspaceId(), intent.providerProfileId(), intent.currencyCode(), effectiveAt, "Dispute resolution");
         FrozenFund frozenFund = paymentStore.findFrozenFundForDispute(context.workspaceId(), dispute.id())
                 .orElseThrow(() -> new BadRequestException("Dispute has no frozen funds."));
@@ -505,7 +505,7 @@ public class PaymentService {
                 + paymentStore.activeDisputePayableExposureForIntent(context.workspaceId(), intent.id());
         long remainingPayableExposure = Math.max(intent.netAmountMinor() - priorPayableReduction, 0);
         long payableReduction = Math.min(amountMinor, remainingPayableExposure);
-        Instant effectiveAt = Instant.now();
+        Instant effectiveAt = operatorEffectiveAt();
         requireOpenPostingWindow(context.workspaceId(), intent.providerProfileId(), intent.currencyCode(), effectiveAt, "Refund request");
         RefundRecord refund = paymentStore.createRefund(context.workspaceId(), intent.id(), intent.bookingId(), refundType, amountMinor, payableReduction, effectiveAt);
         paymentStore.createRefundAttempt(context.workspaceId(), refund.id(), "PROCESSING", null, externalReference(command));
@@ -633,7 +633,7 @@ public class PaymentService {
     }
 
     private PayoutRequest markPayoutSucceededInternal(UUID workspaceId, PayoutRequest payout, String externalReference, String eventType) {
-        return markPayoutSucceededInternal(workspaceId, payout, externalReference, eventType, Instant.now());
+        return markPayoutSucceededInternal(workspaceId, payout, externalReference, eventType, operatorEffectiveAt());
     }
 
     private PayoutRequest markPayoutSucceededInternal(UUID workspaceId, PayoutRequest payout, String externalReference, String eventType, Instant effectiveAt) {
@@ -1060,6 +1060,10 @@ public class PaymentService {
 
     private void requireOpenPostingWindow(UUID workspaceId, UUID providerProfileId, String currencyCode, Instant effectiveAt, String operation) {
         financialCloseService.requireOpenForPosting(workspaceId, providerProfileId, currencyCode, effectiveAt, operation);
+    }
+
+    private static Instant operatorEffectiveAt() {
+        return Instant.now();
     }
 
     private PostingCommand posting(FinancialAccount account, String side, long amountMinor, String currencyCode) {

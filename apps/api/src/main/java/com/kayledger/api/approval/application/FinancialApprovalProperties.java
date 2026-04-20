@@ -7,6 +7,7 @@ public class FinancialApprovalProperties {
 
     private boolean closeRequiresApproval;
     private long largeRefundThresholdMinor = 100_000L;
+    private int executionLeaseSeconds = 300;
 
     public boolean isCloseRequiresApproval() {
         return closeRequiresApproval;
@@ -22,5 +23,13 @@ public class FinancialApprovalProperties {
 
     public void setLargeRefundThresholdMinor(long largeRefundThresholdMinor) {
         this.largeRefundThresholdMinor = largeRefundThresholdMinor;
+    }
+
+    public int getExecutionLeaseSeconds() {
+        return executionLeaseSeconds;
+    }
+
+    public void setExecutionLeaseSeconds(int executionLeaseSeconds) {
+        this.executionLeaseSeconds = Math.max(30, executionLeaseSeconds);
     }
 }
