@@ -4,7 +4,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -21,6 +20,7 @@ import com.kayledger.api.provider.model.ProviderStatementAmounts;
 import com.kayledger.api.provider.model.ProviderStatementTruth;
 import com.kayledger.api.reconciliation.model.ProviderTruthImport;
 import com.kayledger.api.reconciliation.model.ProviderTruthSnapshot;
+import com.kayledger.api.reconciliation.model.ReconciliationItemAuditEvent;
 import com.kayledger.api.reconciliation.model.ReconciliationItem;
 import com.kayledger.api.reconciliation.model.ReconciliationMismatchType;
 import com.kayledger.api.reconciliation.model.ReconciliationRun;
@@ -69,7 +69,7 @@ public class ReconciliationService {
         if (truth.providerProfileId() == null || truth.statementPeriodStart() == null || truth.statementPeriodEnd() == null) {
             throw new BadRequestException("providerProfileId and statement period are required.");
         }
-        ProviderTruthImport truthImport = reconciliationStore.upsertProviderTruthImport(
+        ProviderTruthImport truthImport = reconciliationStore.createProviderTruthImport(
                 context.workspaceId(),
                 truth.providerProfileId(),
                 currencyCode,
@@ -77,9 +77,11 @@ public class ReconciliationService {
                 truth.statementPeriodEnd(),
                 sourceReference,
                 context.actorId());
+        reconciliationStore.supersedeOlderProviderTruthImports(truthImport, context.actorId());
+        reconciliationStore.recordProviderTruthImportEvent(context.workspaceId(), truthImport.id(), "RECORDED", context.actorId(), "Provider truth import recorded.");
         if (truth.amounts() != null) {
             ProviderStatementAmounts amounts = truth.amounts();
-            reconciliationStore.upsertProviderTruthSnapshot(truthImport, new ProviderTruthSnapshotDraft(
+            reconciliationStore.createProviderTruthSnapshot(truthImport, new ProviderTruthSnapshotDraft(
                     amounts.settledGrossAmountMinor(),
                     amounts.feeAmountMinor(),
                     amounts.netEarningsAmountMinor(),
@@ -97,17 +99,21 @@ public class ReconciliationService {
         requireWrite(context, "provider reconciliation run");
         ProviderTruthImport truthImport = reconciliationStore.findProviderTruthImport(context.workspaceId(), truthImportId)
                 .orElseThrow(() -> new NotFoundException("Provider truth import was not found."));
+        if ("SUPERSEDED".equals(truthImport.status())) {
+            throw new BadRequestException("Superseded provider truth imports cannot be reconciled.");
+        }
         ReconciliationRun run = reconciliationStore.createRun(truthImport, context.actorId());
         Optional<ProviderTruthSnapshot> providerTruth = reconciliationStore.findProviderTruthSnapshot(context.workspaceId(), truthImport.id());
-        Optional<ProviderFinancialSummary> internalSummary = reportingStore.listProviderSummaries(context.workspaceId())
-                .stream()
-                .filter(summary -> Objects.equals(summary.providerProfileId(), truthImport.providerProfileId()))
-                .filter(summary -> truthImport.currencyCode().equals(summary.currencyCode()))
-                .findFirst();
+        Optional<ProviderFinancialSummary> internalSummary = reportingStore.providerSummaryForPeriod(
+                context.workspaceId(),
+                truthImport.providerProfileId(),
+                truthImport.currencyCode(),
+                truthImport.statementPeriodStart(),
+                truthImport.statementPeriodEnd());
 
         int itemCount = compare(run, internalSummary.orElse(null), providerTruth.orElse(null));
         ReconciliationRun completed = reconciliationStore.completeRun(context.workspaceId(), run.id(), itemCount);
-        reconciliationStore.markImportReconciled(context.workspaceId(), truthImport.id());
+        reconciliationStore.markImportStatus(context.workspaceId(), truthImport.id(), itemCount == 0 ? "MATCHED" : "MISMATCHED", context.actorId());
         indexReference(context.workspaceId(), "PROVIDER_RECONCILIATION_RUN", completed.id());
         for (ReconciliationItem item : reconciliationStore.listItems(context.workspaceId(), completed.id(), false)) {
             indexReference(context.workspaceId(), "PROVIDER_RECONCILIATION_ITEM", item.id());
@@ -144,6 +150,13 @@ public class ReconciliationService {
         return reconciliationStore.listItems(context.workspaceId(), runId, unresolvedOnly);
     }
 
+    public List<ReconciliationItemAuditEvent> listItemEvents(AccessContext context, UUID itemId) {
+        requireRead(context);
+        ReconciliationItem item = reconciliationStore.findItem(context.workspaceId(), itemId)
+                .orElseThrow(() -> new NotFoundException("Provider reconciliation item was not found."));
+        return reconciliationStore.listItemEvents(context.workspaceId(), item.id());
+    }
+
     @Transactional
     public ReconciliationItem resolveItem(AccessContext context, UUID itemId, String resolutionOutcome, String resolutionNote) {
         requireWrite(context, "provider reconciliation resolution");
@@ -156,6 +169,7 @@ public class ReconciliationService {
         }
         ReconciliationItem resolved = reconciliationStore.resolveItem(context.workspaceId(), itemId, context.actorId(), outcome, resolutionNote.trim());
         reconciliationStore.refreshRunCounts(context.workspaceId(), resolved.reconciliationRunId());
+        refreshImportStatusAfterItemChange(context.workspaceId(), resolved.reconciliationRunId(), context.actorId());
         indexReference(context.workspaceId(), "PROVIDER_RECONCILIATION_ITEM", resolved.id());
         indexReference(context.workspaceId(), "PROVIDER_RECONCILIATION_RUN", resolved.reconciliationRunId());
         return resolved;
@@ -170,8 +184,9 @@ public class ReconciliationService {
         if (!"RESOLVED".equals(existing.status())) {
             throw new BadRequestException("Provider reconciliation item is not resolved.");
         }
-        ReconciliationItem reopened = reconciliationStore.reopenItem(context.workspaceId(), itemId);
+        ReconciliationItem reopened = reconciliationStore.reopenItem(context.workspaceId(), itemId, context.actorId(), reason.trim());
         reconciliationStore.refreshRunCounts(context.workspaceId(), reopened.reconciliationRunId());
+        refreshImportStatusAfterItemChange(context.workspaceId(), reopened.reconciliationRunId(), context.actorId());
         indexReference(context.workspaceId(), "PROVIDER_RECONCILIATION_ITEM", reopened.id());
         indexReference(context.workspaceId(), "PROVIDER_RECONCILIATION_RUN", reopened.reconciliationRunId());
         return reopened;
@@ -206,6 +221,16 @@ public class ReconciliationService {
         itemCount += compareAmount(run, ReconciliationMismatchType.SUBSCRIPTION_REVENUE_MISMATCH, internalSummary, providerTruth,
                 "settledSubscriptionNetRevenueAmountMinor", internalSummary.settledSubscriptionNetRevenueAmountMinor(), providerTruth.settledSubscriptionNetRevenueAmountMinor());
         return itemCount;
+    }
+
+    private void refreshImportStatusAfterItemChange(UUID workspaceId, UUID runId, UUID actorId) {
+        ReconciliationRun run = reconciliationStore.findRun(workspaceId, runId)
+                .orElseThrow(() -> new NotFoundException("Provider reconciliation run was not found."));
+        if (run.unresolvedItemCount() == 0 && run.resolvedItemCount() > 0) {
+            reconciliationStore.markImportStatus(workspaceId, run.truthImportId(), "RESOLVED", actorId);
+        } else if (run.unresolvedItemCount() > 0) {
+            reconciliationStore.markImportStatus(workspaceId, run.truthImportId(), "MISMATCHED", actorId);
+        }
     }
 
     private int compareAmount(ReconciliationRun run, ReconciliationMismatchType mismatchType, ProviderFinancialSummary internalSummary, ProviderTruthSnapshot providerTruth, String fieldName, long internalValue, long providerValue) {

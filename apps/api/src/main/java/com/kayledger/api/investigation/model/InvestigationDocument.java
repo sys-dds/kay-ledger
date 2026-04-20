@@ -24,6 +24,8 @@ public record InvestigationDocument(
         String mismatchType,
         String currencyCode,
         Long amountMinor,
+        String periodStart,
+        String periodEnd,
         Instant occurredAt,
         Map<String, Object> data) {
 
@@ -50,6 +52,6 @@ public record InvestigationDocument(
             Map<String, Object> data) {
         this(documentId, workspaceId, documentType, referenceType, referenceId, providerProfileId, paymentIntentId, refundId, payoutRequestId,
                 disputeId, subscriptionId, providerEventId, externalReference, businessReferenceType, businessReferenceId, status,
-                null, currencyCode, amountMinor, occurredAt, data);
+                null, currencyCode, amountMinor, null, null, occurredAt, data);
     }
 }

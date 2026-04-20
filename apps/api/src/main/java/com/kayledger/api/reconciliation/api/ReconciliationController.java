@@ -20,6 +20,7 @@ import com.kayledger.api.reconciliation.api.ReconciliationRequests.ProviderTruth
 import com.kayledger.api.reconciliation.api.ReconciliationRequests.ReopenReconciliationItemRequest;
 import com.kayledger.api.reconciliation.api.ReconciliationRequests.ResolveReconciliationItemRequest;
 import com.kayledger.api.reconciliation.application.ReconciliationService;
+import com.kayledger.api.reconciliation.model.ReconciliationItemAuditEvent;
 import com.kayledger.api.reconciliation.model.ReconciliationItem;
 import com.kayledger.api.reconciliation.model.ReconciliationRun;
 import com.kayledger.api.shared.api.BadRequestException;
@@ -113,6 +114,14 @@ public class ReconciliationController {
             @RequestParam("runId") UUID runId,
             @RequestParam(value = "unresolvedOnly", defaultValue = "false") boolean unresolvedOnly) {
         return reconciliationService.listItems(accessContextResolver.resolveWorkspace(workspaceSlug, actorKey), runId, unresolvedOnly);
+    }
+
+    @GetMapping("/items/{itemId}/events")
+    List<ReconciliationItemAuditEvent> listItemEvents(
+            @RequestHeader(value = "X-Workspace-Slug", required = false) String workspaceSlug,
+            @RequestHeader(value = "X-Actor-Key", required = false) String actorKey,
+            @PathVariable UUID itemId) {
+        return reconciliationService.listItemEvents(accessContextResolver.resolveWorkspace(workspaceSlug, actorKey), itemId);
     }
 
     @PostMapping("/items/{itemId}/resolve")

@@ -165,6 +165,8 @@ public class OpenSearchInvestigationClient {
                     "mismatchType": {"type": "keyword", "ignore_above": 128},
                     "currencyCode": {"type": "keyword", "ignore_above": 16},
                     "amountMinor": {"type": "long"},
+                    "periodStart": {"type": "date"},
+                    "periodEnd": {"type": "date"},
                     "occurredAt": {"type": "date"},
                     "data": {"type": "object", "enabled": false}
                   }
