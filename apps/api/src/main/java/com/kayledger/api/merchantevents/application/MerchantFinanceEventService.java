@@ -1,6 +1,11 @@
 package com.kayledger.api.merchantevents.application;
 
 import java.nio.charset.StandardCharsets;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -12,6 +17,7 @@ import javax.crypto.spec.SecretKeySpec;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.kayledger.api.access.application.AccessContext;
@@ -27,6 +33,7 @@ import com.kayledger.api.shared.api.BadRequestException;
 import com.kayledger.api.shared.messaging.application.OutboxService;
 
 @Service
+@EnableConfigurationProperties(MerchantFinanceDeliveryProperties.class)
 public class MerchantFinanceEventService {
 
     public static final String EVENT_FINALIZED_STATEMENT_AVAILABLE = "FINALIZED_STATEMENT_AVAILABLE";
@@ -45,18 +52,25 @@ public class MerchantFinanceEventService {
     private final RegionService regionService;
     private final OutboxService outboxService;
     private final ObjectMapper objectMapper;
+    private final MerchantFinanceDeliveryProperties deliveryProperties;
+    private final HttpClient httpClient;
 
     public MerchantFinanceEventService(
             MerchantFinanceEventStore merchantFinanceEventStore,
             AccessPolicy accessPolicy,
             RegionService regionService,
             OutboxService outboxService,
-            ObjectMapper objectMapper) {
+            ObjectMapper objectMapper,
+            MerchantFinanceDeliveryProperties deliveryProperties) {
         this.merchantFinanceEventStore = merchantFinanceEventStore;
         this.accessPolicy = accessPolicy;
         this.regionService = regionService;
         this.outboxService = outboxService;
         this.objectMapper = objectMapper;
+        this.deliveryProperties = deliveryProperties;
+        this.httpClient = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(deliveryProperties.getTimeoutSeconds()))
+                .build();
     }
 
     @Transactional
@@ -86,6 +100,11 @@ public class MerchantFinanceEventService {
 
     @Transactional
     public MerchantFinanceEvent emit(UUID workspaceId, UUID providerProfileId, String currencyCode, UUID accountingPeriodId, String eventType, String sourceType, UUID sourceId, Map<String, Object> payload) {
+        return emit(workspaceId, providerProfileId, currencyCode, accountingPeriodId, eventType, sourceType, sourceId, payload, Instant.now());
+    }
+
+    @Transactional
+    public MerchantFinanceEvent emit(UUID workspaceId, UUID providerProfileId, String currencyCode, UUID accountingPeriodId, String eventType, String sourceType, UUID sourceId, Map<String, Object> payload, Instant occurredAt) {
         if (workspaceId == null || eventType == null || sourceType == null || sourceId == null) {
             throw new BadRequestException("Merchant finance event source is required.");
         }
@@ -101,7 +120,7 @@ public class MerchantFinanceEventService {
                 sourceId,
                 json(safePayload),
                 eventKey,
-                Instant.now());
+                occurredAt == null ? Instant.now() : occurredAt);
         for (MerchantFinanceEndpoint endpoint : merchantFinanceEventStore.matchingEndpoints(workspaceId, providerProfileId, eventType)) {
             String dedupeKey = event.id() + ":" + endpoint.id();
             merchantFinanceEventStore.upsertDelivery(workspaceId, event.id(), endpoint.id(), dedupeKey, signature(endpoint.signingSecretRef(), event.eventKey(), event.payloadJson()));
@@ -121,11 +140,50 @@ public class MerchantFinanceEventService {
         if (deliveryId == null) {
             throw new BadRequestException("deliveryId is required.");
         }
-        return merchantFinanceEventStore.recordAttempt(context.workspaceId(), deliveryId, "PENDING", null, "Delivery redrive requested.");
+        return merchantFinanceEventStore.redriveDelivery(context.workspaceId(), deliveryId);
     }
 
     public MerchantFinanceEventDelivery recordDeliveryAttempt(UUID workspaceId, UUID deliveryId, boolean succeeded, Integer responseStatus, String responseBody) {
         return merchantFinanceEventStore.recordAttempt(workspaceId, deliveryId, succeeded ? "SUCCEEDED" : "FAILED", responseStatus, responseBody);
+    }
+
+    public int processDueDeliveries() {
+        int processed = 0;
+        for (var work : merchantFinanceEventStore.claimDueDeliveries(deliveryProperties.getBatchSize(), deliveryProperties.getMaxAttempts())) {
+            deliver(work);
+            processed++;
+        }
+        return processed;
+    }
+
+    public int processDueDeliveries(AccessContext context) {
+        requireWrite(context, "merchant finance event delivery processing");
+        return processDueDeliveries();
+    }
+
+    private void deliver(MerchantFinanceEventStore.DeliveryWork work) {
+        String requestBody = deliveryPayload(work);
+        try {
+            HttpRequest request = HttpRequest.newBuilder(URI.create(work.endpointUrl()))
+                    .timeout(Duration.ofSeconds(deliveryProperties.getTimeoutSeconds()))
+                    .header("Content-Type", "application/json")
+                    .header("X-Kay-Ledger-Event-Id", work.delivery().merchantFinanceEventId().toString())
+                    .header("X-Kay-Ledger-Event-Type", work.eventType())
+                    .header("X-Kay-Ledger-Delivery-Id", work.delivery().id().toString())
+                    .header("X-Kay-Ledger-Dedupe-Key", work.delivery().dedupeKey())
+                    .header("X-Kay-Ledger-Signature", work.delivery().signatureValue() == null ? "" : work.delivery().signatureValue())
+                    .POST(HttpRequest.BodyPublishers.ofString(requestBody, StandardCharsets.UTF_8))
+                    .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            String body = snippet(response.body());
+            if (response.statusCode() >= 200 && response.statusCode() < 300) {
+                merchantFinanceEventStore.recordDeliverySuccess(work.delivery().workspaceId(), work.delivery().id(), response.statusCode(), body);
+            } else {
+                merchantFinanceEventStore.recordDeliveryFailure(work.delivery().workspaceId(), work.delivery().id(), deliveryProperties.getMaxAttempts(), deliveryProperties.getBackoffSeconds(), response.statusCode(), body, "HTTP " + response.statusCode());
+            }
+        } catch (Exception exception) {
+            merchantFinanceEventStore.recordDeliveryFailure(work.delivery().workspaceId(), work.delivery().id(), deliveryProperties.getMaxAttempts(), deliveryProperties.getBackoffSeconds(), null, null, failureReason(exception));
+        }
     }
 
     private void requireRead(AccessContext context) {
@@ -145,6 +203,36 @@ public class MerchantFinanceEventService {
         } catch (Exception exception) {
             throw new BadRequestException("Merchant finance event payload could not be serialized.");
         }
+    }
+
+    private String deliveryPayload(MerchantFinanceEventStore.DeliveryWork work) {
+        Map<String, Object> envelope = new LinkedHashMap<>();
+        envelope.put("eventId", work.delivery().merchantFinanceEventId());
+        envelope.put("deliveryId", work.delivery().id());
+        envelope.put("eventType", work.eventType());
+        envelope.put("sourceReferenceType", work.sourceReferenceType());
+        envelope.put("sourceReferenceId", work.sourceReferenceId());
+        envelope.put("eventKey", work.eventKey());
+        envelope.put("occurredAt", work.occurredAt());
+        envelope.put("payload", work.payloadJson());
+        return json(envelope);
+    }
+
+    private String snippet(String value) {
+        if (value == null) {
+            return null;
+        }
+        return value.length() > deliveryProperties.getResponseBodyMaxChars()
+                ? value.substring(0, deliveryProperties.getResponseBodyMaxChars())
+                : value;
+    }
+
+    private static String failureReason(Exception exception) {
+        String message = exception.getMessage();
+        if (message == null || message.isBlank()) {
+            return exception.getClass().getSimpleName();
+        }
+        return message.length() > 1000 ? message.substring(0, 1000) : message;
     }
 
     private static String signature(String secretRef, String eventKey, String payloadJson) {

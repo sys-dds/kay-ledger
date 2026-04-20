@@ -12,6 +12,7 @@ import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
 
 import com.kayledger.api.evidence.model.FinanceEvidenceExport;
+import com.kayledger.api.evidence.model.FinanceEvidenceArtifact;
 import com.kayledger.api.evidence.model.FinanceEvidencePack;
 import com.kayledger.api.evidence.model.FinanceEvidencePackItem;
 
@@ -48,6 +49,8 @@ public class FinanceEvidenceStore {
             rs.getObject("id", UUID.class),
             rs.getObject("workspace_id", UUID.class),
             rs.getObject("evidence_pack_id", UUID.class),
+            rs.getObject("artifact_id", UUID.class),
+            rs.getInt("export_version"),
             rs.getString("export_status"),
             rs.getString("artifact_format"),
             rs.getString("artifact_reference"),
@@ -56,6 +59,18 @@ public class FinanceEvidenceStore {
             rs.getString("checksum_value"),
             rs.getObject("generated_by_actor_id", UUID.class),
             instant(rs, "generated_at"),
+            instant(rs, "created_at"));
+
+    private static final RowMapper<FinanceEvidenceArtifact> ARTIFACT_MAPPER = (rs, rowNum) -> new FinanceEvidenceArtifact(
+            rs.getObject("id", UUID.class),
+            rs.getObject("workspace_id", UUID.class),
+            rs.getObject("evidence_pack_id", UUID.class),
+            rs.getString("artifact_format"),
+            rs.getString("artifact_body"),
+            rs.getLong("artifact_size_bytes"),
+            rs.getString("checksum_algorithm"),
+            rs.getString("checksum_value"),
+            rs.getObject("generated_by_actor_id", UUID.class),
             instant(rs, "created_at"));
 
     private final JdbcTemplate jdbcTemplate;
@@ -126,17 +141,33 @@ public class FinanceEvidenceStore {
                 """, ITEM_MAPPER, workspaceId, packId);
     }
 
-    public FinanceEvidenceExport createExport(UUID workspaceId, UUID packId, String format, String artifactReference, long sizeBytes, String checksumAlgorithm, String checksumValue, UUID actorId) {
-        FinanceEvidenceExport export = jdbcTemplate.queryForObject("""
-                INSERT INTO finance_evidence_exports (
-                    workspace_id, evidence_pack_id, artifact_format, artifact_reference, artifact_size_bytes,
+    public FinanceEvidenceArtifact createArtifact(UUID workspaceId, UUID packId, String format, String artifactBody, long sizeBytes, String checksumAlgorithm, String checksumValue, UUID actorId) {
+        return jdbcTemplate.queryForObject("""
+                INSERT INTO finance_evidence_export_artifacts (
+                    workspace_id, evidence_pack_id, artifact_format, artifact_body, artifact_size_bytes,
                     checksum_algorithm, checksum_value, generated_by_actor_id
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (workspace_id, evidence_pack_id, artifact_format) DO UPDATE
-                SET artifact_reference = finance_evidence_exports.artifact_reference
                 RETURNING *
-                """, EXPORT_MAPPER, workspaceId, packId, format, artifactReference, sizeBytes, checksumAlgorithm, checksumValue, actorId);
+                """, ARTIFACT_MAPPER, workspaceId, packId, format, artifactBody, sizeBytes, checksumAlgorithm, checksumValue, actorId);
+    }
+
+    public FinanceEvidenceExport createExport(UUID workspaceId, UUID packId, UUID artifactId, String format, String artifactReference, long sizeBytes, String checksumAlgorithm, String checksumValue, UUID actorId) {
+        int exportVersion = jdbcTemplate.queryForObject("""
+                SELECT COALESCE(MAX(export_version), 0) + 1
+                FROM finance_evidence_exports
+                WHERE workspace_id = ?
+                  AND evidence_pack_id = ?
+                  AND artifact_format = ?
+                """, Integer.class, workspaceId, packId, format);
+        FinanceEvidenceExport export = jdbcTemplate.queryForObject("""
+                INSERT INTO finance_evidence_exports (
+                    workspace_id, evidence_pack_id, artifact_id, export_version, artifact_format, artifact_reference,
+                    artifact_size_bytes, checksum_algorithm, checksum_value, generated_by_actor_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                RETURNING *
+                """, EXPORT_MAPPER, workspaceId, packId, artifactId, exportVersion, format, artifactReference, sizeBytes, checksumAlgorithm, checksumValue, actorId);
         jdbcTemplate.update("""
                 UPDATE finance_evidence_packs
                 SET status = 'EXPORTED'
@@ -154,6 +185,18 @@ public class FinanceEvidenceStore {
                   AND evidence_pack_id = ?
                 ORDER BY generated_at DESC, id
                 """, EXPORT_MAPPER, workspaceId, packId);
+    }
+
+    public Optional<FinanceEvidenceArtifact> artifactForExport(UUID workspaceId, UUID exportId) {
+        return jdbcTemplate.query("""
+                SELECT artifact.*
+                FROM finance_evidence_exports export
+                JOIN finance_evidence_export_artifacts artifact
+                  ON artifact.workspace_id = export.workspace_id
+                 AND artifact.id = export.artifact_id
+                WHERE export.workspace_id = ?
+                  AND export.id = ?
+                """, ARTIFACT_MAPPER, workspaceId, exportId).stream().findFirst();
     }
 
     private static Instant instant(ResultSet rs, String column) throws SQLException {

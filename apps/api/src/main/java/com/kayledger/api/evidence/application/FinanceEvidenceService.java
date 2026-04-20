@@ -19,6 +19,7 @@ import com.kayledger.api.access.model.WorkspaceRole;
 import com.kayledger.api.approval.store.FinancialApprovalStore;
 import com.kayledger.api.close.store.FinancialCloseStore;
 import com.kayledger.api.evidence.model.FinanceEvidenceExport;
+import com.kayledger.api.evidence.model.FinanceEvidenceArtifact;
 import com.kayledger.api.evidence.model.FinanceEvidencePack;
 import com.kayledger.api.evidence.model.FinanceEvidencePackItem;
 import com.kayledger.api.evidence.store.FinanceEvidenceStore;
@@ -107,11 +108,21 @@ public class FinanceEvidenceService {
         }
         String artifactBody = "CSV".equals(format) ? csvArtifact(pack) : jsonArtifact(pack, financeEvidenceStore.listItems(context.workspaceId(), pack.id()));
         String checksum = sha256(artifactBody);
-        return financeEvidenceStore.createExport(
+        FinanceEvidenceArtifact artifact = financeEvidenceStore.createArtifact(
                 context.workspaceId(),
                 pack.id(),
                 format,
-                "finance-evidence://" + pack.id() + "/" + format.toLowerCase(),
+                artifactBody,
+                artifactBody.getBytes(StandardCharsets.UTF_8).length,
+                "SHA-256",
+                checksum,
+                context.actorId());
+        return financeEvidenceStore.createExport(
+                context.workspaceId(),
+                pack.id(),
+                artifact.id(),
+                format,
+                "finance-evidence-artifact:" + artifact.id(),
                 artifactBody.getBytes(StandardCharsets.UTF_8).length,
                 "SHA-256",
                 checksum,
@@ -123,6 +134,12 @@ public class FinanceEvidenceService {
         FinanceEvidencePack pack = financeEvidenceStore.findPack(context.workspaceId(), requireId(packId, "packId"))
                 .orElseThrow(() -> new NotFoundException("Finance evidence pack was not found."));
         return financeEvidenceStore.listExports(context.workspaceId(), pack.id());
+    }
+
+    public FinanceEvidenceArtifact exportArtifact(AccessContext context, UUID exportId) {
+        requireRead(context);
+        return financeEvidenceStore.artifactForExport(context.workspaceId(), requireId(exportId, "exportId"))
+                .orElseThrow(() -> new NotFoundException("Finance evidence export artifact was not found."));
     }
 
     private FinanceEvidencePack finalizedStatementPack(AccessContext context, UUID statementId) {

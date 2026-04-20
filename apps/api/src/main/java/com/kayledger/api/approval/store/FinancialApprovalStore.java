@@ -50,6 +50,9 @@ public class FinancialApprovalStore {
             rs.getObject("approval_request_id", UUID.class),
             rs.getString("execution_status"),
             rs.getObject("executed_by_actor_id", UUID.class),
+            nullableInstant(rs, "started_at"),
+            nullableInstant(rs, "last_attempt_at"),
+            rs.getInt("execution_attempt_count"),
             nullableInstant(rs, "executed_at"),
             rs.getString("failure_reason"),
             instant(rs, "created_at"),
@@ -114,15 +117,40 @@ public class FinancialApprovalStore {
                 """, REQUEST_MAPPER, status, workspaceId, requestId);
     }
 
+    public FinancialApprovalExecutionState markExecutionInProgress(UUID workspaceId, UUID requestId, UUID actorId) {
+        return jdbcTemplate.queryForObject("""
+                UPDATE financial_approval_execution_state execution
+                SET execution_status = 'IN_PROGRESS',
+                    executed_by_actor_id = ?,
+                    started_at = COALESCE(started_at, now()),
+                    last_attempt_at = now(),
+                    execution_attempt_count = execution_attempt_count + 1,
+                    failure_reason = NULL
+                WHERE workspace_id = ?
+                  AND approval_request_id = ?
+                  AND execution_status IN ('PENDING', 'FAILED', 'BLOCKED')
+                  AND EXISTS (
+                      SELECT 1
+                      FROM financial_approval_requests request
+                      WHERE request.workspace_id = execution.workspace_id
+                        AND request.id = execution.approval_request_id
+                        AND request.status = 'APPROVED'
+                  )
+                RETURNING *
+                """, EXECUTION_MAPPER, actorId, workspaceId, requestId);
+    }
+
     public FinancialApprovalRequest markExecuted(UUID workspaceId, UUID requestId, UUID actorId) {
         jdbcTemplate.update("""
                 UPDATE financial_approval_execution_state
                 SET execution_status = 'EXECUTED',
                     executed_by_actor_id = ?,
                     executed_at = now(),
+                    last_attempt_at = now(),
                     failure_reason = NULL
                 WHERE workspace_id = ?
                   AND approval_request_id = ?
+                  AND execution_status = 'IN_PROGRESS'
                 """, actorId, workspaceId, requestId);
         return jdbcTemplate.queryForObject("""
                 UPDATE financial_approval_requests
@@ -132,6 +160,18 @@ public class FinancialApprovalStore {
                   AND status = 'APPROVED'
                 RETURNING *, request_payload_json::text
                 """, REQUEST_MAPPER, workspaceId, requestId);
+    }
+
+    public void markExecutionFailed(UUID workspaceId, UUID requestId, String reason) {
+        jdbcTemplate.update("""
+                UPDATE financial_approval_execution_state
+                SET execution_status = 'FAILED',
+                    last_attempt_at = now(),
+                    failure_reason = ?
+                WHERE workspace_id = ?
+                  AND approval_request_id = ?
+                  AND execution_status <> 'EXECUTED'
+                """, reason, workspaceId, requestId);
     }
 
     public void markBlocked(UUID workspaceId, UUID requestId, String reason) {
