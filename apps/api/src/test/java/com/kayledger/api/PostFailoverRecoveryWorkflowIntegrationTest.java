@@ -3,6 +3,7 @@ package com.kayledger.api;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
@@ -188,6 +189,45 @@ class PostFailoverRecoveryWorkflowIntegrationTest {
             assertThat(action.actionType()).isEqualTo(RegionalRecoveryService.REPLAY_INVESTIGATION_SNAPSHOT);
             assertThat(action.status()).isEqualTo("SUCCEEDED");
         });
+
+        Fixture summaryFixture = fixture(jdbcTemplate, "kay020-provider-summary");
+        fixture(regionBJdbc, summaryFixture);
+        jdbcTemplate.update("INSERT INTO workspace_region_ownership (workspace_id, home_region, ownership_epoch) VALUES (?, 'region-a', 1)", summaryFixture.workspaceId());
+        regionBJdbc.update("INSERT INTO workspace_region_ownership (workspace_id, home_region, ownership_epoch) VALUES (?, 'region-a', 1)", summaryFixture.workspaceId());
+        seedSettledPayment(jdbcTemplate, summaryFixture);
+        AccessContext summaryContext = paymentWrite(summaryFixture);
+
+        try (KafkaConsumer<String, String> consumer = consumer()) {
+            consumer.subscribe(List.of("kay-ledger.kay019.failover.replication"));
+            consumer.poll(Duration.ofMillis(200));
+            var action = regionalRecoveryService.requestRecovery(summaryContext, new RecoveryCommand(
+                    null,
+                    RegionalRecoveryService.REPLAY_PROVIDER_SUMMARY_SNAPSHOT,
+                    RegionReplicationService.PROVIDER_SUMMARY_SNAPSHOT,
+                    summaryFixture.providerProfileId().toString()));
+            assertThat(action.status()).isEqualTo("AWAITING_PEER_APPLY");
+
+            String payload = pollProviderSummarySnapshotPayload(consumer);
+            regionBReplication(regionBJdbc).apply(payload);
+            String confirmation = pollRecoveryConfirmationPayload(consumer);
+            regionReplicationService.apply(confirmation);
+        }
+
+        assertThat(regionBJdbc.queryForObject("""
+                SELECT count(*)
+                FROM region_provider_summary_snapshots
+                WHERE workspace_id = ?
+                  AND target_region = 'region-b'
+                  AND provider_profile_id = ?
+                  AND currency_code = 'USD'
+                """, Integer.class, summaryFixture.workspaceId(), summaryFixture.providerProfileId())).isEqualTo(1);
+        assertThat(regionalRecoveryService.listActions(summaryContext)).anySatisfy(action -> {
+            assertThat(action.actionType()).isEqualTo(RegionalRecoveryService.REPLAY_PROVIDER_SUMMARY_SNAPSHOT);
+            assertThat(action.status()).isEqualTo("SUCCEEDED");
+            assertThat(action.peerAppliedRegion()).isEqualTo("region-b");
+            assertThat(action.peerAppliedAt()).isNotNull();
+            assertThat(action.peerConfirmationEventId()).isNotNull();
+        });
     }
 
     private String pollReplicationPayload(KafkaConsumer<String, String> consumer) {
@@ -196,6 +236,10 @@ class PostFailoverRecoveryWorkflowIntegrationTest {
 
     private String pollInvestigationSnapshotPayload(KafkaConsumer<String, String> consumer) {
         return pollPayload(consumer, RegionReplicationService.INVESTIGATION_READ_SNAPSHOT);
+    }
+
+    private String pollProviderSummarySnapshotPayload(KafkaConsumer<String, String> consumer) {
+        return pollPayload(consumer, RegionReplicationService.PROVIDER_SUMMARY_SNAPSHOT);
     }
 
     private String pollRecoveryConfirmationPayload(KafkaConsumer<String, String> consumer) {
@@ -260,7 +304,7 @@ class PostFailoverRecoveryWorkflowIntegrationTest {
     }
 
     private Fixture fixture(JdbcTemplate jdbc, String slug) {
-        Fixture fixture = new Fixture(UUID.randomUUID(), slug, UUID.randomUUID(), UUID.randomUUID());
+        Fixture fixture = new Fixture(UUID.randomUUID(), slug, UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID());
         fixture(jdbc, fixture);
         return fixture;
     }
@@ -268,7 +312,36 @@ class PostFailoverRecoveryWorkflowIntegrationTest {
     private void fixture(JdbcTemplate jdbc, Fixture fixture) {
         jdbc.update("INSERT INTO workspaces (id, slug, display_name) VALUES (?, ?, ?)", fixture.workspaceId(), fixture.slug(), fixture.slug());
         jdbc.update("INSERT INTO actors (id, actor_key, display_name) VALUES (?, ?, ?)", fixture.ownerId(), fixture.slug() + "-owner", "Owner");
+        jdbc.update("INSERT INTO actors (id, actor_key, display_name) VALUES (?, ?, ?)", fixture.providerActorId(), fixture.slug() + "-provider", "Provider");
+        jdbc.update("INSERT INTO actors (id, actor_key, display_name) VALUES (?, ?, ?)", fixture.customerActorId(), fixture.slug() + "-customer", "Customer");
         jdbc.update("INSERT INTO workspace_memberships (id, workspace_id, actor_id, role) VALUES (?, ?, ?, 'OWNER')", fixture.membershipId(), fixture.workspaceId(), fixture.ownerId());
+        jdbc.update("INSERT INTO workspace_memberships (id, workspace_id, actor_id, role) VALUES (?, ?, ?, 'PROVIDER')", UUID.randomUUID(), fixture.workspaceId(), fixture.providerActorId());
+        jdbc.update("INSERT INTO workspace_memberships (id, workspace_id, actor_id, role) VALUES (?, ?, ?, 'CUSTOMER')", UUID.randomUUID(), fixture.workspaceId(), fixture.customerActorId());
+        jdbc.update("INSERT INTO provider_profiles (id, workspace_id, actor_id, display_name) VALUES (?, ?, ?, 'Provider')", fixture.providerProfileId(), fixture.workspaceId(), fixture.providerActorId());
+        jdbc.update("INSERT INTO customer_profiles (id, workspace_id, actor_id, display_name) VALUES (?, ?, ?, 'Customer')", fixture.customerProfileId(), fixture.workspaceId(), fixture.customerActorId());
+    }
+
+    private void seedSettledPayment(JdbcTemplate jdbc, Fixture fixture) {
+        jdbc.update("""
+                INSERT INTO offerings (id, workspace_id, provider_profile_id, title, status, duration_minutes, offer_type, min_notice_minutes, max_notice_days, slot_interval_minutes)
+                VALUES (?, ?, ?, 'KAY020 Provider Summary', 'PUBLISHED', 60, 'SCHEDULED_TIME', 0, 30, 30)
+                """, fixture.offeringId(), fixture.workspaceId(), fixture.providerProfileId());
+        UUID bookingId = UUID.randomUUID();
+        jdbc.update("""
+                INSERT INTO bookings (id, workspace_id, offering_id, provider_profile_id, customer_profile_id, offer_type, scheduled_start_at, scheduled_end_at, quantity_reserved, hold_expires_at)
+                VALUES (?, ?, ?, ?, ?, 'SCHEDULED_TIME', ?, ?, 1, ?)
+                """, bookingId, fixture.workspaceId(), fixture.offeringId(), fixture.providerProfileId(), fixture.customerProfileId(),
+                java.sql.Timestamp.from(Instant.parse("2036-06-01T10:00:00Z")),
+                java.sql.Timestamp.from(Instant.parse("2036-06-01T11:00:00Z")),
+                java.sql.Timestamp.from(Instant.parse("2036-06-01T09:00:00Z")));
+        jdbc.update("""
+                INSERT INTO payment_intents (
+                    id, workspace_id, booking_id, provider_profile_id, status, currency_code,
+                    gross_amount_minor, fee_amount_minor, net_amount_minor,
+                    authorized_amount_minor, captured_amount_minor, settled_amount_minor, external_reference
+                )
+                VALUES (?, ?, ?, ?, 'SETTLED', 'USD', 12000, 1200, 10800, 12000, 12000, 12000, 'kay020-provider-summary')
+                """, UUID.randomUUID(), fixture.workspaceId(), bookingId, fixture.providerProfileId());
     }
 
     private UUID providerCallbackFixture(JdbcTemplate jdbc, Fixture fixture) {
@@ -295,6 +368,6 @@ class PostFailoverRecoveryWorkflowIntegrationTest {
         return new AccessContext(fixture.workspaceId(), fixture.slug(), fixture.ownerId(), fixture.slug() + "-owner", fixture.membershipId(), "OWNER", Set.of("PAYMENT_READ", "PAYMENT_WRITE"), Set.of());
     }
 
-    private record Fixture(UUID workspaceId, String slug, UUID ownerId, UUID membershipId) {
+    private record Fixture(UUID workspaceId, String slug, UUID ownerId, UUID membershipId, UUID providerActorId, UUID customerActorId, UUID providerProfileId, UUID customerProfileId, UUID offeringId) {
     }
 }

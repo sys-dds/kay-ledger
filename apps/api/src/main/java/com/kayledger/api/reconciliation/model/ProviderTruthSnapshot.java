@@ -4,7 +4,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.util.UUID;
 
-public record ReconciliationRun(
+public record ProviderTruthSnapshot(
         UUID id,
         UUID workspaceId,
         UUID truthImportId,
@@ -13,16 +13,14 @@ public record ReconciliationRun(
         LocalDate statementPeriodStart,
         LocalDate statementPeriodEnd,
         String sourceReference,
-        String status,
-        UUID startedByActorId,
-        Instant startedAt,
-        Instant completedAt,
-        int unresolvedItemCount,
-        int resolvedItemCount,
+        long settledGrossAmountMinor,
+        long feeAmountMinor,
+        long netEarningsAmountMinor,
+        long payoutSucceededAmountMinor,
+        long refundAmountMinor,
+        long activeDisputeExposureAmountMinor,
+        long settledSubscriptionNetRevenueAmountMinor,
+        String providerPayloadJson,
         Instant createdAt,
         Instant updatedAt) {
-
-    public int mismatchCount() {
-        return unresolvedItemCount + resolvedItemCount;
-    }
 }

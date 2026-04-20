@@ -162,6 +162,7 @@ public class OpenSearchInvestigationClient {
                     "businessReferenceType": {"type": "keyword", "ignore_above": 128},
                     "businessReferenceId": {"type": "keyword", "ignore_above": 256},
                     "status": {"type": "keyword", "ignore_above": 128},
+                    "mismatchType": {"type": "keyword", "ignore_above": 128},
                     "currencyCode": {"type": "keyword", "ignore_above": 16},
                     "amountMinor": {"type": "long"},
                     "occurredAt": {"type": "date"},

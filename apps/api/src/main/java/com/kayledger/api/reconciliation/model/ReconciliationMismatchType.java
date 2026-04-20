@@ -1,0 +1,13 @@
+package com.kayledger.api.reconciliation.model;
+
+public enum ReconciliationMismatchType {
+    MISSING_INTERNAL_SUMMARY,
+    MISSING_PROVIDER_TRUTH,
+    SETTLED_GROSS_MISMATCH,
+    FEE_MISMATCH,
+    NET_EARNINGS_MISMATCH,
+    PAYOUT_MISMATCH,
+    REFUND_MISMATCH,
+    DISPUTE_EXPOSURE_MISMATCH,
+    SUBSCRIPTION_REVENUE_MISMATCH
+}

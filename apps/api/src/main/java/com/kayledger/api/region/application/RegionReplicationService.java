@@ -6,6 +6,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -61,35 +62,43 @@ public class RegionReplicationService {
         publishInvestigationDocument(document, null);
     }
 
-    public void publishInvestigationDocument(InvestigationDocument document, UUID recoveryActionId) {
+    public int publishInvestigationDocument(InvestigationDocument document, UUID recoveryActionId) {
         if (!regionProperties.isReplicationProducerEnabled()) {
-            return;
+            return 0;
         }
+        int published = 0;
         for (String peerRegion : regionProperties.getPeerRegionIds()) {
-            publish(INVESTIGATION_READ_SNAPSHOT, document.workspaceId(), peerRegion, recoveryPayload("document", document, recoveryActionId, "REPLAY_INVESTIGATION_SNAPSHOT", document.referenceType(), document.referenceId().toString()));
+            if (publish(INVESTIGATION_READ_SNAPSHOT, document.workspaceId(), peerRegion, recoveryPayload("document", document, recoveryActionId, "REPLAY_INVESTIGATION_SNAPSHOT", document.referenceType(), document.referenceId().toString()), recoveryActionId != null)) {
+                published++;
+            }
         }
+        return published;
     }
 
     public void publishProviderSummary(ProviderFinancialSummary summary) {
         publishProviderSummary(summary, null);
     }
 
-    public void publishProviderSummary(ProviderFinancialSummary summary, UUID recoveryActionId) {
+    public int publishProviderSummary(ProviderFinancialSummary summary, UUID recoveryActionId) {
         if (!regionProperties.isReplicationProducerEnabled()) {
-            return;
+            return 0;
         }
+        int published = 0;
         for (String peerRegion : regionProperties.getPeerRegionIds()) {
-            publish(PROVIDER_SUMMARY_SNAPSHOT, summary.workspaceId(), peerRegion, recoveryPayload("summary", summary, recoveryActionId, "REPLAY_PROVIDER_SUMMARY_SNAPSHOT", PROVIDER_SUMMARY_SNAPSHOT, summary.providerProfileId().toString()));
+            if (publish(PROVIDER_SUMMARY_SNAPSHOT, summary.workspaceId(), peerRegion, recoveryPayload("summary", summary, recoveryActionId, "REPLAY_PROVIDER_SUMMARY_SNAPSHOT", PROVIDER_SUMMARY_SNAPSHOT, summary.providerProfileId().toString()), recoveryActionId != null)) {
+                published++;
+            }
         }
+        return published;
     }
 
     public void publishOwnershipTransfer(UUID workspaceId, String fromRegion, String toRegion, long priorEpoch, long newEpoch, String triggerMode, UUID actorId) {
         publishOwnershipTransfer(workspaceId, fromRegion, toRegion, priorEpoch, newEpoch, triggerMode, actorId, null);
     }
 
-    public void publishOwnershipTransfer(UUID workspaceId, String fromRegion, String toRegion, long priorEpoch, long newEpoch, String triggerMode, UUID actorId, UUID recoveryActionId) {
+    public int publishOwnershipTransfer(UUID workspaceId, String fromRegion, String toRegion, long priorEpoch, long newEpoch, String triggerMode, UUID actorId, UUID recoveryActionId) {
         if (!regionProperties.isReplicationProducerEnabled()) {
-            return;
+            return 0;
         }
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("fromRegion", fromRegion);
@@ -99,9 +108,13 @@ public class RegionReplicationService {
         payload.put("triggerMode", triggerMode);
         payload.put("requestedByActorId", actorId == null ? null : actorId.toString());
         putRecovery(payload, recoveryActionId, "REPLAY_OWNERSHIP_TRANSFER", "WORKSPACE", workspaceId.toString());
+        int published = 0;
         for (String peerRegion : regionProperties.getPeerRegionIds()) {
-            publish(WORKSPACE_OWNERSHIP_TRANSFER, workspaceId, peerRegion, payload);
+            if (publish(WORKSPACE_OWNERSHIP_TRANSFER, workspaceId, peerRegion, payload, recoveryActionId != null)) {
+                published++;
+            }
         }
+        return published;
     }
 
     @Transactional
@@ -206,12 +219,18 @@ public class RegionReplicationService {
         return regionStore.replicationCheckpoints(regionProperties.getLocalRegionId());
     }
 
-    private void publish(String streamName, UUID workspaceId, String targetRegion, Map<String, Object> payload) {
+    private boolean publish(String streamName, UUID workspaceId, String targetRegion, Map<String, Object> payload, boolean failOnPublishFailure) {
         if (kafkaTemplate == null) {
-            return;
+            if (failOnPublishFailure) {
+                throw new IllegalStateException("Regional recovery replication publisher is unavailable.");
+            }
+            return false;
         }
         if (regionFaultService.active(workspaceId, RegionFaultService.REGIONAL_REPLICATION_PUBLISH_BLOCK)) {
-            return;
+            if (failOnPublishFailure) {
+                throw new IllegalStateException("Regional recovery replication publish is blocked by active regional fault.");
+            }
+            return false;
         }
         regionFaultService.simulateDelayIfActive(workspaceId, RegionFaultService.REGIONAL_REPLICATION_PUBLISH_DELAY);
         RegionReplicationEvent event = new RegionReplicationEvent(
@@ -224,9 +243,23 @@ public class RegionReplicationService {
                 Instant.now(),
                 payload);
         try {
-            kafkaTemplate.send(regionProperties.getReplicationTopic(), workspaceId.toString(), writeJson(event));
+            var send = kafkaTemplate.send(regionProperties.getReplicationTopic(), workspaceId.toString(), writeJson(event));
+            if (failOnPublishFailure) {
+                send.get(10, TimeUnit.SECONDS);
+            }
+            return true;
         } catch (RuntimeException exception) {
             log.warn("Regional replication publish failed for stream {} workspace {} target {}", streamName, workspaceId, targetRegion, exception);
+            if (failOnPublishFailure) {
+                throw exception;
+            }
+            return false;
+        } catch (Exception exception) {
+            log.warn("Regional replication publish failed for stream {} workspace {} target {}", streamName, workspaceId, targetRegion, exception);
+            if (failOnPublishFailure) {
+                throw new IllegalStateException("Regional recovery replication publish failed.", exception);
+            }
+            return false;
         }
     }
 

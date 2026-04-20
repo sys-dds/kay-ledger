@@ -80,11 +80,14 @@ public class ReportingService {
     }
 
     @Transactional
-    public List<ProviderFinancialSummary> replayProviderSummarySnapshot(UUID workspaceId, UUID recoveryActionId) {
+    public int replayProviderSummarySnapshot(UUID workspaceId, UUID recoveryActionId) {
         reportingStore.refreshProviderSummaries(workspaceId);
         List<ProviderFinancialSummary> summaries = reportingStore.listProviderSummaries(workspaceId);
-        summaries.forEach(summary -> regionReplicationService.publishProviderSummary(summary, recoveryActionId));
-        return summaries;
+        int published = 0;
+        for (ProviderFinancialSummary summary : summaries) {
+            published += regionReplicationService.publishProviderSummary(summary, recoveryActionId);
+        }
+        return published;
     }
 
     public List<ProviderFinancialSummary> listSummaries(AccessContext context) {

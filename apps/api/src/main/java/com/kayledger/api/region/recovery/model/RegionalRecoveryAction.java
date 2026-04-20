@@ -14,6 +14,9 @@ public record RegionalRecoveryAction(
         UUID requestedByActorId,
         String resultJson,
         String failureReason,
+        String peerAppliedRegion,
+        Instant peerAppliedAt,
+        UUID peerConfirmationEventId,
         Instant createdAt,
         Instant updatedAt,
         Instant completedAt) {
