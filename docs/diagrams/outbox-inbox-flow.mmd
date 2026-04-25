@@ -1,0 +1,9 @@
+sequenceDiagram
+participant Service
+participant DB
+participant Kafka
+participant Consumer
+Service->>DB: write state + outbox
+DB->>Kafka: relay
+Kafka->>Consumer: deliver
+Consumer->>DB: inbox dedupe

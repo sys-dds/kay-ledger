@@ -1,0 +1,8 @@
+sequenceDiagram
+participant API
+participant Temporal
+participant Activity
+participant DB
+API->>Temporal: start workflow
+Temporal->>Activity: run activity
+Activity->>DB: persist progress

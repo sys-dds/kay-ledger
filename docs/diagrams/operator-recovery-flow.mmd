@@ -1,0 +1,8 @@
+flowchart TD
+Alert --> Investigation
+Investigation --> Decision{Approval needed?}
+Decision --> Approval
+Decision --> Repair
+Approval --> Workflow
+Workflow --> Evidence
+Repair --> Evidence

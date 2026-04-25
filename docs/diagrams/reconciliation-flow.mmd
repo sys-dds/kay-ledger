@@ -1,0 +1,7 @@
+flowchart TB
+Internal[Internal Truth] --> Compare
+Provider[Provider Truth] --> Compare
+Compare --> Match
+Compare --> Mismatch
+Mismatch --> Repair
+Repair --> Evidence

@@ -1,0 +1,10 @@
+flowchart LR
+Buyer --> API[Kay-Ledger API]
+Merchant --> API
+Operator --> API
+Provider --> API
+API --> Postgres[(PostgreSQL)]
+API --> Kafka[(Kafka)]
+API --> Temporal[(Temporal)]
+API --> Search[(OpenSearch)]
+API --> Storage[(S3 / MinIO)]
